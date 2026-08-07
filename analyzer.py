@@ -255,4 +255,16 @@ def calculate_rug_risk(
             score += 12
 
             warnings.append(
-                f"En büyük holder yüksek
+                elif top1 >= 15:
+
+    score += 12
+
+    warnings.append(
+        f"En büyük holder yüksek: %{top1:.1f}"
+    )
+
+elif top1 < 10:
+
+    positives.append(
+        "En büyük holder payı düşük"
+    )
