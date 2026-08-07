@@ -27,8 +27,11 @@ from report import (
     build_alert_report,
     build_scan_error,
 )
-from hunter import discover_candidates
 
+from hunter import (
+    discover_candidates,
+    discover_flash_candidates,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,6 +45,7 @@ SOLANA_ADDRESS_RE = re.compile(
 )
 
 _seen_alerts: set[str] = set()
+_seen_flash_alerts: set[str] = set()
 
 
 def is_owner(
