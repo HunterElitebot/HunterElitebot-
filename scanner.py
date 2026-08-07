@@ -16,7 +16,6 @@ from config import (
     RETRY_DELAY,
 )
 
-
 logger = logging.getLogger("HunterElite.Scanner")
 
 
@@ -67,9 +66,7 @@ class RetrySession:
             1,
             MAX_RETRY + 1,
         ):
-
             try:
-
                 response = self.session.get(
                     url,
                     timeout=REQUEST_TIMEOUT,
@@ -176,8 +173,7 @@ class DexScreenerClient:
                         "",
                     )
                 ).lower()
-                ==
-                "solana"
+                == "solana"
             )
         ]
 
@@ -212,13 +208,11 @@ class DexScreenerClient:
         for url in discovery_urls:
 
             try:
-
                 data = self.http.get_json_any(
                     url
                 )
 
             except Exception as exc:
-
                 logger.warning(
                     "Discovery feed failed "
                     "url=%s error=%s",
@@ -318,11 +312,9 @@ def pair_age_minutes(
     return max(
         (
             time.time()
-            -
-            timestamp
+            - timestamp
         )
-        /
-        60.0,
+        / 60.0,
         0.0,
     )
 
@@ -344,9 +336,7 @@ def pair_age_text(
     if minutes < 1440:
         return f"{minutes / 60:.1f} saat"
 
-    return (
-        f"{minutes / 1440:.1f} gün"
-    )
+    return f"{minutes / 1440:.1f} gün"
 
 
 def normalize_pair(
@@ -493,8 +483,7 @@ def normalize_pair(
 
         "liquidity_mc_ratio": (
             liquidity
-            /
-            market_cap
+            / market_cap
             if market_cap > 0
             else None
         ),
@@ -515,7 +504,6 @@ def scan_token(
     }
 
     try:
-
         pair = (
             DexScreenerClient()
             .get_best_pair(
@@ -525,28 +513,22 @@ def scan_token(
 
         if pair is None:
 
-            result[
-                "errors"
-            ].append(
+            result["errors"].append(
                 "DexScreener üzerinde "
                 "Solana pair bulunamadı."
             )
 
         else:
 
-            result[
-                "pair"
-            ] = pair
+            result["pair"] = pair
 
-            result[
-                "token"
-            ] = normalize_pair(
-                pair
+            result["token"] = (
+                normalize_pair(
+                    pair
+                )
             )
 
-            result[
-                "success"
-            ] = True
+            result["success"] = True
 
     except Exception as exc:
 
@@ -554,17 +536,13 @@ def scan_token(
             "DexScreener tarama hatası"
         )
 
-        result[
-            "errors"
-        ].append(
+        result["errors"].append(
             f"DexScreener hatası: {exc}"
         )
 
     try:
 
-        result[
-            "rug"
-        ] = (
+        result["rug"] = (
             RugCheckClient()
             .get_report(
                 contract
@@ -578,9 +556,7 @@ def scan_token(
             exc,
         )
 
-        result[
-            "errors"
-        ].append(
+        result["errors"].append(
             f"RugCheck hatası: {exc}"
         )
 
