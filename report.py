@@ -34,18 +34,6 @@ def percent(
         return "Veri yok"
 
 
-def ratio_percent(
-    value: Optional[float],
-) -> str:
-    if value is None:
-        return "Veri yok"
-
-    try:
-        return f"%{float(value) * 100:.1f}"
-    except (TypeError, ValueError):
-        return "Veri yok"
-
-
 def bar(
     score: int,
     blocks: int = 10,
@@ -72,36 +60,6 @@ def bar(
         +
         "░" * (blocks - filled)
     )
-
-
-def risk_emoji(
-    score: int,
-) -> str:
-    if score <= 20:
-        return "🟢"
-
-    if score <= 40:
-        return "🟡"
-
-    if score <= 65:
-        return "🟠"
-
-    return "🔴"
-
-
-def score_emoji(
-    score: int,
-) -> str:
-    if score >= 80:
-        return "🟢"
-
-    if score >= 65:
-        return "🟡"
-
-    if score >= 50:
-        return "🟠"
-
-    return "🔴"
 
 
 def clean_lines(
@@ -157,11 +115,6 @@ def build_report(
         or {}
     )
 
-    decision = (
-        analysis.get("decision")
-        or {}
-    )
-
     elite = (
         analysis.get("elite")
         or {}
@@ -172,64 +125,19 @@ def build_report(
         or {}
     )
 
-    rug_score = int(
-        rug.get("score")
-        or 0
+    x100 = (
+        analysis.get("x100")
+        or {}
     )
 
-    pump_score = int(
-        pump.get("score")
-        or 0
+    decision = (
+        analysis.get("decision")
+        or {}
     )
 
-    confidence = int(
-        analysis.get("confidence")
-        or 0
-    )
-
-    momentum_score = int(
-        pump.get("momentum_score")
-        or 0
-    )
-
-    holder_score = int(
-        pump.get("holder_score")
-        or 0
-    )
-
-    elite_score = int(
-        elite.get("score")
-        or 0
-    )
-
-    elite_label = str(
-        elite.get("label")
-        or "Bilinmiyor"
-    )
-
-    elite_emoji = str(
-        elite.get("emoji")
-        or "⚪"
-    )
-
-    elite_watch = str(
-        elite.get("watch")
-        or "Bilinmiyor"
-    )
-
-    gem_score = int(
-        gem.get("score")
-        or 0
-    )
-
-    gem_label = str(
-        gem.get("label")
-        or "Bilinmiyor"
-    )
-
-    gem_emoji = str(
-        gem.get("emoji")
-        or "⚪"
+    plan = (
+        analysis.get("trade_plan")
+        or {}
     )
 
     buy_ratio = token.get(
@@ -251,20 +159,8 @@ def build_report(
         ):
             buy_percent = None
 
-    top1 = rug.get(
-        "top1"
-    )
-
-    top5 = rug.get(
-        "top5"
-    )
-
-    top10 = rug.get(
-        "top10"
-    )
-
     report = (
-        "🛡 HUNTERELITE V4.4\n"
+        "🛡 HUNTERELITE V5 FINAL\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
 
         f"🪙 {token.get('name', 'Bilinmiyor')} "
@@ -272,45 +168,226 @@ def build_report(
 
         f"⏱ Yaş: {token.get('age_text', 'Bilinmiyor')}\n\n"
 
-        f"{risk_emoji(rug_score)} RUG RİSKİ\n"
-        f"{rug_score}/100  {bar(rug_score)}\n"
+        f"🛡 RUG RİSKİ\n"
+        f"{rug.get('score', 0)}/100  "
+        f"{bar(rug.get('score', 0))}\n"
         f"{rug.get('label', 'Bilinmiyor')}\n\n"
 
-        "🚀 PUMP POTANSİYELİ\n"
-        f"{pump_score}/100  {bar(pump_score)}\n"
+        f"🚀 PUMP POTANSİYELİ\n"
+        f"{pump.get('score', 0)}/100  "
+        f"{bar(pump.get('score', 0))}\n"
         f"{pump.get('label', 'Bilinmiyor')}\n\n"
 
-        "⚡ MOMENTUM SCORE\n"
-        f"{score_emoji(momentum_score)} "
-        f"{momentum_score}/100  "
-        f"{bar(momentum_score)}\n"
-
+        f"⚡ MOMENTUM SCORE\n"
+        f"{pump.get('momentum_score', 0)}/100  "
+        f"{bar(pump.get('momentum_score', 0))}\n"
         f"{pump.get('momentum', 'Bilinmiyor')}\n\n"
 
-        "🐋 HOLDER SCORE\n"
-        f"{score_emoji(holder_score)} "
-        f"{holder_score}/100  "
-        f"{bar(holder_score)}\n"
-
+        f"🐋 HOLDER SCORE\n"
+        f"{pump.get('holder_score', 0)}/100  "
+        f"{bar(pump.get('holder_score', 0))}\n"
         f"{pump.get('holder_label', 'Bilinmiyor')}\n\n"
 
-        "👑 ELITE SCORE\n"
-        f"{elite_emoji} "
-        f"{elite_score}/100  "
-        f"{bar(elite_score)}\n"
+        f"👑 ELITE SCORE\n"
+        f"{elite.get('emoji', '⚪')} "
+        f"{elite.get('score', 0)}/100  "
+        f"{bar(elite.get('score', 0))}\n"
+        f"{elite.get('label', 'Bilinmiyor')}\n"
+        f"🎯 Öncelik: {elite.get('watch', 'Bilinmiyor')}\n\n"
 
-        f"{elite_label}\n"
-        f"🎯 Öncelik: {elite_watch}\n\n"
+        f"💎 GEM SCORE\n"
+        f"{gem.get('emoji', '⚪')} "
+        f"{gem.get('score', 0)}/100  "
+        f"{bar(gem.get('score', 0))}\n"
+        f"{gem.get('label', 'Bilinmiyor')}\n\n"
 
-        "💎 GEM SCORE\n"
-        f"{gem_emoji} "
-        f"{gem_score}/100  "
-        f"{bar(gem_score)}\n"
+        f"🔥 100X POTANSİYEL\n"
+        f"{x100.get('score', 0)}/100  "
+        f"{bar(x100.get('score', 0))}\n"
+        f"{x100.get('label', 'Bilinmiyor')}\n\n"
 
-        f"{gem_label}\n\n"
+        f"🎯 GENEL GÜVEN\n"
+        f"{analysis.get('confidence', 0)}/100  "
+        f"{bar(analysis.get('confidence', 0))}\n\n"
 
-        "🎯 GENEL GÜVEN\n"
-        f"{confidence}/100  "
-        f"{bar(confidence)}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"{decision.get('emoji', '⚪')} KARAR\n"
+        f"{decision.get('decision', 'VERİ YETERSİZ')}\n"
+        f"↳ {decision.get('reason', 'Karar üretilemedi')}\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
 
-        "━━━━━━━━━━━━━━━━━━\
+        "🎯 TRADE PLAN\n"
+        f"Durum: {plan.get('status', 'VERİ YOK')}\n"
+
+        f"🟢 Giriş Bölgesi: "
+        f"{money(plan.get('entry_low'))} - "
+        f"{money(plan.get('entry_high'))} MC\n"
+
+        f"🛑 Stop: "
+        f"{money(plan.get('stop'))} MC\n"
+
+        f"🥉 TP1: "
+        f"{money(plan.get('tp1'))} MC\n"
+
+        f"🥈 TP2: "
+        f"{money(plan.get('tp2'))} MC\n"
+
+        f"🥇 TP3: "
+        f"{money(plan.get('tp3'))} MC\n\n"
+
+        "📊 PİYASA VERİSİ\n"
+
+        f"💵 Fiyat: "
+        f"${token.get('price_usd', 0)}\n"
+
+        f"📈 Market Cap: "
+        f"{money(token.get('market_cap_usd'))}\n"
+
+        f"🎯 FDV: "
+        f"{money(token.get('fdv_usd'))}\n"
+
+        f"💧 Likidite: "
+        f"{money(token.get('liquidity_usd'))}\n"
+
+        f"📦 Hacim 5 dk: "
+        f"{money(token.get('volume_5m'))}\n"
+
+        f"📦 Hacim 1 saat: "
+        f"{money(token.get('volume_1h'))}\n"
+
+        f"🟢 Buy 5 dk: "
+        f"{token.get('buys_5m', 0)}\n"
+
+        f"🔴 Sell 5 dk: "
+        f"{token.get('sells_5m', 0)}\n"
+
+        f"📊 Buy oranı: "
+        f"{percent(buy_percent)}\n\n"
+
+        "🐋 HOLDER DAĞILIMI\n"
+
+        f"Top 1: "
+        f"{percent(rug.get('top1'))}\n"
+
+        f"Top 5: "
+        f"{percent(rug.get('top5'))}\n"
+
+        f"Top 10: "
+        f"{percent(rug.get('top10'))}\n\n"
+
+        "✅ GÜÇLÜ YANLAR\n"
+
+        f"{clean_lines(analysis.get('positives', []), 7, '•')}\n\n"
+
+        "⚠️ RİSKLER\n"
+
+        f"{clean_lines(analysis.get('warnings', []), 9, '•')}\n\n"
+
+        "━━━━━━━━━━━━━━━━━━\n"
+
+        "⚠️ HunterElite filtreleme ve karar destek aracıdır. "
+        "100X skoru ve Trade Plan garanti değildir."
+    )
+
+    return report[:4000]
+
+
+def build_alert_report(
+    token: Dict[str, Any],
+    analysis: Dict[str, Any],
+) -> str:
+
+    rug = (
+        analysis.get("rug")
+        or {}
+    )
+
+    pump = (
+        analysis.get("pump")
+        or {}
+    )
+
+    elite = (
+        analysis.get("elite")
+        or {}
+    )
+
+    gem = (
+        analysis.get("gem")
+        or {}
+    )
+
+    x100 = (
+        analysis.get("x100")
+        or {}
+    )
+
+    plan = (
+        analysis.get("trade_plan")
+        or {}
+    )
+
+    return (
+        "🚨 HUNTER ALERT\n\n"
+
+        f"🪙 {token.get('name', 'Bilinmiyor')} "
+        f"({token.get('symbol', '?')})\n"
+
+        f"📈 MC: "
+        f"{money(token.get('market_cap_usd'))}\n"
+
+        f"💧 Likidite: "
+        f"{money(token.get('liquidity_usd'))}\n"
+
+        f"⏱ Yaş: "
+        f"{token.get('age_text', 'Bilinmiyor')}\n\n"
+
+        f"🛡 Rug: "
+        f"{rug.get('score', 0)}/100\n"
+
+        f"⚡ Momentum: "
+        f"{pump.get('momentum_score', 0)}/100\n"
+
+        f"🐋 Holder: "
+        f"{pump.get('holder_score', 0)}/100\n"
+
+        f"👑 Elite: "
+        f"{elite.get('score', 0)}/100\n"
+
+        f"💎 Gem: "
+        f"{gem.get('score', 0)}/100\n"
+
+        f"🔥 100X: "
+        f"{x100.get('score', 0)}/100\n\n"
+
+        f"🎯 {plan.get('status', 'İZLE')}\n\n"
+
+        f"🟢 Giriş: "
+        f"{money(plan.get('entry_low'))} - "
+        f"{money(plan.get('entry_high'))} MC\n"
+
+        f"🛑 Stop: "
+        f"{money(plan.get('stop'))} MC\n"
+
+        f"🥉 TP1: "
+        f"{money(plan.get('tp1'))} MC\n"
+
+        f"🥈 TP2: "
+        f"{money(plan.get('tp2'))} MC\n"
+
+        f"🥇 TP3: "
+        f"{money(plan.get('tp3'))} MC\n\n"
+
+        "⚠️ Alarm güçlü aday filtresidir; "
+        "kesin alım sinyali değildir."
+    )[:4000]
+
+
+def build_scan_error(
+    errors: list,
+) -> str:
+
+    return (
+        "❌ HunterElite taraması tamamlanamadı.\n\n"
+        f"{clean_lines(errors, 6, '•')}"
+    )
