@@ -57,7 +57,10 @@ def bar(
 
     score = max(
         0,
-        min(score, 100),
+        min(
+            score,
+            100,
+        ),
     )
 
     filled = round(
@@ -86,19 +89,16 @@ def risk_emoji(
     return "🔴"
 
 
-def pump_emoji(
+def score_emoji(
     score: int,
 ) -> str:
     if score >= 80:
-        return "🚀"
-
-    if score >= 65:
         return "🟢"
 
-    if score >= 50:
+    if score >= 65:
         return "🟡"
 
-    if score >= 35:
+    if score >= 50:
         return "🟠"
 
     return "🔴"
@@ -177,6 +177,16 @@ def build_report(
         or 0
     )
 
+    momentum_score = int(
+        pump.get("momentum_score")
+        or 0
+    )
+
+    holder_score = int(
+        pump.get("holder_score")
+        or 0
+    )
+
     buy_ratio = token.get(
         "buy_ratio_5m"
     )
@@ -190,70 +200,117 @@ def build_report(
                 *
                 100
             )
-        except (TypeError, ValueError):
+        except (
+            TypeError,
+            ValueError,
+        ):
             buy_percent = None
 
-    name = str(
-        token.get("name")
-        or
-        "Bilinmiyor"
+    top1 = rug.get(
+        "top1"
     )
 
-    symbol = str(
-        token.get("symbol")
-        or
-        "?"
+    top5 = rug.get(
+        "top5"
+    )
+
+    top10 = rug.get(
+        "top10"
     )
 
     report = (
-        "🛡 HUNTERELITE V4.1\n"
+        "🛡 HUNTERELITE V4.2\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
 
-        f"🪙 {name} ({symbol})\n"
+        f"🪙 {token.get('name', 'Bilinmiyor')} "
+        f"({token.get('symbol', '?')})\n"
+
         f"⏱ Yaş: {token.get('age_text', 'Bilinmiyor')}\n\n"
 
         f"{risk_emoji(rug_score)} RUG RİSKİ\n"
         f"{rug_score}/100  {bar(rug_score)}\n"
         f"{rug.get('label', 'Bilinmiyor')}\n\n"
 
-        f"{pump_emoji(pump_score)} PUMP POTANSİYELİ\n"
+        "🚀 PUMP POTANSİYELİ\n"
         f"{pump_score}/100  {bar(pump_score)}\n"
         f"{pump.get('label', 'Bilinmiyor')}\n\n"
 
-        "🎯 GÜVEN SKORU\n"
-        f"{confidence}/100  {bar(confidence)}\n\n"
+        "⚡ MOMENTUM SCORE\n"
+        f"{score_emoji(momentum_score)} "
+        f"{momentum_score}/100  "
+        f"{bar(momentum_score)}\n"
+
+        f"{pump.get('momentum', 'Bilinmiyor')}\n\n"
+
+        "🐋 HOLDER SCORE\n"
+        f"{score_emoji(holder_score)} "
+        f"{holder_score}/100  "
+        f"{bar(holder_score)}\n"
+
+        f"{pump.get('holder_label', 'Bilinmiyor')}\n\n"
+
+        "🎯 GENEL GÜVEN\n"
+        f"{confidence}/100  "
+        f"{bar(confidence)}\n\n"
 
         "━━━━━━━━━━━━━━━━━━\n"
         f"{decision.get('emoji', '⚪')} KARAR\n"
+
         f"{decision.get('decision', 'VERİ YETERSİZ')}\n"
+
         f"↳ {decision.get('reason', 'Karar üretilemedi')}\n"
+
         "━━━━━━━━━━━━━━━━━━\n\n"
 
         "📊 PİYASA VERİSİ\n"
+
         f"💵 Fiyat: ${token.get('price_usd', 0)}\n"
-        f"📈 Market Cap: {money(token.get('market_cap_usd'))}\n"
-        f"🎯 FDV: {money(token.get('fdv_usd'))}\n"
-        f"💧 Likidite: {money(token.get('liquidity_usd'))}\n"
-        f"⚖️ Likidite/MC: {ratio_percent(token.get('liquidity_mc_ratio'))}\n\n"
 
-        "⚡ MOMENTUM\n"
-        f"Durum: {pump.get('momentum', 'Bilinmiyor')}\n"
-        f"📦 Hacim 5 dk: {money(token.get('volume_5m'))}\n"
-        f"📦 Hacim 1 saat: {money(token.get('volume_1h'))}\n"
-        f"🟢 Buy 5 dk: {token.get('buys_5m', 0)}\n"
-        f"🔴 Sell 5 dk: {token.get('sells_5m', 0)}\n"
-        f"📊 Buy oranı: {percent(buy_percent)}\n\n"
+        f"📈 Market Cap: "
+        f"{money(token.get('market_cap_usd'))}\n"
 
-        "🐋 HOLDER ANALİZİ\n"
-        f"Top 10: {percent(rug.get('top10'))}\n\n"
+        f"🎯 FDV: "
+        f"{money(token.get('fdv_usd'))}\n"
+
+        f"💧 Likidite: "
+        f"{money(token.get('liquidity_usd'))}\n"
+
+        f"⚖️ Likidite/MC: "
+        f"{ratio_percent(token.get('liquidity_mc_ratio'))}\n\n"
+
+        "📈 İŞLEM AKTİVİTESİ\n"
+
+        f"📦 Hacim 5 dk: "
+        f"{money(token.get('volume_5m'))}\n"
+
+        f"📦 Hacim 1 saat: "
+        f"{money(token.get('volume_1h'))}\n"
+
+        f"🟢 Buy 5 dk: "
+        f"{token.get('buys_5m', 0)}\n"
+
+        f"🔴 Sell 5 dk: "
+        f"{token.get('sells_5m', 0)}\n"
+
+        f"📊 Buy oranı: "
+        f"{percent(buy_percent)}\n\n"
+
+        "🐋 HOLDER DAĞILIMI\n"
+
+        f"Top 1: {percent(top1)}\n"
+        f"Top 5: {percent(top5)}\n"
+        f"Top 10: {percent(top10)}\n\n"
 
         "✅ GÜÇLÜ YANLAR\n"
-        f"{clean_lines(analysis.get('positives', []), 7, '•')}\n\n"
+
+        f"{clean_lines(analysis.get('positives', []), 8, '•')}\n\n"
 
         "⚠️ RİSKLER\n"
-        f"{clean_lines(analysis.get('warnings', []), 9, '•')}\n\n"
+
+        f"{clean_lines(analysis.get('warnings', []), 10, '•')}\n\n"
 
         "━━━━━━━━━━━━━━━━━━\n"
+
         "⚠️ HunterElite filtreleme aracıdır; "
         "skorlar yatırım garantisi değildir."
     )
@@ -264,8 +321,11 @@ def build_report(
 def build_scan_error(
     errors: list,
 ) -> str:
+
     return (
         "❌ HunterElite taraması tamamlanamadı.\n\n"
+
         f"{clean_lines(errors, 6, '•')}\n\n"
+
         "Token çok yeniyse birkaç saniye sonra tekrar dene."
     )
