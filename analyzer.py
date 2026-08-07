@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional
 
 from pump_score import (
     calculate_pump_score,
-    calculate_top10,
     calculate_holder_metrics,
     authority_status,
 )
@@ -38,18 +37,14 @@ def calculate_rug_risk(
     )
 
     if ratio is not None:
-        ratio = safe_float(
-            ratio
-        )
+        ratio = safe_float(ratio)
 
     age = token.get(
         "age_minutes"
     )
 
     if age is not None:
-        age = safe_float(
-            age
-        )
+        age = safe_float(age)
 
     buy_ratio = token.get(
         "buy_ratio_5m"
@@ -94,9 +89,7 @@ def calculate_rug_risk(
         rug
     )
 
-    # -------------------------
     # LIQUIDITY RISK
-    # -------------------------
 
     if liquidity < 2_000:
 
@@ -136,9 +129,7 @@ def calculate_rug_risk(
             "Likidite güçlü"
         )
 
-    # -------------------------
-    # LIQUIDITY / MC RISK
-    # -------------------------
+    # LIQUIDITY / MC
 
     if ratio is not None:
 
@@ -172,99 +163,10 @@ def calculate_rug_risk(
                 "Likidite/MC güçlü"
             )
 
-    # -------------------------
     # HOLDER RISK
-    # -------------------------
 
     if top10 is None:
 
         warnings.append(
             "Holder verisi alınamadı"
-        )
-
-    else:
-
-        if top10 >= 80:
-
-            score += 30
-
-            warnings.append(
-                f"Top 10 tehlikeli: %{top10:.1f}"
-            )
-
-        elif top10 >= 70:
-
-            score += 25
-
-            warnings.append(
-                f"Top 10 çok yüksek: %{top10:.1f}"
-            )
-
-        elif top10 >= 50:
-
-            score += 18
-
-            warnings.append(
-                f"Top 10 yüksek: %{top10:.1f}"
-            )
-
-        elif top10 >= 35:
-
-            score += 8
-
-            warnings.append(
-                f"Top 10 dikkat: %{top10:.1f}"
-            )
-
-        else:
-
-            positives.append(
-                "Top 10 dağılımı sağlıklı"
-            )
-
-    if top5 is not None:
-
-        if top5 >= 50:
-
-            score += 15
-
-            warnings.append(
-                f"İlk 5 holder yoğun: %{top5:.1f}"
-            )
-
-        elif top5 >= 35:
-
-            score += 8
-
-            warnings.append(
-                f"İlk 5 holder dikkat: %{top5:.1f}"
-            )
-
-    if top1 is not None:
-
-        if top1 >= 25:
-
-            score += 20
-
-            warnings.append(
-                f"Tek holder çok yüksek: %{top1:.1f}"
-            )
-
-        elif top1 >= 15:
-
-            score += 12
-
-            warnings.append(
-                elif top1 >= 15:
-
-    score += 12
-
-    warnings.append(
-        f"En büyük holder yüksek: %{top1:.1f}"
-    )
-
-elif top1 < 10:
-
-    positives.append(
-        "En büyük holder payı düşük"
-    )
+       
