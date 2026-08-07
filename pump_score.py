@@ -32,32 +32,67 @@ def holder_percent(holder: Dict[str, Any]) -> float:
     return 0.0
 
 
-def calculate_top10(
+def calculate_holder_metrics(
     rug: Optional[Dict[str, Any]],
-) -> Optional[float]:
+) -> Dict[str, Optional[float]]:
+
+    result = {
+        "top1": None,
+        "top5": None,
+        "top10": None,
+        "largest_holder": None,
+    }
+
     if not rug:
-        return None
+        return result
 
     holders = rug.get("topHolders") or []
 
     if not isinstance(holders, list) or not holders:
-        return None
+        return result
 
-    total = sum(
+    percentages = [
         holder_percent(holder)
-        for holder in holders[:10]
+        for holder in holders
         if isinstance(holder, dict)
-    )
+    ]
 
-    return min(
-        max(total, 0.0),
+    if not percentages:
+        return result
+
+    result["largest_holder"] = max(percentages)
+
+    result["top1"] = min(
+        percentages[0],
         100.0,
     )
+
+    result["top5"] = min(
+        sum(percentages[:5]),
+        100.0,
+    )
+
+    result["top10"] = min(
+        sum(percentages[:10]),
+        100.0,
+    )
+
+    return result
+
+
+def calculate_top10(
+    rug: Optional[Dict[str, Any]],
+) -> Optional[float]:
+
+    return calculate_holder_metrics(
+        rug
+    ).get("top10")
 
 
 def authority_status(
     rug: Optional[Dict[str, Any]],
 ) -> Dict[str, Optional[bool]]:
+
     if not rug:
         return {
             "mint_closed": None,
@@ -68,31 +103,140 @@ def authority_status(
         "mint_closed": not bool(
             rug.get("mintAuthority")
         ),
+
         "freeze_closed": not bool(
             rug.get("freezeAuthority")
         ),
     }
 
 
-def calculate_pump_score(
-    token: Dict[str, Any],
-    rug: Optional[Dict[str, Any]],
+def holder_quality_score(
+    metrics: Dict[str, Optional[float]],
 ) -> Dict[str, Any]:
-    score = 0
 
+    score = 0
+    warnings: List[str] = []
+    positives: List[str] = []
+
+    top1 = metrics.get("top1")
+    top5 = metrics.get("top5")
+    top10 = metrics.get("top10")
+
+    if top10 is None:
+        return {
+            "score": 0,
+            "label": "VERİ YOK",
+            "warnings": [
+                "Holder dağılımı alınamadı"
+            ],
+            "positives": [],
+        }
+
+    # Top 10
+    if top10 < 20:
+        score += 45
+        positives.append(
+            "Top 10 dağılımı çok sağlıklı"
+        )
+
+    elif top10 < 30:
+        score += 38
+        positives.append(
+            "Top 10 dağılımı sağlıklı"
+        )
+
+    elif top10 < 40:
+        score += 28
+
+    elif top10 < 50:
+        score += 18
+        warnings.append(
+            "Top 10 yoğunluğu yükseliyor"
+        )
+
+    elif top10 < 70:
+        score += 8
+        warnings.append(
+            "Top 10 yoğunluğu yüksek"
+        )
+
+    else:
+        warnings.append(
+            "Top 10 yoğunluğu çok yüksek"
+        )
+
+    # Top 5
+    if top5 is not None:
+
+        if top5 < 15:
+            score += 25
+
+        elif top5 < 25:
+            score += 18
+
+        elif top5 < 35:
+            score += 10
+
+        else:
+            warnings.append(
+                "İlk 5 holder yoğun"
+            )
+
+    # Largest holder
+    if top1 is not None:
+
+        if top1 < 5:
+            score += 30
+            positives.append(
+                "En büyük holder payı düşük"
+            )
+
+        elif top1 < 10:
+            score += 20
+
+        elif top1 < 15:
+            score += 10
+
+        else:
+            warnings.append(
+                f"Tek holder payı yüksek: %{top1:.1f}"
+            )
+
+    score = min(
+        max(score, 0),
+        100,
+    )
+
+    if score >= 80:
+        label = "ÇOK İYİ"
+
+    elif score >= 65:
+        label = "İYİ"
+
+    elif score >= 50:
+        label = "ORTA"
+
+    elif score >= 35:
+        label = "ZAYIF"
+
+    else:
+        label = "RİSKLİ"
+
+    return {
+        "score": score,
+        "label": label,
+        "warnings": warnings,
+        "positives": positives,
+    }
+
+
+def momentum_score(
+    token: Dict[str, Any],
+) -> Dict[str, Any]:
+
+    score = 0
     positives: List[str] = []
     warnings: List[str] = []
-
-    liquidity = safe_float(
-        token.get("liquidity_usd")
-    )
-
-    ratio = token.get(
-        "liquidity_mc_ratio"
-    )
-
-    if ratio is not None:
-        ratio = safe_float(ratio)
 
     volume_5m = safe_float(
         token.get("volume_5m")
@@ -102,168 +246,65 @@ def calculate_pump_score(
         token.get("volume_1h")
     )
 
-    total = int(
+    liquidity = safe_float(
+        token.get("liquidity_usd")
+    )
+
+    buys = int(
         safe_float(
-            token.get(
-                "total_trades_5m"
-            )
+            token.get("buys_5m")
         )
     )
 
-    buy_ratio = token.get(
-        "buy_ratio_5m"
+    sells = int(
+        safe_float(
+            token.get("sells_5m")
+        )
     )
 
-    if buy_ratio is not None:
-        buy_ratio = safe_float(
-            buy_ratio
-        )
+    total = buys + sells
 
-    age = token.get(
-        "age_minutes"
+    buy_ratio = (
+        buys / total
+        if total > 0
+        else None
     )
 
-    if age is not None:
-        age = safe_float(
-            age
-        )
-
-    top10 = calculate_top10(
-        rug
-    )
-
-    auth = authority_status(
-        rug
-    )
-
-    # -------------------------
-    # LIKIDITE - MAX 20
-    # -------------------------
-
-    if liquidity >= 100_000:
-        score += 20
-        positives.append(
-            "Likidite çok güçlü"
-        )
-
-    elif liquidity >= 50_000:
-        score += 18
-        positives.append(
-            "Likidite güçlü"
-        )
-
-    elif liquidity >= 30_000:
-        score += 15
-        positives.append(
-            "Likidite yeterli"
-        )
-
-    elif liquidity >= 15_000:
-        score += 10
-        warnings.append(
-            "Likidite orta"
-        )
-
-    elif liquidity >= 5_000:
-        score += 5
-        warnings.append(
-            "Likidite zayıf"
-        )
-
-    else:
-        warnings.append(
-            "Likidite çok düşük"
-        )
-
-    # -------------------------
-    # LIKIDITE / MC - MAX 15
-    # -------------------------
-
-    if ratio is None:
+    # Buy/Sell dengesi
+    if buy_ratio is None:
 
         warnings.append(
-            "Likidite/MC verisi yok"
-        )
-
-    elif ratio >= 0.20:
-
-        score += 15
-        positives.append(
-            "Likidite/MC çok güçlü"
-        )
-
-    elif ratio >= 0.10:
-
-        score += 13
-        positives.append(
-            "Likidite/MC güçlü"
-        )
-
-    elif ratio >= 0.05:
-
-        score += 9
-        positives.append(
-            "Likidite/MC kabul edilebilir"
-        )
-
-    elif ratio >= 0.02:
-
-        score += 4
-        warnings.append(
-            "Likidite/MC düşük"
-        )
-
-    else:
-
-        warnings.append(
-            "Likidite/MC çok düşük"
-        )
-
-    # -------------------------
-    # BUY PRESSURE - MAX 15
-    # -------------------------
-
-    if (
-        buy_ratio is None
-        or
-        total <= 0
-    ):
-
-        warnings.append(
-            "5 dk işlem aktivitesi yok"
+            "İşlem aktivitesi yok"
         )
 
     elif buy_ratio >= 0.70:
 
-        score += 15
+        score += 30
         positives.append(
             "Alım baskısı çok güçlü"
         )
 
     elif buy_ratio >= 0.60:
 
-        score += 13
+        score += 25
         positives.append(
             "Alım baskısı güçlü"
         )
 
     elif buy_ratio >= 0.52:
 
-        score += 9
+        score += 18
         positives.append(
-            "Alım tarafı üstün"
+            "Alıcılar üstün"
         )
 
     elif buy_ratio >= 0.45:
 
-        score += 5
-        warnings.append(
-            "Alım/satım dengeli"
-        )
+        score += 10
 
     elif buy_ratio >= 0.35:
 
-        score += 2
+        score += 4
         warnings.append(
             "Satış baskısı artıyor"
         )
@@ -274,189 +315,284 @@ def calculate_pump_score(
             "Satış baskısı yüksek"
         )
 
-    # -------------------------
-    # VOLUME - MAX 15
-    # -------------------------
+    # İşlem sayısı
+    if total >= 500:
 
-    volume_points = 0
-
-    if volume_5m >= 50_000:
-
-        volume_points += 10
-
+        score += 25
         positives.append(
-            "5 dk hacim çok güçlü"
+            "İşlem aktivitesi çok yüksek"
         )
 
-    elif volume_5m >= 20_000:
+    elif total >= 200:
 
-        volume_points += 8
-
+        score += 20
         positives.append(
-            "5 dk hacim güçlü"
+            "İşlem aktivitesi güçlü"
         )
 
-    elif volume_5m >= 5_000:
+    elif total >= 100:
 
-        volume_points += 5
+        score += 15
 
-    elif volume_5m >= 1_000:
+    elif total >= 40:
 
-        volume_points += 2
+        score += 8
 
-    else:
+    elif total > 0:
 
+        score += 3
         warnings.append(
-            "5 dk hacim düşük"
+            "İşlem sayısı düşük"
         )
 
+    # Hacim / Likidite
     if liquidity > 0:
 
-        volume_liquidity_ratio = (
-            volume_5m
-            /
+        ratio = (
+            volume_5m /
             liquidity
         )
 
-        if volume_liquidity_ratio >= 1:
+        if ratio >= 1.5:
 
-            volume_points += 5
-
+            score += 25
             positives.append(
-                "Hacim/likidite momentumu yüksek"
+                "Hacim momentumu çok yüksek"
             )
 
-        elif volume_liquidity_ratio >= 0.5:
+        elif ratio >= 0.8:
 
-            volume_points += 4
+            score += 20
+            positives.append(
+                "Hacim momentumu güçlü"
+            )
 
-        elif volume_liquidity_ratio >= 0.2:
+        elif ratio >= 0.4:
 
-            volume_points += 2
+            score += 13
 
+        elif ratio >= 0.15:
+
+            score += 6
+
+        else:
+
+            warnings.append(
+                "Hacim momentumu düşük"
+            )
+
+    # Son 5 dk / 1 saat hacim oranı
     if volume_1h > 0:
 
-        recent_share = (
-            volume_5m
-            /
+        acceleration = (
+            volume_5m /
             volume_1h
         )
 
-        if recent_share >= 0.30:
+        if acceleration >= 0.35:
 
-            volume_points += 2
-
+            score += 20
             positives.append(
                 "Son 5 dk hacmi hızlanıyor"
             )
 
-    score += min(
-        volume_points,
-        15,
+        elif acceleration >= 0.20:
+
+            score += 14
+
+        elif acceleration >= 0.10:
+
+            score += 7
+
+    score = min(
+        max(score, 0),
+        100,
     )
 
-    # -------------------------
-    # TOKEN AGE - MAX 10
-    # -------------------------
+    if score >= 80:
+        label = "ÇOK GÜÇLÜ"
 
+    elif score >= 65:
+        label = "GÜÇLÜ"
+
+    elif score >= 50:
+        label = "ORTA"
+
+    elif score >= 35:
+        label = "ZAYIF"
+
+    else:
+        label = "ÇOK ZAYIF"
+
+    return {
+        "score": score,
+        "label": label,
+        "buy_ratio": buy_ratio,
+        "trades": total,
+        "positives": positives,
+        "warnings": warnings,
+    }
+
+
+def calculate_pump_score(
+    token: Dict[str, Any],
+    rug: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+
+    score = 0
+
+    positives: List[str] = []
+    warnings: List[str] = []
+
+    liquidity = safe_float(
+        token.get("liquidity_usd")
+    )
+
+    market_cap = safe_float(
+        token.get("market_cap_usd")
+    )
+
+    age = token.get(
+        "age_minutes"
+    )
+
+    if age is not None:
+        age = safe_float(age)
+
+    holder_metrics = (
+        calculate_holder_metrics(
+            rug
+        )
+    )
+
+    holder_result = (
+        holder_quality_score(
+            holder_metrics
+        )
+    )
+
+    momentum = momentum_score(
+        token
+    )
+
+    auth = authority_status(
+        rug
+    )
+
+    # Likidite - 20
+    if liquidity >= 100_000:
+        score += 20
+        positives.append(
+            "Likidite çok güçlü"
+        )
+
+    elif liquidity >= 50_000:
+        score += 17
+        positives.append(
+            "Likidite güçlü"
+        )
+
+    elif liquidity >= 30_000:
+        score += 14
+
+    elif liquidity >= 15_000:
+        score += 9
+
+    elif liquidity >= 5_000:
+        score += 4
+        warnings.append(
+            "Likidite düşük"
+        )
+
+    else:
+        warnings.append(
+            "Likidite çok düşük"
+        )
+
+    # Liquidity / MC - 15
+    if market_cap > 0:
+
+        ratio = (
+            liquidity /
+            market_cap
+        )
+
+        if ratio >= 0.20:
+            score += 15
+
+        elif ratio >= 0.10:
+            score += 12
+
+        elif ratio >= 0.05:
+            score += 8
+
+        elif ratio >= 0.02:
+            score += 4
+
+        else:
+            warnings.append(
+                "Likidite/MC zayıf"
+            )
+
+    # Momentum - 30
+    score += round(
+        momentum["score"]
+        *
+        0.30
+    )
+
+    positives.extend(
+        momentum["positives"]
+    )
+
+    warnings.extend(
+        momentum["warnings"]
+    )
+
+    # Holder quality - 20
+    score += round(
+        holder_result["score"]
+        *
+        0.20
+    )
+
+    positives.extend(
+        holder_result["positives"]
+    )
+
+    warnings.extend(
+        holder_result["warnings"]
+    )
+
+    # Token age - 5
     if age is None:
 
         warnings.append(
             "Token yaşı bilinmiyor"
         )
 
-    elif age < 3:
+    elif 10 <= age <= 180:
 
-        score += 1
+        score += 5
+
+    elif 5 <= age < 10:
+
+        score += 3
+
+    elif age < 5:
 
         warnings.append(
             "Token aşırı yeni"
         )
 
-    elif age < 10:
-
-        score += 4
-
-        warnings.append(
-            "Token çok yeni"
-        )
-
-    elif age < 30:
-
-        score += 8
-
-        positives.append(
-            "Erken aşama"
-        )
-
-    elif age < 120:
-
-        score += 10
-
-        positives.append(
-            "Token yaşı uygun"
-        )
-
-    elif age < 1440:
-
-        score += 8
-
     else:
 
-        score += 5
+        score += 2
 
-    # -------------------------
-    # HOLDER - MAX 15
-    # -------------------------
-
-    if top10 is None:
-
-        warnings.append(
-            "Top 10 holder verisi yok"
-        )
-
-    elif top10 < 20:
-
-        score += 15
-
-        positives.append(
-            "Holder dağılımı çok sağlıklı"
-        )
-
-    elif top10 < 35:
-
-        score += 12
-
-        positives.append(
-            "Holder dağılımı sağlıklı"
-        )
-
-    elif top10 < 50:
-
-        score += 7
-
-    elif top10 < 70:
-
-        score += 3
-
-        warnings.append(
-            "Top 10 yoğunluğu yüksek"
-        )
-
-    else:
-
-        warnings.append(
-            "Top 10 yoğunluğu çok yüksek"
-        )
-
-    # -------------------------
-    # AUTHORITY - MAX 10
-    # -------------------------
-
+    # Authorities - 10
     if auth["mint_closed"] is True:
 
         score += 5
-
         positives.append(
             "Mint Authority kapalı"
         )
@@ -470,7 +606,6 @@ def calculate_pump_score(
     if auth["freeze_closed"] is True:
 
         score += 5
-
         positives.append(
             "Freeze Authority kapalı"
         )
@@ -480,10 +615,6 @@ def calculate_pump_score(
         warnings.append(
             "Freeze Authority aktif"
         )
-
-    # -------------------------
-    # FINAL SCORE
-    # -------------------------
 
     score = min(
         max(
@@ -513,31 +644,29 @@ def calculate_pump_score(
 
         label = "ÇOK DÜŞÜK"
 
-    if score >= 80:
-
-        momentum = "ÇOK GÜÇLÜ"
-
-    elif score >= 65:
-
-        momentum = "GÜÇLÜ"
-
-    elif score >= 50:
-
-        momentum = "ORTA"
-
-    elif score >= 35:
-
-        momentum = "ZAYIF"
-
-    else:
-
-        momentum = "ÇOK ZAYIF"
-
     return {
         "score": score,
         "label": label,
-        "momentum": momentum,
-        "top10": top10,
-        "positives": positives[:12],
-        "warnings": warnings[:12],
+
+        "momentum": momentum["label"],
+        "momentum_score": momentum["score"],
+
+        "holder_score": holder_result["score"],
+        "holder_label": holder_result["label"],
+
+        "top1": holder_metrics["top1"],
+        "top5": holder_metrics["top5"],
+        "top10": holder_metrics["top10"],
+
+        "positives": list(
+            dict.fromkeys(
+                positives
+            )
+        )[:15],
+
+        "warnings": list(
+            dict.fromkeys(
+                warnings
+            )
+        )[:15],
     }
