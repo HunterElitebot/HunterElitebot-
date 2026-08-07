@@ -366,8 +366,15 @@ def calculate_risk(
         or 0
     )
 
-    market_cap = (
-        pair.get(
-            "marketCap"
-        )
-        or
+   market_cap = pair.get("marketCap") or 0
+
+fdv = pair.get("fdv") or 0
+
+price = pair.get("priceUsd") or "?"
+
+volume = pair.get("volume") or {}
+
+m5 = (pair.get("txns") or {}).get("m5") or {}
+
+buys = m5.get("buys") or 0
+sells = m5.get("sells") or 0 
