@@ -47,7 +47,6 @@ _seen_alerts: set[str] = set()
 def is_owner(
     update: Update,
 ) -> bool:
-
     user = update.effective_user
 
     return bool(
@@ -60,32 +59,28 @@ def is_owner(
 async def require_owner(
     update: Update,
 ) -> bool:
+    if is_owner(update):
+        return True
 
-    if not is_owner(update):
+    if update.effective_message:
+        await update.effective_message.reply_text(
+            "⛔ Yetkisiz kullanıcı."
+        )
 
-        if update.effective_message:
-
-            await update.effective_message.reply_text(
-                "⛔ Yetkisiz kullanıcı."
-            )
-
-        return False
-
-    return True
+    return False
 
 
-async def start(
+async def start_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-
     if not await require_owner(update):
         return
 
     await update.effective_message.reply_text(
         "🛡 HUNTERELITE V5 FINAL AKTİF\n\n"
-        "Kontrat gönder → anlık analiz\n"
-        "Auto Hunter → uygun adayları otomatik tarar\n\n"
+        "📩 Solana kontrat adresi gönder → analiz et\n"
+        "🤖 Auto Hunter → güçlü adayları otomatik tara\n\n"
         "🛡 Rug Risk\n"
         "🚀 Pump Score\n"
         "⚡ Momentum Score\n"
@@ -103,7 +98,6 @@ async def version_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-
     if not await require_owner(update):
         return
 
@@ -116,7 +110,6 @@ async def status_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-
     if not await require_owner(update):
         return
 
@@ -140,19 +133,146 @@ async def analyze_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-
     if not await require_owner(update):
         return
 
+    message = update.effective_message
+
     if (
-        not update.effective_message
-        or
-        not update.effective_message.text
+        message is None
+        or not message.text
     ):
         return
 
-    contract
-   def main() -> None:
+    contract = (
+        message.text
+        .strip()
+        .replace(" ", "")
+    )
+
+    if not SOLANA_ADDRESS_RE.fullmatch(
+        contract
+    ):
+        await message.reply_text(
+            "❌ Geçerli bir Solana kontrat adresine benzemiyor."
+        )
+        return
+
+    status_message = await message.reply_text(
+        "🔎 HunterElite V5 analiz ediyor..."
+    )
+
+    try:
+        result = await asyncio.to_thread(
+            scan_token,
+            contract,
+        )
+
+        if not result.get("success"):
+            await status_message.edit_text(
+                build_scan_error(
+                    result.get(
+                        "errors",
+                        [],
+                    )
+                )
+            )
+            return
+
+        token = result.get("token")
+        rug = result.get("rug")
+
+        if not token:
+            await status_message.edit_text(
+                "❌ Token piyasa verisi alınamadı."
+            )
+            return
+
+        analysis = await asyncio.to_thread(
+            analyze_token,
+            token,
+            rug,
+        )
+
+        report_text = build_report(
+            token,
+            analysis,
+        )
+
+        await status_message.edit_text(
+            report_text
+        )
+
+    except Exception as exc:
+        logger.exception(
+            "Manual analysis failed: %s",
+            exc,
+        )
+
+        await status_message.edit_text(
+            "❌ Analiz sırasında hata oluştu."
+        )
+
+
+async def auto_hunter_job(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not AUTO_HUNTER_ENABLED:
+        return
+
+    if OWNER_ID is None:
+        return
+
+    try:
+        candidates = await asyncio.to_thread(
+            discover_candidates,
+            25,
+        )
+
+        for (
+            address,
+            token,
+            analysis,
+        ) in candidates:
+
+            if address in _seen_alerts:
+                continue
+
+            _seen_alerts.add(
+                address
+            )
+
+            alert_text = build_alert_report(
+                token,
+                analysis,
+            )
+
+            await context.bot.send_message(
+                chat_id=OWNER_ID,
+                text=alert_text,
+            )
+
+        if len(_seen_alerts) > 2000:
+            _seen_alerts.clear()
+
+    except Exception as exc:
+        logger.exception(
+            "Auto Hunter failed: %s",
+            exc,
+        )
+
+
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    logger.error(
+        "Telegram handler error",
+        exc_info=context.error,
+    )
+
+
+def main() -> None:
     if not TOKEN:
         raise RuntimeError(
             "Railway Variables içinde TOKEN bulunamadı."
@@ -163,6 +283,10 @@ async def analyze_message(
             "Railway Variables içinde geçerli OWNER_ID bulunamadı."
         )
 
+    logger.info(
+        "HunterElite V5 FINAL başlatılıyor."
+    )
+
     app = (
         ApplicationBuilder()
         .token(TOKEN)
@@ -172,7 +296,7 @@ async def analyze_message(
     app.add_handler(
         CommandHandler(
             "start",
-            start,
+            start_command,
         )
     )
 
@@ -210,10 +334,14 @@ async def analyze_message(
             first=20,
         )
 
+    logger.info(
+        "Telegram polling başlatılıyor."
+    )
+
     app.run_polling(
         drop_pending_updates=True
     )
 
 
 if __name__ == "__main__":
-    main() 
+    main()   
