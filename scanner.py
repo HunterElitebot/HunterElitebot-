@@ -411,3 +411,113 @@ def normalize_pair(
     )
 
     total = buys + sells 
+       return {
+        "name": str(
+            base.get("name")
+            or "Bilinmiyor"
+        ),
+        "symbol": str(
+            base.get("symbol")
+            or "?"
+        ),
+        "address": str(
+            base.get("address")
+            or ""
+        ),
+        "price_usd": safe_float(
+            pair.get("priceUsd")
+        ),
+        "liquidity_usd": liquidity,
+        "market_cap_usd": market_cap,
+        "fdv_usd": safe_float(
+            pair.get("fdv")
+        ),
+        "volume_5m": safe_float(
+            volume.get("m5")
+        ),
+        "volume_1h": safe_float(
+            volume.get("h1")
+        ),
+        "buys_5m": buys,
+        "sells_5m": sells,
+        "total_trades_5m": total,
+        "buy_ratio_5m": (
+            buys / total
+            if total
+            else None
+        ),
+        "age_minutes": pair_age_minutes(
+            pair
+        ),
+        "age_text": pair_age_text(
+            pair
+        ),
+        "liquidity_mc_ratio": (
+            liquidity / market_cap
+            if market_cap > 0
+            else None
+        ),
+    }
+
+
+def scan_token(
+    contract: str,
+) -> Dict[str, Any]:
+
+    result: Dict[str, Any] = {
+        "success": False,
+        "contract": contract,
+        "pair": None,
+        "token": None,
+        "rug": None,
+        "errors": [],
+    }
+
+    try:
+        pair = (
+            DexScreenerClient()
+            .get_best_pair(
+                contract
+            )
+        )
+
+        if pair is None:
+            result["errors"].append(
+                "DexScreener üzerinde Solana pair bulunamadı."
+            )
+
+        else:
+            result["pair"] = pair
+            result["token"] = normalize_pair(
+                pair
+            )
+            result["success"] = True
+
+    except Exception as exc:
+        logger.exception(
+            "DexScreener tarama hatası"
+        )
+
+        result["errors"].append(
+            f"DexScreener hatası: {exc}"
+        )
+
+    try:
+        result["rug"] = (
+            RugCheckClient()
+            .get_report(
+                contract
+            )
+        )
+
+    except Exception as exc:
+        logger.warning(
+            "RugCheck verisi alınamadı: %s",
+            exc,
+        )
+
+        result["errors"].append(
+            f"RugCheck hatası: {exc}"
+        )
+
+    return result 
