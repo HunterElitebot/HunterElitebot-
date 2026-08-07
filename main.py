@@ -28,49 +28,23 @@ def money(value):
         return "Bilinmiyor"
 
 
-def pct(value):
+def percent_value(value):
     try:
         v = float(value or 0)
         if v <= 1:
             v *= 100
         return v
     except Exception:
-        return 0
+        return 0.0
 
 
-def token_age(pair):
-    created = pair.get("pairCreatedAt")
-
-    if not created:
-        return None, "Bilinmiyor"
-
-    try:
-        created_sec = float(created) / 1000
-        age_sec = time.time() - created_sec
-        minutes = age_sec / 60
-
-        if minutes < 60:
-            return minutes, f"{minutes:.0f} dakika"
-
-        hours = minutes / 60
-        if hours < 24:
-            return minutes, f"{hours:.1f} saat"
-
-        days = hours / 24
-        return minutes, f"{days:.1f} gün"
-
-    except Exception:
-        return None, "Bilinmiyor"
-
-
-def get_dex(contract):
+def get_pair(contract):
     try:
         url = f"https://api.dexscreener.com/latest/dex/tokens/{contract}"
-        r = requests.get(url, timeout=12)
-        r.raise_for_status()
+        response = requests.get(url, timeout=12)
+        response.raise_for_status()
 
-        pairs = r.json().get("pairs") or []
-
+        pairs = response.json().get("pairs") or []
         sol_pairs = [
             p for p in pairs
             if str(p.get("chainId", "")).lower() == "solana"
@@ -81,7 +55,7 @@ def get_dex(contract):
 
         return max(
             sol_pairs,
-            key=lambda p: (p.get("liquidity") or {}).get("usd") or 0
+            key=lambda p: (p.get("liquidity") or {}).get("usd") or 0,
         )
 
     except Exception as e:
@@ -92,93 +66,131 @@ def get_dex(contract):
 def get_rugcheck(contract):
     try:
         url = f"https://api.rugcheck.xyz/v1/tokens/{contract}/report"
-        r = requests.get(url, timeout=15)
+        response = requests.get(url, timeout=15)
 
-        if r.status_code != 200:
-            print("RUGCHECK STATUS:", r.status_code)
+        if response.status_code != 200:
+            print("RUGCHECK STATUS:", response.status_code)
             return None
 
-        return r.json()
+        return response.json()
 
     except Exception as e:
         print("RUGCHECK ERROR:", e)
         return None
 
 
-def security_analysis(rug):
-    risk = 0
-    warnings = []
-    positives = []
+def pair_age(pair):
+    created_at = pair.get("pairCreatedAt")
 
-    top10 = None
-    mint_auth = None
-    freeze_auth = None
+    if not created_at:
+        return None, "Bilinmiyor"
+
+    try:
+        age_seconds = time.time() - (float(created_at) / 1000)
+        minutes = max(age_seconds / 60, 0)
+
+        if minutes < 60:
+            return minutes, f"{minutes:.0f} dk"
+
+        hours = minutes / 60
+        if hours < 24:
+            return minutes, f"{hours:.1f} saat"
+
+        days = hours / 24
+        return minutes, f"{days:.1f} gun"
+
+    except Exception:
+        return None, "Bilinmiyor"
+
+
+def security_data(rug):
+    result = {
+        "risk": 0,
+        "warnings": [],
+        "positives": [],
+        "top10": None,
+        "mint": None,
+        "freeze": None,
+    }
 
     if not rug:
-        warnings.append("⚪ RugCheck verisi alınamadı")
-        return risk, warnings, positives, top10, mint_auth, freeze_auth
+        result["warnings"].append("RugCheck verisi alinamadi")
+        return result
 
-    mint_auth = rug.get("mintAuthority")
-    freeze_auth = rug.get("freezeAuthority")
+    result["mint"] = rug.get("mintAuthority")
+    result["freeze"] = rug.get("freezeAuthority")
 
-    if mint_auth:
-        risk += 20
-        warnings.append("🔴 Mint Authority AKTİF")
+    if result["mint"]:
+        result["risk"] += 20
+        result["warnings"].append("Mint Authority AKTIF")
     else:
-        positives.append("🟢 Mint Authority kapalı")
+        result["positives"].append("Mint Authority kapali")
 
-    if freeze_auth:
-        risk += 15
-        warnings.append("🔴 Freeze Authority AKTİF")
+    if result["freeze"]:
+        result["risk"] += 15
+        result["warnings"].append("Freeze Authority AKTIF")
     else:
-        positives.append("🟢 Freeze Authority kapalı")
+        result["positives"].append("Freeze Authority kapali")
 
     holders = rug.get("topHolders") or []
 
     if holders:
-        total = 0
+        top10 = 0.0
 
         for holder in holders[:10]:
-            value = (
+            raw = (
                 holder.get("pct")
                 or holder.get("percentage")
                 or holder.get("percent")
                 or 0
             )
-            total += pct(value)
+            top10 += percent_value(raw)
 
-        top10 = total
+        result["top10"] = top10
 
-        if total >= 70:
-            risk += 30
-            warnings.append(f"🔴 Top 10 çok yoğun: %{total:.1f}")
-        elif total >= 50:
-            risk += 20
-            warnings.append(f"🟠 Top 10 yüksek: %{total:.1f}")
-        elif total >= 35:
-            risk += 10
-            warnings.append(f"🟡 Top 10 dikkat: %{total:.1f}")
+        if top10 >= 70:
+            result["risk"] += 30
+            result["warnings"].append(
+                f"Top 10 cok yogun: %{top10:.1f}"
+            )
+
+        elif top10 >= 50:
+            result["risk"] += 20
+            result["warnings"].append(
+                f"Top 10 yuksek: %{top10:.1f}"
+            )
+
+        elif top10 >= 35:
+            result["risk"] += 10
+            result["warnings"].append(
+                f"Top 10 dikkat: %{top10:.1f}"
+            )
+
         else:
-            positives.append(f"🟢 Top 10 dağılımı: %{total:.1f}")
+            result["positives"].append(
+                f"Top 10 dagilimi iyi: %{top10:.1f}"
+            )
 
-    risks = rug.get("risks") or []
+    rug_risks = rug.get("risks") or []
 
-    for item in risks[:10]:
+    for item in rug_risks[:10]:
         level = str(item.get("level", "")).lower()
-        name = item.get("name") or "Güvenlik riski"
+        name = item.get("name") or "Guvenlik uyarisi"
 
         if level in ("danger", "critical"):
-            risk += 18
-            warnings.append(f"🔴 {name}")
+            result["risk"] += 18
+            result["warnings"].append(name)
 
         elif level in ("warn", "warning"):
-            risk += 8
-            warnings.append(f"🟠 {name}")
+            result["risk"] += 8
+            result["warnings"].append(name)
 
-    if not risks:
-        positives.append("🟢 RugCheck kritik uyarı bildirmedi")
+    if not rug_risks:
+        result["positives"].append(
+            "RugCheck kritik uyari bildirmedi"
+        )
 
-    return risk, warnings, positives, top10, mint_auth, freeze_auth
+    return result
 
 
 def calculate_risk(pair, rug):
@@ -188,83 +200,29 @@ def calculate_risk(pair, rug):
 
     liquidity = (pair.get("liquidity") or {}).get("usd") or 0
     market_cap = pair.get("marketCap") or pair.get("fdv") or 0
-    fdv = pair.get("fdv") or 0
 
-    age_minutes, age_text = token_age(pair)
+    age_minutes, age_text = pair_age(pair)
 
-    # TOKEN YAŞI
     if age_minutes is not None:
         if age_minutes < 5:
             risk += 15
-            warnings.append("🔴 Token 5 dakikadan yeni")
+            warnings.append("Token 5 dakikadan yeni")
+
         elif age_minutes < 15:
             risk += 10
-            warnings.append("🟠 Token çok yeni")
+            warnings.append("Token cok yeni")
+
         elif age_minutes < 60:
             risk += 5
-            warnings.append("🟡 Token 1 saatten genç")
+            warnings.append("Token 1 saatten genc")
+
         else:
-            positives.append(f"🟢 Token yaşı: {age_text}")
-
-    # LİKİDİTE
-    if liquidity < 5_000:
-        risk += 35
-        warnings.append("🔴 Likidite çok düşük")
-    elif liquidity < 15_000:
-        risk += 22
-        warnings.append("🟠 Likidite düşük")
-    elif liquidity < 30_000:
-        risk += 10
-        warnings.append("🟡 Likidite orta")
-    else:
-        positives.append("🟢 Likidite güçlü")
-
-    # LIQ / MC
-    liq_mc_ratio = None
-
-    if market_cap and liquidity:
-        liq_mc_ratio = liquidity / market_cap
-
-        if liq_mc_ratio < 0.02:
-            risk += 18
-            warnings.append("🔴 Likidite / MC oranı çok düşük")
-        elif liq_mc_ratio < 0.05:
-            risk += 10
-            warnings.append("🟠 Likidite / MC oranı düşük")
-        elif liq_mc_ratio >= 0.10:
             positives.append(
-                f"🟢 Likidite / MC: %{liq_mc_ratio * 100:.1f}"
+                f"Token yasi: {age_text}"
             )
 
-    # FDV
-    if fdv and liquidity:
-        liq_fdv_ratio = liquidity / fdv
+    if liquidity < 5_000:
+        risk += 35
+        warnings.append("Likidite cok dusuk")
 
-        if liq_fdv_ratio < 0.01:
-            risk += 10
-            warnings.append("🟠 Likidite / FDV zayıf")
-
-    # BUY / SELL
-    txns = pair.get("txns") or {}
-    m5 = txns.get("m5") or {}
-
-    buys = m5.get("buys") or 0
-    sells = m5.get("sells") or 0
-    total_tx = buys + sells
-
-    if total_tx == 0:
-        risk += 8
-        warnings.append("🟡 Son 5 dk işlem yok")
-
-    else:
-        buy_ratio = buys / total_tx
-
-        if sell_ratio := (sells / total_tx):
-            pass
-
-        if buy_ratio < 0.30 and total_tx >= 20:
-            risk += 12
-            warnings.append("🔴 Satış baskısı yüksek")
-        elif buy_ratio < 0.45 and total_tx >= 20:
-            risk += 6
-            warnings.append("🟡 Satis baskisi artiyor")
+    elif liquidity <
