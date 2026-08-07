@@ -7,6 +7,7 @@ from pump_score import (
     calculate_holder_metrics,
     authority_status,
 )
+from elite_score import calculate_elite_score
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
