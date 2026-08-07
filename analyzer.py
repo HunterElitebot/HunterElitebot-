@@ -41,14 +41,18 @@ def calculate_rug_risk(
     )
 
     if ratio is not None:
-        ratio = safe_float(ratio)
+        ratio = safe_float(
+            ratio
+        )
 
     age = token.get(
         "age_minutes"
     )
 
     if age is not None:
-        age = safe_float(age)
+        age = safe_float(
+            age
+        )
 
     buy_ratio = token.get(
         "buy_ratio_5m"
@@ -96,6 +100,7 @@ def calculate_rug_risk(
     if liquidity < 2_000:
 
         score += 35
+
         warnings.append(
             "Likidite aşırı düşük"
         )
@@ -103,6 +108,7 @@ def calculate_rug_risk(
     elif liquidity < 5_000:
 
         score += 30
+
         warnings.append(
             "Likidite çok düşük"
         )
@@ -110,6 +116,7 @@ def calculate_rug_risk(
     elif liquidity < 15_000:
 
         score += 20
+
         warnings.append(
             "Likidite düşük"
         )
@@ -117,6 +124,7 @@ def calculate_rug_risk(
     elif liquidity < 30_000:
 
         score += 10
+
         warnings.append(
             "Likidite orta"
         )
@@ -132,6 +140,7 @@ def calculate_rug_risk(
         if ratio < 0.01:
 
             score += 20
+
             warnings.append(
                 "Likidite/MC aşırı düşük"
             )
@@ -139,317 +148,3 @@ def calculate_rug_risk(
         elif ratio < 0.02:
 
             score += 15
-            warnings.append(
-                "Likidite/MC çok düşük"
-            )
-
-        elif ratio < 0.05:
-
-            score += 8
-            warnings.append(
-                "Likidite/MC düşük"
-            )
-
-    if top10 is None:
-
-        warnings.append(
-            "Holder verisi alınamadı"
-        )
-
-    elif top10 >= 80:
-
-        score += 30
-        warnings.append(
-            f"Top 10 tehlikeli: %{top10:.1f}"
-        )
-
-    elif top10 >= 70:
-
-        score += 25
-        warnings.append(
-            f"Top 10 çok yüksek: %{top10:.1f}"
-        )
-
-    elif top10 >= 50:
-
-        score += 18
-        warnings.append(
-            f"Top 10 yüksek: %{top10:.1f}"
-        )
-
-    elif top10 >= 35:
-
-        score += 8
-        warnings.append(
-            f"Top 10 dikkat: %{top10:.1f}"
-        )
-
-    else:
-
-        positives.append(
-            "Top 10 dağılımı sağlıklı"
-        )
-
-    if top5 is not None:
-
-        if top5 >= 50:
-
-            score += 15
-            warnings.append(
-                f"İlk 5 holder yoğun: %{top5:.1f}"
-            )
-
-        elif top5 >= 35:
-
-            score += 8
-            warnings.append(
-                f"İlk 5 holder dikkat: %{top5:.1f}"
-            )
-
-    if top1 is not None:
-
-        if top1 >= 25:
-
-            score += 20
-            warnings.append(
-                f"Tek holder çok yüksek: %{top1:.1f}"
-            )
-
-        elif top1 >= 15:
-
-            score += 12
-            warnings.append(
-                f"En büyük holder yüksek: %{top1:.1f}"
-            )
-
-        elif top1 < 10:
-
-            positives.append(
-                "En büyük holder payı düşük"
-            )
-
-    if auth["mint_closed"] is False:
-
-        score += 20
-        warnings.append(
-            "Mint Authority AKTİF"
-        )
-
-    elif auth["mint_closed"] is True:
-
-        positives.append(
-            "Mint Authority kapalı"
-        )
-
-    if auth["freeze_closed"] is False:
-
-        score += 15
-        warnings.append(
-            "Freeze Authority AKTİF"
-        )
-
-    elif auth["freeze_closed"] is True:
-
-        positives.append(
-            "Freeze Authority kapalı"
-        )
-
-    if age is not None:
-
-        if age < 3:
-
-            score += 18
-            warnings.append(
-                "Token aşırı yeni"
-            )
-
-        elif age < 10:
-
-            score += 12
-            warnings.append(
-                "Token çok yeni"
-            )
-
-        elif age < 30:
-
-            score += 6
-            warnings.append(
-                "Token erken aşamada"
-            )
-
-    if total <= 0:
-
-        score += 8
-        warnings.append(
-            "Son 5 dk işlem yok"
-        )
-
-    elif (
-        buy_ratio is not None
-        and total >= 20
-    ):
-
-        if buy_ratio < 0.25:
-
-            score += 15
-            warnings.append(
-                "Çok güçlü satış baskısı"
-            )
-
-        elif buy_ratio < 0.35:
-
-            score += 10
-            warnings.append(
-                "Satış baskısı yüksek"
-            )
-
-        elif buy_ratio < 0.45:
-
-            score += 5
-            warnings.append(
-                "Satış tarafı baskın"
-            )
-
-        elif buy_ratio >= 0.60:
-
-            positives.append(
-                "Alım baskısı güçlü"
-            )
-
-    if liquidity > 0:
-
-        abnormal_ratio = (
-            volume_5m
-            /
-            liquidity
-        )
-
-        if (
-            abnormal_ratio >= 5
-            and total >= 100
-        ):
-
-            score += 12
-            warnings.append(
-                "Hacim/likidite anormal yüksek"
-            )
-
-        elif (
-            abnormal_ratio >= 3
-            and total >= 50
-        ):
-
-            score += 7
-            warnings.append(
-                "Hacim olağandışı yüksek"
-            )
-
-    if rug:
-
-        risks = (
-            rug.get("risks")
-            or []
-        )
-
-        if isinstance(
-            risks,
-            list,
-        ):
-
-            extra_risk = 0
-
-            for item in risks[:15]:
-
-                if not isinstance(
-                    item,
-                    dict,
-                ):
-                    continue
-
-                level = str(
-                    item.get("level")
-                    or ""
-                ).lower()
-
-                name = str(
-                    item.get("name")
-                    or
-                    item.get("description")
-                    or
-                    "RugCheck uyarısı"
-                )
-
-                if level in (
-                    "critical",
-                    "danger",
-                ):
-
-                    extra_risk += 18
-                    warnings.append(
-                        f"RugCheck kritik: {name}"
-                    )
-
-                elif level in (
-                    "high",
-                    "warn",
-                    "warning",
-                ):
-
-                    extra_risk += 10
-                    warnings.append(
-                        f"RugCheck uyarı: {name}"
-                    )
-
-                elif level in (
-                    "medium",
-                    "moderate",
-                ):
-
-                    extra_risk += 5
-                    warnings.append(
-                        f"RugCheck dikkat: {name}"
-                    )
-
-            score += min(
-                extra_risk,
-                35,
-            )
-
-    score = min(
-        max(
-            int(round(score)),
-            0,
-        ),
-        100,
-    )
-
-    if score <= 20:
-
-        label = "DÜŞÜK RİSK"
-
-    elif score <= 40:
-
-        label = "ORTA RİSK"
-
-    elif score <= 65:
-
-        label = "YÜKSEK RİSK"
-
-    else:
-
-        label = "ÇOK YÜKSEK RİSK"
-
-    return {
-        "score": score,
-        "label": label,
-        "warnings": warnings[:18],
-        "positives": positives[:12],
-        "top1": top1,
-        "top5": top5,
-        "top10": top10,
-    }
-
-
-def decision_engine(
-    rug_risk: int,
-    pump
