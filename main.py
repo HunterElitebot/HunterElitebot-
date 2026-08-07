@@ -155,4 +155,4 @@ async def analyze_message(
 ) -> None:
 
     if not await require_owner(update):
-    return
+        return
