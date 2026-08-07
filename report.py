@@ -167,6 +167,11 @@ def build_report(
         or {}
     )
 
+    gem = (
+        analysis.get("gem")
+        or {}
+    )
+
     rug_score = int(
         rug.get("score")
         or 0
@@ -212,6 +217,21 @@ def build_report(
         or "Bilinmiyor"
     )
 
+    gem_score = int(
+        gem.get("score")
+        or 0
+    )
+
+    gem_label = str(
+        gem.get("label")
+        or "Bilinmiyor"
+    )
+
+    gem_emoji = str(
+        gem.get("emoji")
+        or "⚪"
+    )
+
     buy_ratio = token.get(
         "buy_ratio_5m"
     )
@@ -244,7 +264,7 @@ def build_report(
     )
 
     report = (
-        "🛡 HUNTERELITE V4.3\n"
+        "🛡 HUNTERELITE V4.4\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
 
         f"🪙 {token.get('name', 'Bilinmiyor')} "
@@ -282,83 +302,15 @@ def build_report(
         f"{elite_label}\n"
         f"🎯 Öncelik: {elite_watch}\n\n"
 
+        "💎 GEM SCORE\n"
+        f"{gem_emoji} "
+        f"{gem_score}/100  "
+        f"{bar(gem_score)}\n"
+
+        f"{gem_label}\n\n"
+
         "🎯 GENEL GÜVEN\n"
         f"{confidence}/100  "
         f"{bar(confidence)}\n\n"
 
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"{decision.get('emoji', '⚪')} KARAR\n"
-
-        f"{decision.get('decision', 'VERİ YETERSİZ')}\n"
-
-        f"↳ {decision.get('reason', 'Karar üretilemedi')}\n"
-
-        "━━━━━━━━━━━━━━━━━━\n\n"
-
-        "📊 PİYASA VERİSİ\n"
-
-        f"💵 Fiyat: ${token.get('price_usd', 0)}\n"
-
-        f"📈 Market Cap: "
-        f"{money(token.get('market_cap_usd'))}\n"
-
-        f"🎯 FDV: "
-        f"{money(token.get('fdv_usd'))}\n"
-
-        f"💧 Likidite: "
-        f"{money(token.get('liquidity_usd'))}\n"
-
-        f"⚖️ Likidite/MC: "
-        f"{ratio_percent(token.get('liquidity_mc_ratio'))}\n\n"
-
-        "📈 İŞLEM AKTİVİTESİ\n"
-
-        f"📦 Hacim 5 dk: "
-        f"{money(token.get('volume_5m'))}\n"
-
-        f"📦 Hacim 1 saat: "
-        f"{money(token.get('volume_1h'))}\n"
-
-        f"🟢 Buy 5 dk: "
-        f"{token.get('buys_5m', 0)}\n"
-
-        f"🔴 Sell 5 dk: "
-        f"{token.get('sells_5m', 0)}\n"
-
-        f"📊 Buy oranı: "
-        f"{percent(buy_percent)}\n\n"
-
-        "🐋 HOLDER DAĞILIMI\n"
-
-        f"Top 1: {percent(top1)}\n"
-        f"Top 5: {percent(top5)}\n"
-        f"Top 10: {percent(top10)}\n\n"
-
-        "✅ GÜÇLÜ YANLAR\n"
-
-        f"{clean_lines(analysis.get('positives', []), 8, '•')}\n\n"
-
-        "⚠️ RİSKLER\n"
-
-        f"{clean_lines(analysis.get('warnings', []), 10, '•')}\n\n"
-
-        "━━━━━━━━━━━━━━━━━━\n"
-
-        "⚠️ HunterElite filtreleme aracıdır; "
-        "skorlar yatırım garantisi değildir."
-    )
-
-    return report[:4000]
-
-
-def build_scan_error(
-    errors: list,
-) -> str:
-
-    return (
-        "❌ HunterElite taraması tamamlanamadı.\n\n"
-
-        f"{clean_lines(errors, 6, '•')}\n\n"
-
-        "Token çok yeniyse birkaç saniye sonra tekrar dene."
-    )
+        "━━━━━━━━━━━━━━━━━━\
