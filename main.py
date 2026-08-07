@@ -218,7 +218,7 @@ async def analyze_message(
         )
 
 
-async def auto_hunter_job(
+
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     if not AUTO_HUNTER_ENABLED:
