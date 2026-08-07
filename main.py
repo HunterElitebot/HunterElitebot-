@@ -82,15 +82,17 @@ async def start(
         return
 
     await update.effective_message.reply_text(
-        "🛡 HUNTERELITE V4.1 AKTİF\n\n"
+        "🛡 HUNTERELITE V4.2 AKTİF\n\n"
         "Solana kontrat adresini gönder.\n\n"
         "• Rug Risk\n"
         "• Pump Potansiyeli\n"
-        "• Holder yoğunluğu\n"
-        "• Likidite\n"
+        "• Momentum Score\n"
+        "• Holder Score\n"
+        "• Top 1 / Top 5 / Top 10\n"
+        "• Likidite analizi\n"
         "• Buy/Sell momentum\n"
         "• Mint/Freeze kontrolü\n"
-        "• Karar filtresi\n\n"
+        "• Gelişmiş karar motoru\n\n"
         "🔒 Owner-only erişim aktif.\n"
         "⚠️ Skorlar yatırım garantisi değildir."
     )
@@ -105,7 +107,7 @@ async def help_command(
         return
 
     await update.effective_message.reply_text(
-        "🛡 HunterElite V4.1\n\n"
+        "🛡 HunterElite V4.2\n\n"
         "Bir Solana kontrat adresini buraya yapıştır.\n\n"
         "/start - Başlangıç\n"
         "/help - Yardım\n"
@@ -123,7 +125,9 @@ async def status_command(
         return
 
     await update.effective_message.reply_text(
-        "🟢 HunterElite V4.1 çalışıyor.\n"
+        "🟢 HunterElite V4.2 çalışıyor.\n"
+        "⚡ Momentum Score aktif.\n"
+        "🐋 Holder Score aktif.\n"
         "🔒 Owner-only güvenlik aktif."
     )
 
@@ -137,7 +141,7 @@ async def version_command(
         return
 
     await update.effective_message.reply_text(
-        "HunterElite V4.1 FINAL"
+        "HunterElite V4.2"
     )
 
 
@@ -174,7 +178,10 @@ async def analyze_message(
 
     status_message = (
         await update.effective_message.reply_text(
-            "🔎 HunterElite V4.1 analiz ediyor..."
+            "🔎 HunterElite V4.2 analiz ediyor...\n\n"
+            "⚡ Momentum hesaplanıyor...\n"
+            "🐋 Holder dağılımı inceleniyor...\n"
+            "🛡 Rug riski kontrol ediliyor..."
         )
     )
 
@@ -232,17 +239,25 @@ async def analyze_message(
         )
 
         logger.info(
-            "Analyzed contract=%s rug=%s pump=%s decision=%s",
+            "V4.2 analyzed contract=%s rug=%s pump=%s momentum=%s holder=%s decision=%s",
             contract,
             analysis["rug"]["score"],
             analysis["pump"]["score"],
+            analysis["pump"].get(
+                "momentum_score",
+                0,
+            ),
+            analysis["pump"].get(
+                "holder_score",
+                0,
+            ),
             analysis["decision"]["decision"],
         )
 
     except Exception as exc:
 
         logger.exception(
-            "Analysis failed: %s",
+            "V4.2 analysis failed: %s",
             exc,
         )
 
@@ -278,7 +293,7 @@ def main() -> None:
         )
 
     logger.info(
-        "HunterElite V4.1 FINAL starting owner_id=%s",
+        "HunterElite V4.2 starting owner_id=%s",
         OWNER_ID,
     )
 
