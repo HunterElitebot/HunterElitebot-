@@ -556,4 +556,9 @@ def decision_engine(
         )
 
     if (
-        top
+    top10 is not None
+    and top10 >= 40
+):
+    hard_reasons.append(
+        "Top 10 holder yoğunluğu yüksek"
+    )
