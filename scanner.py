@@ -561,7 +561,7 @@ def scan_token(
         )
 
     return result
-   def scan_market_only(
+def scan_market_only(
     contract: str,
 ) -> Dict[str, Any]:
     result = {
