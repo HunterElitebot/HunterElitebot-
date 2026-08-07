@@ -17,13 +17,18 @@ TOKEN = os.getenv("TOKEN")
 def money(value):
     try:
         value = float(value or 0)
+
         if value >= 1_000_000_000:
             return f"${value / 1_000_000_000:.2f}B"
+
         if value >= 1_000_000:
             return f"${value / 1_000_000:.2f}M"
+
         if value >= 1_000:
             return f"${value / 1_000:.1f}K"
+
         return f"${value:.2f}"
+
     except Exception:
         return "Bilinmiyor"
 
@@ -31,9 +36,12 @@ def money(value):
 def percent_value(value):
     try:
         v = float(value or 0)
+
         if v <= 1:
             v *= 100
+
         return v
+
     except Exception:
         return 0.0
 
@@ -41,13 +49,26 @@ def percent_value(value):
 def get_pair(contract):
     try:
         url = f"https://api.dexscreener.com/latest/dex/tokens/{contract}"
-        response = requests.get(url, timeout=12)
+
+        response = requests.get(
+            url,
+            timeout=12,
+        )
+
         response.raise_for_status()
 
         pairs = response.json().get("pairs") or []
+
         sol_pairs = [
-            p for p in pairs
-            if str(p.get("chainId", "")).lower() == "solana"
+            p
+            for p in pairs
+            if str(
+                p.get(
+                    "chainId",
+                    "",
+                )
+            ).lower()
+            == "solana"
         ]
 
         if not sol_pairs:
@@ -55,52 +76,103 @@ def get_pair(contract):
 
         return max(
             sol_pairs,
-            key=lambda p: (p.get("liquidity") or {}).get("usd") or 0,
+            key=lambda p: (
+                p.get("liquidity") or {}
+            ).get("usd")
+            or 0,
         )
 
     except Exception as e:
-        print("DEX ERROR:", e)
+        print(
+            "DEX ERROR:",
+            e,
+        )
+
         return None
 
 
 def get_rugcheck(contract):
     try:
-        url = f"https://api.rugcheck.xyz/v1/tokens/{contract}/report"
-        response = requests.get(url, timeout=15)
+        url = (
+            "https://api.rugcheck.xyz/"
+            f"v1/tokens/{contract}/report"
+        )
+
+        response = requests.get(
+            url,
+            timeout=15,
+        )
 
         if response.status_code != 200:
-            print("RUGCHECK STATUS:", response.status_code)
+            print(
+                "RUGCHECK STATUS:",
+                response.status_code,
+            )
+
             return None
 
         return response.json()
 
     except Exception as e:
-        print("RUGCHECK ERROR:", e)
+        print(
+            "RUGCHECK ERROR:",
+            e,
+        )
+
         return None
 
 
 def pair_age(pair):
-    created_at = pair.get("pairCreatedAt")
+    created_at = pair.get(
+        "pairCreatedAt"
+    )
 
     if not created_at:
-        return None, "Bilinmiyor"
+        return (
+            None,
+            "Bilinmiyor",
+        )
 
     try:
-        age_seconds = time.time() - (float(created_at) / 1000)
-        minutes = max(age_seconds / 60, 0)
+        age_seconds = (
+            time.time()
+            - (
+                float(created_at)
+                / 1000
+            )
+        )
+
+        minutes = max(
+            age_seconds / 60,
+            0,
+        )
 
         if minutes < 60:
-            return minutes, f"{minutes:.0f} dk"
+            return (
+                minutes,
+                f"{minutes:.0f} dk",
+            )
 
         hours = minutes / 60
+
         if hours < 24:
-            return minutes, f"{hours:.1f} saat"
+            return (
+                minutes,
+                f"{hours:.1f} saat",
+            )
 
         days = hours / 24
-        return minutes, f"{days:.1f} gun"
+
+        return (
+            minutes,
+            f"{days:.1f} gun",
+        )
 
     except Exception:
-        return None, "Bilinmiyor"
+        return (
+            None,
+            "Bilinmiyor",
+        )
 
 
 def security_data(rug):
@@ -114,25 +186,58 @@ def security_data(rug):
     }
 
     if not rug:
-        result["warnings"].append("RugCheck verisi alinamadi")
+        result[
+            "warnings"
+        ].append(
+            "RugCheck verisi alinamadi"
+        )
+
         return result
 
-    result["mint"] = rug.get("mintAuthority")
-    result["freeze"] = rug.get("freezeAuthority")
+    result["mint"] = rug.get(
+        "mintAuthority"
+    )
+
+    result["freeze"] = rug.get(
+        "freezeAuthority"
+    )
 
     if result["mint"]:
         result["risk"] += 20
-        result["warnings"].append("Mint Authority AKTIF")
+
+        result[
+            "warnings"
+        ].append(
+            "Mint Authority AKTIF"
+        )
+
     else:
-        result["positives"].append("Mint Authority kapali")
+        result[
+            "positives"
+        ].append(
+            "Mint Authority kapali"
+        )
 
     if result["freeze"]:
         result["risk"] += 15
-        result["warnings"].append("Freeze Authority AKTIF")
-    else:
-        result["positives"].append("Freeze Authority kapali")
 
-    holders = rug.get("topHolders") or []
+        result[
+            "warnings"
+        ].append(
+            "Freeze Authority AKTIF"
+        )
+
+    else:
+        result[
+            "positives"
+        ].append(
+            "Freeze Authority kapali"
+        )
+
+    holders = (
+        rug.get("topHolders")
+        or []
+    )
 
     if holders:
         top10 = 0.0
@@ -140,89 +245,129 @@ def security_data(rug):
         for holder in holders[:10]:
             raw = (
                 holder.get("pct")
-                or holder.get("percentage")
-                or holder.get("percent")
+                or holder.get(
+                    "percentage"
+                )
+                or holder.get(
+                    "percent"
+                )
                 or 0
             )
-            top10 += percent_value(raw)
+
+            top10 += percent_value(
+                raw
+            )
 
         result["top10"] = top10
 
         if top10 >= 70:
             result["risk"] += 30
-            result["warnings"].append(
+
+            result[
+                "warnings"
+            ].append(
                 f"Top 10 cok yogun: %{top10:.1f}"
             )
 
         elif top10 >= 50:
             result["risk"] += 20
-            result["warnings"].append(
+
+            result[
+                "warnings"
+            ].append(
                 f"Top 10 yuksek: %{top10:.1f}"
             )
 
         elif top10 >= 35:
             result["risk"] += 10
-            result["warnings"].append(
+
+            result[
+                "warnings"
+            ].append(
                 f"Top 10 dikkat: %{top10:.1f}"
             )
 
         else:
-            result["positives"].append(
+            result[
+                "positives"
+            ].append(
                 f"Top 10 dagilimi iyi: %{top10:.1f}"
             )
 
-    rug_risks = rug.get("risks") or []
+    rug_risks = (
+        rug.get("risks")
+        or []
+    )
 
     for item in rug_risks[:10]:
-        level = str(item.get("level", "")).lower()
-        name = item.get("name") or "Guvenlik uyarisi"
+        level = str(
+            item.get(
+                "level",
+                "",
+            )
+        ).lower()
 
-        if level in ("danger", "critical"):
+        name = (
+            item.get("name")
+            or "Guvenlik uyarisi"
+        )
+
+        if level in (
+            "danger",
+            "critical",
+        ):
             result["risk"] += 18
-            result["warnings"].append(name)
 
-        elif level in ("warn", "warning"):
+            result[
+                "warnings"
+            ].append(
+                name
+            )
+
+        elif level in (
+            "warn",
+            "warning",
+        ):
             result["risk"] += 8
-            result["warnings"].append(name)
+
+            result[
+                "warnings"
+            ].append(
+                name
+            )
 
     if not rug_risks:
-        result["positives"].append(
+        result[
+            "positives"
+        ].append(
             "RugCheck kritik uyari bildirmedi"
         )
 
     return result
 
 
-def calculate_risk(pair, rug):
+def calculate_risk(
+    pair,
+    rug,
+):
     risk = 0
     warnings = []
     positives = []
 
-    liquidity = (pair.get("liquidity") or {}).get("usd") or 0
-    market_cap = pair.get("marketCap") or pair.get("fdv") or 0
-
-    age_minutes, age_text = pair_age(pair)
-
-    if age_minutes is not None:
-        if age_minutes < 5:
-            risk += 15
-            warnings.append("Token 5 dakikadan yeni")
-
-        elif age_minutes < 15:
-            risk += 10
-            warnings.append("Token cok yeni")
-
-        elif age_minutes < 60:
-            risk += 5
-            warnings.append("Token 1 saatten genc")
-
-        else:
-            positives.append(
-                f"Token yasi: {age_text}"
+    liquidity = (
+        (
+            pair.get(
+                "liquidity"
             )
+            or {}
+        ).get(
+            "usd"
+        )
+        or 0
+    )
 
-    if liquidity < 5_000:
-        risk += 35
-        warnings.append("Likidite cok dusuk")
-
-    elif liquidity <
+    market_cap = (
+        pair.get(
+            "marketCap"
+        )
+        or
