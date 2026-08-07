@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from pump_score import (
     calculate_pump_score,
     calculate_top10,
+    calculate_holder_metrics,
     authority_status,
 )
 
@@ -71,8 +72,22 @@ def calculate_rug_risk(
         token.get("volume_5m")
     )
 
-    top10 = calculate_top10(
-        rug
+    holder_metrics = (
+        calculate_holder_metrics(
+            rug
+        )
+    )
+
+    top1 = holder_metrics.get(
+        "top1"
+    )
+
+    top5 = holder_metrics.get(
+        "top5"
+    )
+
+    top10 = holder_metrics.get(
+        "top10"
     )
 
     auth = authority_status(
@@ -86,6 +101,7 @@ def calculate_rug_risk(
     if liquidity < 2_000:
 
         score += 35
+
         warnings.append(
             "Likidite aşırı düşük"
         )
@@ -93,6 +109,7 @@ def calculate_rug_risk(
     elif liquidity < 5_000:
 
         score += 30
+
         warnings.append(
             "Likidite çok düşük"
         )
@@ -100,6 +117,7 @@ def calculate_rug_risk(
     elif liquidity < 15_000:
 
         score += 20
+
         warnings.append(
             "Likidite düşük"
         )
@@ -107,6 +125,7 @@ def calculate_rug_risk(
     elif liquidity < 30_000:
 
         score += 10
+
         warnings.append(
             "Likidite orta"
         )
@@ -147,6 +166,12 @@ def calculate_rug_risk(
                 "Likidite/MC düşük"
             )
 
+        elif ratio >= 0.10:
+
+            positives.append(
+                "Likidite/MC güçlü"
+            )
+
     # -------------------------
     # HOLDER RISK
     # -------------------------
@@ -154,512 +179,80 @@ def calculate_rug_risk(
     if top10 is None:
 
         warnings.append(
-            "Top 10 holder verisi yok"
-        )
-
-    elif top10 >= 80:
-
-        score += 30
-
-        warnings.append(
-            f"Top 10 tehlikeli: %{top10:.1f}"
-        )
-
-    elif top10 >= 70:
-
-        score += 25
-
-        warnings.append(
-            f"Top 10 çok yüksek: %{top10:.1f}"
-        )
-
-    elif top10 >= 50:
-
-        score += 18
-
-        warnings.append(
-            f"Top 10 yüksek: %{top10:.1f}"
-        )
-
-    elif top10 >= 35:
-
-        score += 8
-
-        warnings.append(
-            f"Top 10 dikkat: %{top10:.1f}"
+            "Holder verisi alınamadı"
         )
 
     else:
 
-        positives.append(
-            "Holder dağılımı sağlıklı"
-        )
+        if top10 >= 80:
 
-    # -------------------------
-    # AUTHORITY RISK
-    # -------------------------
+            score += 30
 
-    if auth["mint_closed"] is False:
+            warnings.append(
+                f"Top 10 tehlikeli: %{top10:.1f}"
+            )
 
-        score += 20
+        elif top10 >= 70:
 
-        warnings.append(
-            "Mint Authority AKTİF"
-        )
+            score += 25
 
-    elif auth["mint_closed"] is True:
+            warnings.append(
+                f"Top 10 çok yüksek: %{top10:.1f}"
+            )
 
-        positives.append(
-            "Mint Authority kapalı"
-        )
-
-    if auth["freeze_closed"] is False:
-
-        score += 15
-
-        warnings.append(
-            "Freeze Authority AKTİF"
-        )
-
-    elif auth["freeze_closed"] is True:
-
-        positives.append(
-            "Freeze Authority kapalı"
-        )
-
-    # -------------------------
-    # TOKEN AGE RISK
-    # -------------------------
-
-    if age is not None:
-
-        if age < 3:
+        elif top10 >= 50:
 
             score += 18
 
             warnings.append(
-                "Token aşırı yeni"
+                f"Top 10 yüksek: %{top10:.1f}"
             )
 
-        elif age < 10:
+        elif top10 >= 35:
 
-            score += 12
+            score += 8
 
             warnings.append(
-                "Token çok yeni"
+                f"Top 10 dikkat: %{top10:.1f}"
             )
 
-        elif age < 30:
+        else:
 
-            score += 6
-
-            warnings.append(
-                "Token erken aşamada"
+            positives.append(
+                "Top 10 dağılımı sağlıklı"
             )
 
-    # -------------------------
-    # TRADE PRESSURE
-    # -------------------------
+    if top5 is not None:
 
-    if total <= 0:
-
-        score += 8
-
-        warnings.append(
-            "Son 5 dk işlem yok"
-        )
-
-    elif (
-        buy_ratio is not None
-        and
-        total >= 20
-    ):
-
-        if buy_ratio < 0.25:
+        if top5 >= 50:
 
             score += 15
 
             warnings.append(
-                "Çok güçlü satış baskısı"
+                f"İlk 5 holder yoğun: %{top5:.1f}"
             )
 
-        elif buy_ratio < 0.35:
+        elif top5 >= 35:
 
-            score += 10
+            score += 8
 
             warnings.append(
-                "Satış baskısı yüksek"
+                f"İlk 5 holder dikkat: %{top5:.1f}"
             )
 
-        elif buy_ratio < 0.45:
+    if top1 is not None:
 
-            score += 5
+        if top1 >= 25:
+
+            score += 20
 
             warnings.append(
-                "Satış tarafı baskın"
+                f"Tek holder çok yüksek: %{top1:.1f}"
             )
 
-    # -------------------------
-    # SUSPICIOUS VOLUME
-    # -------------------------
-
-    if liquidity > 0:
-
-        abnormal_ratio = (
-            volume_5m
-            /
-            liquidity
-        )
-
-        if (
-            abnormal_ratio >= 5
-            and
-            total >= 100
-        ):
+        elif top1 >= 15:
 
             score += 12
 
             warnings.append(
-                "Hacim/likidite anormal yüksek"
-            )
-
-        elif (
-            abnormal_ratio >= 3
-            and
-            total >= 50
-        ):
-
-            score += 7
-
-            warnings.append(
-                "Hacim olağandışı yüksek"
-            )
-
-    # -------------------------
-    # RUGCHECK WARNINGS
-    # -------------------------
-
-    if rug:
-
-        risks = (
-            rug.get("risks")
-            or []
-        )
-
-        if isinstance(
-            risks,
-            list,
-        ):
-
-            extra_risk = 0
-
-            for item in risks[:15]:
-
-                if not isinstance(
-                    item,
-                    dict,
-                ):
-                    continue
-
-                level = str(
-                    item.get("level")
-                    or
-                    ""
-                ).lower()
-
-                name = str(
-                    item.get("name")
-                    or
-                    item.get("description")
-                    or
-                    "RugCheck uyarısı"
-                )
-
-                if level in (
-                    "critical",
-                    "danger",
-                ):
-
-                    extra_risk += 18
-
-                    warnings.append(
-                        f"RugCheck kritik: {name}"
-                    )
-
-                elif level in (
-                    "high",
-                    "warn",
-                    "warning",
-                ):
-
-                    extra_risk += 10
-
-                    warnings.append(
-                        f"RugCheck uyarı: {name}"
-                    )
-
-                elif level in (
-                    "medium",
-                    "moderate",
-                ):
-
-                    extra_risk += 5
-
-                    warnings.append(
-                        f"RugCheck dikkat: {name}"
-                    )
-
-            score += min(
-                extra_risk,
-                35,
-            )
-
-    # -------------------------
-    # FINAL RISK SCORE
-    # -------------------------
-
-    score = min(
-        max(
-            int(round(score)),
-            0,
-        ),
-        100,
-    )
-
-    if score <= 20:
-
-        label = "DÜŞÜK RİSK"
-
-    elif score <= 40:
-
-        label = "ORTA RİSK"
-
-    elif score <= 65:
-
-        label = "YÜKSEK RİSK"
-
-    else:
-
-        label = "ÇOK YÜKSEK RİSK"
-
-    return {
-        "score": score,
-        "label": label,
-        "warnings": warnings[:15],
-        "positives": positives[:10],
-        "top10": top10,
-    }
-
-
-def decision_engine(
-    rug_risk: int,
-    pump_score: int,
-    liquidity: float,
-    top10: Optional[float],
-    rug: Optional[Dict[str, Any]],
-) -> Dict[str, str]:
-
-    auth = authority_status(
-        rug
-    )
-
-    hard_reasons: List[str] = []
-
-    if rug_risk >= 70:
-
-        hard_reasons.append(
-            "Rug riski çok yüksek"
-        )
-
-    if liquidity < 5_000:
-
-        hard_reasons.append(
-            "Likidite çok düşük"
-        )
-
-    if (
-        top10 is not None
-        and
-        top10 >= 75
-    ):
-
-        hard_reasons.append(
-            "Holder yoğunluğu aşırı yüksek"
-        )
-
-    if auth["mint_closed"] is False:
-
-        hard_reasons.append(
-            "Mint authority aktif"
-        )
-
-    if auth["freeze_closed"] is False:
-
-        hard_reasons.append(
-            "Freeze authority aktif"
-        )
-
-    if hard_reasons:
-
-        return {
-            "decision": "UZAK DUR",
-            "emoji": "🔴",
-            "reason": ", ".join(
-                hard_reasons[:3]
-            ),
-        }
-
-    if (
-        rug_risk <= 20
-        and
-        pump_score >= 80
-        and
-        liquidity >= 30_000
-    ):
-
-        return {
-            "decision": "GÜÇLÜ ADAY",
-            "emoji": "🟢",
-            "reason": (
-                "Risk düşük; momentum ve likidite güçlü"
-            ),
-        }
-
-    if (
-        rug_risk <= 35
-        and
-        pump_score >= 65
-    ):
-
-        return {
-            "decision": "İZLE / DEĞERLENDİR",
-            "emoji": "🟡",
-            "reason": (
-                "Potansiyel var ancak riskler de mevcut"
-            ),
-        }
-
-    if (
-        rug_risk <= 50
-        and
-        pump_score >= 45
-    ):
-
-        return {
-            "decision": "BEKLE",
-            "emoji": "🟠",
-            "reason": (
-                "Veriler henüz yeterince güçlü değil"
-            ),
-        }
-
-    return {
-        "decision": "UZAK DUR",
-        "emoji": "🔴",
-        "reason": (
-            "Risk/potansiyel dengesi zayıf"
-        ),
-    }
-
-
-def analyze_token(
-    token: Dict[str, Any],
-    rug: Optional[Dict[str, Any]],
-) -> Dict[str, Any]:
-
-    rug_result = calculate_rug_risk(
-        token,
-        rug,
-    )
-
-    pump_result = calculate_pump_score(
-        token,
-        rug,
-    )
-
-    decision = decision_engine(
-        rug_risk=rug_result["score"],
-        pump_score=pump_result["score"],
-        liquidity=safe_float(
-            token.get(
-                "liquidity_usd"
-            )
-        ),
-        top10=rug_result.get(
-            "top10"
-        ),
-        rug=rug,
-    )
-
-    positives: List[str] = []
-
-    for item in (
-        rug_result.get(
-            "positives",
-            [],
-        )
-        +
-        pump_result.get(
-            "positives",
-            [],
-        )
-    ):
-
-        if item not in positives:
-
-            positives.append(
-                item
-            )
-
-    warnings: List[str] = []
-
-    for item in (
-        rug_result.get(
-            "warnings",
-            [],
-        )
-        +
-        pump_result.get(
-            "warnings",
-            [],
-        )
-    ):
-
-        if item not in warnings:
-
-            warnings.append(
-                item
-            )
-
-    confidence = int(
-        round(
-            (
-                (
-                    100
-                    -
-                    rug_result["score"]
-                )
-                +
-                pump_result["score"]
-            )
-            /
-            2
-        )
-    )
-
-    confidence = min(
-        max(
-            confidence,
-            0,
-        ),
-        100,
-    )
-
-    return {
-        "rug": rug_result,
-        "pump": pump_result,
-        "decision": decision,
-        "confidence": confidence,
-        "positives": positives[:12],
-        "warnings": warnings[:15],
-    }
+                f"En büyük holder yüksek
