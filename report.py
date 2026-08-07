@@ -162,6 +162,11 @@ def build_report(
         or {}
     )
 
+    elite = (
+        analysis.get("elite")
+        or {}
+    )
+
     rug_score = int(
         rug.get("score")
         or 0
@@ -185,6 +190,26 @@ def build_report(
     holder_score = int(
         pump.get("holder_score")
         or 0
+    )
+
+    elite_score = int(
+        elite.get("score")
+        or 0
+    )
+
+    elite_label = str(
+        elite.get("label")
+        or "Bilinmiyor"
+    )
+
+    elite_emoji = str(
+        elite.get("emoji")
+        or "⚪"
+    )
+
+    elite_watch = str(
+        elite.get("watch")
+        or "Bilinmiyor"
     )
 
     buy_ratio = token.get(
@@ -219,7 +244,7 @@ def build_report(
     )
 
     report = (
-        "🛡 HUNTERELITE V4.2\n"
+        "🛡 HUNTERELITE V4.3\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
 
         f"🪙 {token.get('name', 'Bilinmiyor')} "
@@ -248,6 +273,14 @@ def build_report(
         f"{bar(holder_score)}\n"
 
         f"{pump.get('holder_label', 'Bilinmiyor')}\n\n"
+
+        "👑 ELITE SCORE\n"
+        f"{elite_emoji} "
+        f"{elite_score}/100  "
+        f"{bar(elite_score)}\n"
+
+        f"{elite_label}\n"
+        f"🎯 Öncelik: {elite_watch}\n\n"
 
         "🎯 GENEL GÜVEN\n"
         f"{confidence}/100  "
