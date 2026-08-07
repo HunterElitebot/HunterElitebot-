@@ -13,10 +13,21 @@ from telegram.ext import (
     filters,
 )
 
-from config import TOKEN, OWNER_ID
+from config import (
+    TOKEN,
+    OWNER_ID,
+    AUTO_HUNTER_ENABLED,
+    AUTO_HUNTER_INTERVAL,
+)
+
 from scanner import scan_token
 from analyzer import analyze_token
-from report import build_report, build_scan_error
+from report import (
+    build_report,
+    build_alert_report,
+    build_scan_error,
+)
+from hunter import discover_candidates
 
 
 logging.basicConfig(
@@ -30,8 +41,13 @@ SOLANA_ADDRESS_RE = re.compile(
     r"^[1-9A-HJ-NP-Za-km-z]{32,44}$"
 )
 
+_seen_alerts: set[str] = set()
 
-def is_owner(update: Update) -> bool:
+
+def is_owner(
+    update: Update,
+) -> bool:
+
     user = update.effective_user
 
     return bool(
@@ -41,32 +57,17 @@ def is_owner(update: Update) -> bool:
     )
 
 
-async def deny_access(
-    update: Update,
-) -> None:
-
-    user = update.effective_user
-
-    logger.warning(
-        "Unauthorized access user_id=%s username=%s",
-        getattr(user, "id", None),
-        getattr(user, "username", None),
-    )
-
-    if update.effective_message:
-
-        await update.effective_message.reply_text(
-            "⛔ Yetkisiz kullanıcı."
-        )
-
-
 async def require_owner(
     update: Update,
 ) -> bool:
 
     if not is_owner(update):
 
-        await deny_access(update)
+        if update.effective_message:
+
+            await update.effective_message.reply_text(
+                "⛔ Yetkisiz kullanıcı."
+            )
 
         return False
 
@@ -82,57 +83,19 @@ async def start(
         return
 
     await update.effective_message.reply_text(
-        "🛡 HUNTERELITE V4.4 AKTİF\n\n"
-        "Solana kontrat adresini gönder.\n\n"
-        "• Rug Risk\n"
-        "• Pump Potansiyeli\n"
-        "• Momentum Score\n"
-        "• Holder Score\n"
-        "• Elite Score\n"
-        "• Gem Score\n"
-        "• Top 1 / Top 5 / Top 10\n"
-        "• Likidite analizi\n"
-        "• Buy/Sell momentum\n"
-        "• Mint/Freeze kontrolü\n"
-        "• Gelişmiş karar motoru\n\n"
-        "🔒 Owner-only erişim aktif.\n"
-        "⚠️ Skorlar yatırım garantisi değildir."
-    )
-
-
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await require_owner(update):
-        return
-
-    await update.effective_message.reply_text(
-        "🛡 HunterElite V4.4\n\n"
-        "Bir Solana kontrat adresini buraya yapıştır.\n\n"
-        "/start - Başlangıç\n"
-        "/help - Yardım\n"
-        "/status - Durum\n"
-        "/version - Sürüm"
-    )
-
-
-async def status_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> None:
-
-    if not await require_owner(update):
-        return
-
-    await update.effective_message.reply_text(
-        "🟢 HunterElite V4.4 çalışıyor.\n"
-        "⚡ Momentum Score aktif.\n"
-        "🐋 Holder Score aktif.\n"
-        "👑 Elite Score aktif.\n"
-        "💎 Gem Score aktif.\n"
-        "🔒 Owner-only güvenlik aktif."
+        "🛡 HUNTERELITE V5 FINAL AKTİF\n\n"
+        "Kontrat gönder → anlık analiz\n"
+        "Auto Hunter → uygun adayları otomatik tarar\n\n"
+        "🛡 Rug Risk\n"
+        "🚀 Pump Score\n"
+        "⚡ Momentum Score\n"
+        "🐋 Holder Score\n"
+        "👑 Elite Score\n"
+        "💎 Gem Score\n"
+        "🔥 100X Potansiyel\n"
+        "🎯 Trade Plan\n"
+        "🚨 Hunter Alert\n\n"
+        "🔒 Owner-only erişim aktif."
     )
 
 
@@ -145,7 +108,31 @@ async def version_command(
         return
 
     await update.effective_message.reply_text(
-        "HunterElite V4.4 FINAL"
+        "HunterElite V5 FINAL"
+    )
+
+
+async def status_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+
+    if not await require_owner(update):
+        return
+
+    auto_status = (
+        "AKTİF"
+        if AUTO_HUNTER_ENABLED
+        else "KAPALI"
+    )
+
+    await update.effective_message.reply_text(
+        "🟢 HunterElite V5 çalışıyor.\n"
+        f"🤖 Auto Hunter: {auto_status}\n"
+        f"⏱ Tarama aralığı: {AUTO_HUNTER_INTERVAL} sn\n"
+        "🔥 100X motoru aktif.\n"
+        "🎯 Trade Plan aktif.\n"
+        "🔒 Owner-only aktif."
     )
 
 
@@ -156,3 +143,12 @@ async def analyze_message(
 
     if not await require_owner(update):
         return
+
+    if (
+        not update.effective_message
+        or
+        not update.effective_message.text
+    ):
+        return
+
+    contract
