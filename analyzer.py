@@ -531,10 +531,18 @@ def analyze_token(
     )
 
     return {
-        "rug": rug_result,
-        "pump": pump_result,
-        "decision": decision,
-        "confidence": confidence,
-        "positives": positives[:15],
-        "warnings": warnings[:18],
-    }
+    "rug": rug_result,
+    "pump": pump_result,
+    "decision": decision,
+    "confidence": confidence,
+    "positives": positives[:15],
+    "warnings": warnings[:18],
+    "elite": calculate_elite_score(
+        token,
+        {
+            "rug": rug_result,
+            "pump": pump_result,
+            "confidence": confidence,
+        },
+    ),
+}
