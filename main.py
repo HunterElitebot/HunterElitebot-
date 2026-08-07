@@ -267,4 +267,4 @@ def calculate_risk(pair, rug):
             warnings.append("🔴 Satış baskısı yüksek")
         elif buy_ratio < 0.45 and total_tx >= 20:
             risk += 6
-            warnings.append("🟡 Satış
+            warnings.append("🟡 Satis baskisi artiyor")
