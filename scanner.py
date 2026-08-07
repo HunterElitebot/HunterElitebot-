@@ -16,6 +16,7 @@ from config import (
     RETRY_DELAY,
 )
 
+
 logger = logging.getLogger("HunterElite.Scanner")
 
 
@@ -23,14 +24,20 @@ class APIError(Exception):
     pass
 
 
-def safe_float(value: Any, default: float = 0.0) -> float:
+def safe_float(
+    value: Any,
+    default: float = 0.0,
+) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return default
 
 
-def safe_int(value: Any, default: int = 0) -> int:
+def safe_int(
+    value: Any,
+    default: int = 0,
+) -> int:
     try:
         return int(float(value))
     except (TypeError, ValueError):
@@ -109,7 +116,6 @@ class RetrySession:
             data,
             dict,
         ):
-
             raise APIError(
                 "API geçerli JSON nesnesi döndürmedi."
             )
@@ -138,14 +144,13 @@ class DexScreenerClient:
             or []
         )
 
-        return (
-            pairs
-            if isinstance(
-                pairs,
-                list,
-            )
-            else []
-        )
+        if isinstance(
+            pairs,
+            list,
+        ):
+            return pairs
+
+        return []
 
     def get_best_pair(
         self,
@@ -208,10 +213,8 @@ class DexScreenerClient:
 
             try:
 
-                data = (
-                    self.http.get_json_any(
-                        url
-                    )
+                data = self.http.get_json_any(
+                    url
                 )
 
             except Exception as exc:
@@ -266,7 +269,6 @@ class DexScreenerClient:
                     and
                     address not in addresses
                 ):
-
                     addresses.append(
                         address
                     )
@@ -410,50 +412,89 @@ def normalize_pair(
         )
     )
 
-    total = buys + sells 
-       return {
+    total = buys + sells
+
+    return {
         "name": str(
-            base.get("name")
-            or "Bilinmiyor"
+            base.get(
+                "name"
+            )
+            or
+            "Bilinmiyor"
         ),
+
         "symbol": str(
-            base.get("symbol")
-            or "?"
+            base.get(
+                "symbol"
+            )
+            or
+            "?"
         ),
+
         "address": str(
-            base.get("address")
-            or ""
+            base.get(
+                "address"
+            )
+            or
+            ""
         ),
+
         "price_usd": safe_float(
-            pair.get("priceUsd")
+            pair.get(
+                "priceUsd"
+            )
         ),
+
         "liquidity_usd": liquidity,
+
         "market_cap_usd": market_cap,
+
         "fdv_usd": safe_float(
-            pair.get("fdv")
+            pair.get(
+                "fdv"
+            )
         ),
+
         "volume_5m": safe_float(
-            volume.get("m5")
+            volume.get(
+                "m5"
+            )
         ),
+
         "volume_1h": safe_float(
-            volume.get("h1")
+            volume.get(
+                "h1"
+            )
         ),
+
         "buys_5m": buys,
+
         "sells_5m": sells,
+
         "total_trades_5m": total,
+
         "buy_ratio_5m": (
             buys / total
             if total
             else None
         ),
-        "age_minutes": pair_age_minutes(
-            pair
+
+        "age_minutes": (
+            pair_age_minutes(
+                pair
+            )
         ),
-        "age_text": pair_age_text(
-            pair
+
+        "age_text": (
+            pair_age_text(
+                pair
+            )
         ),
+
         "liquidity_mc_ratio": (
-            liquidity / market_cap
+            liquidity
+            /
+            market_cap
             if market_cap > 0
             else None
         ),
@@ -474,6 +515,7 @@ def scan_token(
     }
 
     try:
+
         pair = (
             DexScreenerClient()
             .get_best_pair(
@@ -482,28 +524,47 @@ def scan_token(
         )
 
         if pair is None:
-            result["errors"].append(
-                "DexScreener üzerinde Solana pair bulunamadı."
+
+            result[
+                "errors"
+            ].append(
+                "DexScreener üzerinde "
+                "Solana pair bulunamadı."
             )
 
         else:
-            result["pair"] = pair
-            result["token"] = normalize_pair(
+
+            result[
+                "pair"
+            ] = pair
+
+            result[
+                "token"
+            ] = normalize_pair(
                 pair
             )
-            result["success"] = True
+
+            result[
+                "success"
+            ] = True
 
     except Exception as exc:
+
         logger.exception(
             "DexScreener tarama hatası"
         )
 
-        result["errors"].append(
+        result[
+            "errors"
+        ].append(
             f"DexScreener hatası: {exc}"
         )
 
     try:
-        result["rug"] = (
+
+        result[
+            "rug"
+        ] = (
             RugCheckClient()
             .get_report(
                 contract
@@ -511,13 +572,16 @@ def scan_token(
         )
 
     except Exception as exc:
+
         logger.warning(
             "RugCheck verisi alınamadı: %s",
             exc,
         )
 
-        result["errors"].append(
+        result[
+            "errors"
+        ].append(
             f"RugCheck hatası: {exc}"
         )
 
-    return result 
+    return result
