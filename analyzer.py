@@ -9,9 +9,14 @@ from pump_score import (
 )
 from elite_score import calculate_elite_score
 from gem_score import calculate_gem_score
+from x100_score import calculate_x100_score
+from trade_plan import build_trade_plan
 
 
-def safe_float(value: Any, default: float = 0.0) -> float:
+def safe_float(
+    value: Any,
+    default: float = 0.0,
+) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -36,18 +41,14 @@ def calculate_rug_risk(
     )
 
     if ratio is not None:
-        ratio = safe_float(
-            ratio
-        )
+        ratio = safe_float(ratio)
 
     age = token.get(
         "age_minutes"
     )
 
     if age is not None:
-        age = safe_float(
-            age
-        )
+        age = safe_float(age)
 
     buy_ratio = token.get(
         "buy_ratio_5m"
@@ -92,14 +93,9 @@ def calculate_rug_risk(
         rug
     )
 
-    # -------------------------
-    # LIQUIDITY RISK
-    # -------------------------
-
     if liquidity < 2_000:
 
         score += 35
-
         warnings.append(
             "Likidite aşırı düşük"
         )
@@ -107,7 +103,6 @@ def calculate_rug_risk(
     elif liquidity < 5_000:
 
         score += 30
-
         warnings.append(
             "Likidite çok düşük"
         )
@@ -115,7 +110,6 @@ def calculate_rug_risk(
     elif liquidity < 15_000:
 
         score += 20
-
         warnings.append(
             "Likidite düşük"
         )
@@ -123,7 +117,6 @@ def calculate_rug_risk(
     elif liquidity < 30_000:
 
         score += 10
-
         warnings.append(
             "Likidite orta"
         )
@@ -134,16 +127,11 @@ def calculate_rug_risk(
             "Likidite güçlü"
         )
 
-    # -------------------------
-    # LIQUIDITY / MC
-    # -------------------------
-
     if ratio is not None:
 
         if ratio < 0.01:
 
             score += 20
-
             warnings.append(
                 "Likidite/MC aşırı düşük"
             )
@@ -151,7 +139,6 @@ def calculate_rug_risk(
         elif ratio < 0.02:
 
             score += 15
-
             warnings.append(
                 "Likidite/MC çok düşük"
             )
@@ -159,20 +146,9 @@ def calculate_rug_risk(
         elif ratio < 0.05:
 
             score += 8
-
             warnings.append(
                 "Likidite/MC düşük"
             )
-
-        elif ratio >= 0.10:
-
-            positives.append(
-                "Likidite/MC güçlü"
-            )
-
-    # -------------------------
-    # HOLDER RISK
-    # -------------------------
 
     if top10 is None:
 
@@ -183,7 +159,6 @@ def calculate_rug_risk(
     elif top10 >= 80:
 
         score += 30
-
         warnings.append(
             f"Top 10 tehlikeli: %{top10:.1f}"
         )
@@ -191,7 +166,6 @@ def calculate_rug_risk(
     elif top10 >= 70:
 
         score += 25
-
         warnings.append(
             f"Top 10 çok yüksek: %{top10:.1f}"
         )
@@ -199,7 +173,6 @@ def calculate_rug_risk(
     elif top10 >= 50:
 
         score += 18
-
         warnings.append(
             f"Top 10 yüksek: %{top10:.1f}"
         )
@@ -207,7 +180,6 @@ def calculate_rug_risk(
     elif top10 >= 35:
 
         score += 8
-
         warnings.append(
             f"Top 10 dikkat: %{top10:.1f}"
         )
@@ -223,7 +195,6 @@ def calculate_rug_risk(
         if top5 >= 50:
 
             score += 15
-
             warnings.append(
                 f"İlk 5 holder yoğun: %{top5:.1f}"
             )
@@ -231,7 +202,6 @@ def calculate_rug_risk(
         elif top5 >= 35:
 
             score += 8
-
             warnings.append(
                 f"İlk 5 holder dikkat: %{top5:.1f}"
             )
@@ -241,7 +211,6 @@ def calculate_rug_risk(
         if top1 >= 25:
 
             score += 20
-
             warnings.append(
                 f"Tek holder çok yüksek: %{top1:.1f}"
             )
@@ -249,7 +218,6 @@ def calculate_rug_risk(
         elif top1 >= 15:
 
             score += 12
-
             warnings.append(
                 f"En büyük holder yüksek: %{top1:.1f}"
             )
@@ -260,14 +228,9 @@ def calculate_rug_risk(
                 "En büyük holder payı düşük"
             )
 
-    # -------------------------
-    # AUTHORITY RISK
-    # -------------------------
-
     if auth["mint_closed"] is False:
 
         score += 20
-
         warnings.append(
             "Mint Authority AKTİF"
         )
@@ -281,7 +244,6 @@ def calculate_rug_risk(
     if auth["freeze_closed"] is False:
 
         score += 15
-
         warnings.append(
             "Freeze Authority AKTİF"
         )
@@ -292,16 +254,11 @@ def calculate_rug_risk(
             "Freeze Authority kapalı"
         )
 
-    # -------------------------
-    # TOKEN AGE
-    # -------------------------
-
     if age is not None:
 
         if age < 3:
 
             score += 18
-
             warnings.append(
                 "Token aşırı yeni"
             )
@@ -309,7 +266,6 @@ def calculate_rug_risk(
         elif age < 10:
 
             score += 12
-
             warnings.append(
                 "Token çok yeni"
             )
@@ -317,25 +273,13 @@ def calculate_rug_risk(
         elif age < 30:
 
             score += 6
-
             warnings.append(
                 "Token erken aşamada"
             )
 
-        elif age > 1440:
-
-            positives.append(
-                "Token ilk gün riskini geçmiş"
-            )
-
-    # -------------------------
-    # BUY / SELL PRESSURE
-    # -------------------------
-
     if total <= 0:
 
         score += 8
-
         warnings.append(
             "Son 5 dk işlem yok"
         )
@@ -348,7 +292,6 @@ def calculate_rug_risk(
         if buy_ratio < 0.25:
 
             score += 15
-
             warnings.append(
                 "Çok güçlü satış baskısı"
             )
@@ -356,7 +299,6 @@ def calculate_rug_risk(
         elif buy_ratio < 0.35:
 
             score += 10
-
             warnings.append(
                 "Satış baskısı yüksek"
             )
@@ -364,7 +306,6 @@ def calculate_rug_risk(
         elif buy_ratio < 0.45:
 
             score += 5
-
             warnings.append(
                 "Satış tarafı baskın"
             )
@@ -374,10 +315,6 @@ def calculate_rug_risk(
             positives.append(
                 "Alım baskısı güçlü"
             )
-
-    # -------------------------
-    # SUSPICIOUS VOLUME
-    # -------------------------
 
     if liquidity > 0:
 
@@ -393,7 +330,6 @@ def calculate_rug_risk(
         ):
 
             score += 12
-
             warnings.append(
                 "Hacim/likidite anormal yüksek"
             )
@@ -404,14 +340,9 @@ def calculate_rug_risk(
         ):
 
             score += 7
-
             warnings.append(
                 "Hacim olağandışı yüksek"
             )
-
-    # -------------------------
-    # RUGCHECK WARNINGS
-    # -------------------------
 
     if rug:
 
@@ -454,7 +385,6 @@ def calculate_rug_risk(
                 ):
 
                     extra_risk += 18
-
                     warnings.append(
                         f"RugCheck kritik: {name}"
                     )
@@ -466,7 +396,6 @@ def calculate_rug_risk(
                 ):
 
                     extra_risk += 10
-
                     warnings.append(
                         f"RugCheck uyarı: {name}"
                     )
@@ -477,7 +406,6 @@ def calculate_rug_risk(
                 ):
 
                     extra_risk += 5
-
                     warnings.append(
                         f"RugCheck dikkat: {name}"
                     )
@@ -486,10 +414,6 @@ def calculate_rug_risk(
                 extra_risk,
                 35,
             )
-
-    # -------------------------
-    # FINAL RISK
-    # -------------------------
 
     score = min(
         max(
@@ -528,37 +452,4 @@ def calculate_rug_risk(
 
 def decision_engine(
     rug_risk: int,
-    pump_score: int,
-    momentum_score: int,
-    holder_score: int,
-    liquidity: float,
-    top1: Optional[float],
-    top10: Optional[float],
-    rug: Optional[Dict[str, Any]],
-) -> Dict[str, str]:
-
-    auth = authority_status(
-        rug
-    )
-
-    hard_reasons: List[str] = []
-
-    if rug_risk >= 70:
-
-        hard_reasons.append(
-            "Rug riski çok yüksek"
-        )
-
-    if liquidity < 5_000:
-
-        hard_reasons.append(
-            "Likidite çok düşük"
-        )
-
-    if (
-    top10 is not None
-    and top10 >= 40
-):
-    hard_reasons.append(
-        "Top 10 holder yoğunluğu yüksek"
-    )
+    pump
