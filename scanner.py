@@ -410,4 +410,4 @@ def normalize_pair(
         )
     )
 
-    total =
+    total = buys + sells 
