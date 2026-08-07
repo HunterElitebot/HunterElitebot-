@@ -35,12 +35,12 @@ def money(value):
 
 def percent_value(value):
     try:
-        v = float(value or 0)
+        value = float(value or 0)
 
-        if v <= 1:
-            v *= 100
+        if value <= 1:
+            value *= 100
 
-        return v
+        return value
 
     except Exception:
         return 0.0
@@ -60,10 +60,10 @@ def get_pair(contract):
         pairs = response.json().get("pairs") or []
 
         sol_pairs = [
-            p
-            for p in pairs
+            pair
+            for pair in pairs
             if str(
-                p.get(
+                pair.get(
                     "chainId",
                     "",
                 )
@@ -76,16 +76,16 @@ def get_pair(contract):
 
         return max(
             sol_pairs,
-            key=lambda p: (
-                p.get("liquidity") or {}
+            key=lambda pair: (
+                pair.get("liquidity") or {}
             ).get("usd")
             or 0,
         )
 
-    except Exception as e:
+    except Exception as exc:
         print(
             "DEX ERROR:",
-            e,
+            exc,
         )
 
         return None
@@ -113,10 +113,10 @@ def get_rugcheck(contract):
 
         return response.json()
 
-    except Exception as e:
+    except Exception as exc:
         print(
             "RUGCHECK ERROR:",
-            e,
+            exc,
         )
 
         return None
@@ -366,15 +366,222 @@ def calculate_risk(
         or 0
     )
 
-   market_cap = pair.get("marketCap") or 0
+    market_cap = (
+        pair.get("marketCap")
+        or pair.get("fdv")
+        or 0
+    )
 
-fdv = pair.get("fdv") or 0
+    (
+        age_minutes,
+        age_text,
+    ) = pair_age(
+        pair
+    )
 
-price = pair.get("priceUsd") or "?"
+    if age_minutes is not None:
+        if age_minutes < 5:
+            risk += 15
 
-volume = pair.get("volume") or {}
+            warnings.append(
+                "Token 5 dakikadan yeni"
+            )
 
-m5 = (pair.get("txns") or {}).get("m5") or {}
+        elif age_minutes < 15:
+            risk += 10
 
-buys = m5.get("buys") or 0
-sells = m5.get("sells") or 0 
+            warnings.append(
+                "Token cok yeni"
+            )
+
+        elif age_minutes < 60:
+            risk += 5
+
+            warnings.append(
+                "Token 1 saatten genc"
+            )
+
+        else:
+            positives.append(
+                f"Token yasi: {age_text}"
+            )
+
+    if liquidity < 5_000:
+        risk += 35
+
+        warnings.append(
+            "Likidite cok dusuk"
+        )
+
+    elif liquidity < 15_000:
+        risk += 22
+
+        warnings.append(
+            "Likidite dusuk"
+        )
+
+    elif liquidity < 30_000:
+        risk += 10
+
+        warnings.append(
+            "Likidite orta"
+        )
+
+    else:
+        positives.append(
+            "Likidite guclu"
+        )
+
+    liq_mc_ratio = None
+
+    if market_cap and liquidity:
+        liq_mc_ratio = (
+            liquidity
+            / market_cap
+        )
+
+        if liq_mc_ratio < 0.02:
+            risk += 18
+
+            warnings.append(
+                "Likidite/MC cok dusuk"
+            )
+
+        elif liq_mc_ratio < 0.05:
+            risk += 10
+
+            warnings.append(
+                "Likidite/MC dusuk"
+            )
+
+        elif liq_mc_ratio >= 0.10:
+            positives.append(
+                "Likidite/MC iyi: "
+                f"%{liq_mc_ratio * 100:.1f}"
+            )
+
+    m5 = (
+        (
+            pair.get("txns")
+            or {}
+        ).get("m5")
+        or {}
+    )
+
+    buys = (
+        m5.get("buys")
+        or 0
+    )
+
+    sells = (
+        m5.get("sells")
+        or 0
+    )
+
+    total = (
+        buys
+        + sells
+    )
+
+    if total == 0:
+        risk += 8
+
+        warnings.append(
+            "Son 5 dk islem yok"
+        )
+
+    else:
+        buy_ratio = (
+            buys
+            / total
+        )
+
+        if (
+            buy_ratio < 0.30
+            and total >= 20
+        ):
+            risk += 12
+
+            warnings.append(
+                "Satis baskisi yuksek"
+            )
+
+        elif (
+            buy_ratio < 0.45
+            and total >= 20
+        ):
+            risk += 6
+
+            warnings.append(
+                "Satis baskisi artiyor"
+            )
+
+        elif buy_ratio >= 0.60:
+            positives.append(
+                "Buy orani iyi: "
+                f"%{buy_ratio * 100:.0f}"
+            )
+
+    sec = security_data(
+        rug
+    )
+
+    risk += sec["risk"]
+
+    warnings.extend(
+        sec["warnings"]
+    )
+
+    positives.extend(
+        sec["positives"]
+    )
+
+    return {
+        "risk": min(
+            risk,
+            100,
+        ),
+        "warnings": warnings,
+        "positives": positives,
+        "top10": sec["top10"],
+        "mint": sec["mint"],
+        "freeze": sec["freeze"],
+        "age_text": age_text,
+        "liq_mc_ratio": liq_mc_ratio,
+    }
+
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await update.message.reply_text(
+        "🛡 HunterElite Rug Scanner V3 aktif!\n\n"
+        "Bir Solana kontrat adresi gonder.\n\n"
+        "V3 kontrolleri:\n"
+        "💧 Likidite\n"
+        "📊 Market Cap / FDV\n"
+        "⚖️ Likidite / Market Cap\n"
+        "⚡ Buy / Sell hareketi\n"
+        "🐋 Top 10 holder yogunlugu\n"
+        "🪙 Mint Authority\n"
+        "❄️ Freeze Authority\n"
+        "🚨 RugCheck riskleri\n"
+        "🎯 Hunter Risk Score"
+    )
+
+
+async def analyze(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    contract = (
+        update.message.text.strip()
+    )
+
+    if (
+        len(contract) < 32
+        or len(contract) > 50
+    ):
+        await update.message.reply_text(
+            "G
