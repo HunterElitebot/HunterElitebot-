@@ -222,3 +222,111 @@ def discover_candidates(
             )
 
     return found
+    def discover_flash_candidates(
+    limit: int = 25,
+):
+    from scanner import (
+        DexScreenerClient,
+        scan_market_only,
+    )
+
+    addresses = (
+        DexScreenerClient()
+        .get_discovery_addresses()
+    )
+
+    results = []
+
+    for address in addresses[:limit]:
+
+        try:
+            scan = scan_market_only(
+                address
+            )
+
+            if not scan.get("success"):
+                continue
+
+            token = scan.get("token")
+
+            if not token:
+                continue
+
+            liquidity = float(
+                token.get(
+                    "liquidity_usd"
+                )
+                or 0
+            )
+
+            market_cap = float(
+                token.get(
+                    "market_cap_usd"
+                )
+                or 0
+            )
+
+            buys = int(
+                token.get(
+                    "buys_5m"
+                )
+                or 0
+            )
+
+            sells = int(
+                token.get(
+                    "sells_5m"
+                )
+                or 0
+            )
+
+            volume_5m = float(
+                token.get(
+                    "volume_5m"
+                )
+                or 0
+            )
+
+            total = buys + sells
+
+            buy_ratio = (
+                buys / total
+                if total > 0
+                else 0
+            )
+
+            if liquidity < 8000:
+                continue
+
+            if market_cap < 10000:
+                continue
+
+            if market_cap > 400000:
+                continue
+
+            if total < 20:
+                continue
+
+            if buy_ratio < 0.52:
+                continue
+
+            if volume_5m < 3000:
+                continue
+
+            results.append(
+                (
+                    address,
+                    token,
+                )
+            )
+
+        except Exception as exc:
+
+            logger.warning(
+                "Flash candidate error "
+                "address=%s error=%s",
+                address,
+                exc,
+            )
+
+    return results
