@@ -154,4 +154,5 @@ async def analyze_message(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
 
-    if not await
+    if not await require_owner(update):
+    return
