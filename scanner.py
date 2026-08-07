@@ -561,3 +561,42 @@ def scan_token(
         )
 
     return result
+   def scan_market_only(
+    contract: str,
+) -> Dict[str, Any]:
+    result = {
+        "success": False,
+        "contract": contract,
+        "token": None,
+        "errors": [],
+    }
+
+    try:
+        pair = (
+            DexScreenerClient()
+            .get_best_pair(contract)
+        )
+
+        if pair is None:
+            result["errors"].append(
+                "Solana pair bulunamadı."
+            )
+            return result
+
+        result["token"] = normalize_pair(
+            pair
+        )
+
+        result["success"] = True
+
+    except Exception as exc:
+        logger.warning(
+            "Flash scan error: %s",
+            exc,
+        )
+
+        result["errors"].append(
+            str(exc)
+        )
+
+    return result 
