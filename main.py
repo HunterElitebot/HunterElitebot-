@@ -252,4 +252,120 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(
         "🔍 HunterElite V2 tarıyor...\n\n"
         "🐋 Holder dağılımı\n"
-        "🔐 Yet
+        "🔐 Yetkiler\n"
+        "💧 Likidite\n"
+        "🚨 Güvenlik sinyalleri kontrol ediliyor..."
+    )
+
+    pair = get_dex(contract)
+
+    if not pair:
+        await msg.edit_text(
+            "❌ Solana DEX verisi bulunamadı.\n"
+            "Adres yanlış veya token henüz işlem görmüyor olabilir."
+        )
+        return
+
+    rug = get_rugcheck(contract)
+
+    (
+        risk,
+        warnings,
+        positives,
+        top10,
+        mint_auth,
+        freeze_auth,
+    ) = calculate_risk(pair, rug)
+
+    token = pair.get("baseToken") or {}
+
+    name = token.get("name") or "Bilinmiyor"
+    symbol = token.get("symbol") or "?"
+
+    liquidity = (pair.get("liquidity") or {}).get("usd") or 0
+    market_cap = pair.get("marketCap") or 0
+    fdv = pair.get("fdv") or 0
+    price = pair.get("priceUsd") or "?"
+
+    volume = pair.get("volume") or {}
+    volume_5m = volume.get("m5") or 0
+    volume_1h = volume.get("h1") or 0
+
+    m5 = (pair.get("txns") or {}).get("m5") or {}
+    buys = m5.get("buys") or 0
+    sells = m5.get("sells") or 0
+
+    if risk <= 20:
+        label = "🟢 GEÇTİ"
+    elif risk <= 45:
+        label = "🟡 DİKKATLİ İNCELE"
+    elif risk <= 70:
+        label = "🟠 YÜKSEK RİSK"
+    else:
+        label = "🔴 ÇOK YÜKSEK RİSK"
+
+    top10_text = (
+        f"%{top10:.1f}" if top10 is not None else "Veri yok"
+    )
+
+    mint_text = "🔴 AKTİF" if mint_auth else "🟢 KAPALI"
+    freeze_text = "🔴 AKTİF" if freeze_auth else "🟢 KAPALI"
+
+    warning_text = "\n".join(warnings[:10])
+    if not warning_text:
+        warning_text = "✅ Belirgin uyarı bulunamadı."
+
+    positive_text = "\n".join(positives[:8])
+
+    text = (
+        "🛡 HUNTERELITE RUG SCANNER V2\n\n"
+        f"🪙 {name} ({symbol})\n\n"
+        f"💵 Fiyat: ${price}\n"
+        f"📊 Market Cap: {money(market_cap)}\n"
+        f"🎯 FDV: {money(fdv)}\n"
+        f"💧 Likidite: {money(liquidity)}\n"
+        f"📈 Hacim 5 dk: {money(volume_5m)}\n"
+        f"📈 Hacim 1 saat: {money(volume_1h)}\n\n"
+
+        "⚡ SON 5 DK\n"
+        f"🟢 Buy: {buys}\n"
+        f"🔴 Sell: {sells}\n\n"
+
+        "🐋 HOLDER / CONTRACT\n"
+        f"Top 10: {top10_text}\n"
+        f"Mint Authority: {mint_text}\n"
+        f"Freeze Authority: {freeze_text}\n\n"
+
+        "━━━━━━━━━━━━━━\n"
+        f"🎯 HUNTER RISK: {risk}/100\n"
+        f"{label}\n"
+        "━━━━━━━━━━━━━━\n\n"
+
+        f"🚨 UYARILAR\n{warning_text}\n"
+    )
+
+    if positive_text:
+        text += f"\n✅ POZİTİF\n{positive_text}\n"
+
+    text += (
+        "\n⚠️ Düşük risk puanı güvenli olduğu anlamına gelmez. "
+        "Yeni tokenlerde koşullar saniyeler içinde değişebilir."
+    )
+
+    await msg.edit_text(text)
+
+
+if not TOKEN:
+    raise RuntimeError("Railway TOKEN değişkeni bulunamadı.")
+
+
+app = ApplicationBuilder().token(TOKEN).build()
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(
+    MessageHandler(filters.TEXT & ~filters.COMMAND, analyze)
+)
+
+print("HunterElite Rug Scanner V2 started")
+
+app.run_polling()
