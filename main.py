@@ -152,3 +152,68 @@ async def analyze_message(
         return
 
     contract
+   def main() -> None:
+    if not TOKEN:
+        raise RuntimeError(
+            "Railway Variables içinde TOKEN bulunamadı."
+        )
+
+    if OWNER_ID is None:
+        raise RuntimeError(
+            "Railway Variables içinde geçerli OWNER_ID bulunamadı."
+        )
+
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .build()
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "start",
+            start,
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "version",
+            version_command,
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "status",
+            status_command,
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT
+            &
+            ~filters.COMMAND,
+            analyze_message,
+        )
+    )
+
+    app.add_error_handler(
+        error_handler
+    )
+
+    if AUTO_HUNTER_ENABLED:
+        app.job_queue.run_repeating(
+            auto_hunter_job,
+            interval=AUTO_HUNTER_INTERVAL,
+            first=20,
+        )
+
+    app.run_polling(
+        drop_pending_updates=True
+    )
+
+
+if __name__ == "__main__":
+    main() 
