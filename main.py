@@ -1,199 +1,170 @@
-import os
-import asyncio
-import requests
+from __future__ import annotations
+import os, asyncio, requests
+from typing import Any, Dict, Optional
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
-TOKEN = os.getenv("TOKEN")
-OWNER_ID = os.getenv("OWNER_ID", "").strip()
+TOKEN=os.getenv("TOKEN","").strip()
+DEX="https://api.dexscreener.com/latest/dex/tokens/{}"
+RUG="https://api.rugcheck.xyz/v1/tokens/{}/report"
+TIMEOUT=12
+MC_MIN,MC_MAX=2000.0,10000.0
 
-MC_MIN = 2_000
-MC_MAX = 10_000
-
-def as_float(v):
+def num(v, default=None):
     try:
-        if v is None or v == "":
-            return None
+        if v is None:return default
         return float(v)
-    except (TypeError, ValueError):
-        return None
+    except (TypeError,ValueError):return default
 
 def money(v):
-    if v is None:
-        return "⚠️ VERİ ALINAMADI"
-    try:
-        v = float(v)
-        if v >= 1_000_000:
-            return f"${v/1_000_000:.2f}M"
-        if v >= 1_000:
-            return f"${v/1_000:.2f}K"
-        return f"${v:.2f}"
-    except (TypeError, ValueError):
-        return "⚠️ VERİ ALINAMADI"
+    return "⚠️ VERİ ALINAMADI" if v is None else f"${v:,.2f}"
 
-def dex_pairs(ca):
-    # Güncel DEX Screener token endpoint'i.
-    url = f"https://api.dexscreener.com/tokens/v1/solana/{ca}"
-    r = requests.get(url, timeout=12, headers={"Accept": "application/json"})
+def get_json(url):
+    r=requests.get(url,timeout=TIMEOUT,headers={"User-Agent":"HunterEliteBot/9.2"})
     r.raise_for_status()
-    data = r.json()
-    if not isinstance(data, list):
-        return []
-    return [p for p in data if isinstance(p, dict) and p.get("chainId") == "solana"]
+    return r.json()
 
-def choose_pair(pairs):
-    if not pairs:
-        return None
-
+def dex_pair(ca):
+    raw=get_json(DEX.format(ca))
+    pairs=[p for p in (raw.get("pairs") or []) if str(p.get("chainId","")).lower()=="solana"]
+    if not pairs:return None
     def rank(p):
-        liq = as_float((p.get("liquidity") or {}).get("usd"))
-        vol = as_float((p.get("volume") or {}).get("h24"))
-        return (liq if liq is not None else -1, vol if vol is not None else -1)
+        return (num((p.get("liquidity") or {}).get("usd"),0) or 0,
+                num((p.get("volume") or {}).get("h24"),0) or 0)
+    return max(pairs,key=rank)
 
-    return max(pairs, key=rank)
+def rug_report(ca):
+    try:return get_json(RUG.format(ca))
+    except Exception:return None
 
-def rugcheck(ca):
-    try:
-        r = requests.get(f"https://api.rugcheck.xyz/v1/tokens/{ca}/report", timeout=15)
-        if r.ok:
-            data = r.json()
-            if isinstance(data, dict):
-                return data, True
-    except requests.RequestException:
-        pass
-    except ValueError:
-        pass
-    return {}, False
+def authority_state(raw, key):
+    if not isinstance(raw,dict): return None
+    val=raw.get(key)
+    if val is None:
+        token=raw.get("token") or raw.get("tokenMeta") or {}
+        val=token.get(key) if isinstance(token,dict) else None
+    if isinstance(val,bool): return val
+    if isinstance(val,str):
+        s=val.strip().lower()
+        if s in ("","null","none","false","revoked","disabled"): return False
+        return True
+    return None if val is None else bool(val)
+
+def holder_stats(raw):
+    if not isinstance(raw,dict): return None,None,None
+    holders=raw.get("topHolders") or raw.get("top_holders") or raw.get("holders")
+    if not isinstance(holders,list) or not holders:return None,None,None
+    vals=[]
+    for h in holders:
+        if not isinstance(h,dict):continue
+        v=None
+        for k in ("pct","percentage","percent","ownershipPct","ownershipPercentage"):
+            if h.get(k) is not None:
+                v=num(h.get(k)); break
+        if v is not None:
+            if 0 <= v <= 1: v*=100
+            vals.append(v)
+    if not vals:return None,None,None
+    return vals[0],sum(vals[:5]),sum(vals[:10])
+
+def rug_signals(raw):
+    text=""
+    risks=[]
+    if isinstance(raw,dict):
+        risks=raw.get("risks") or []
+        text=str(raw).lower()
+    keywords={
+        "bundler":("bundl",),
+        "insider":("insider",),
+        "sniper":("sniper",),
+        "honeypot":("honeypot","honey pot"),
+        "rug":("rug pull","rugpull"),
+    }
+    found=set()
+    for name,words in keywords.items():
+        if any(w in text for w in words):found.add(name)
+    # Prefer explicit risk records if present
+    for r in risks if isinstance(risks,list) else []:
+        if not isinstance(r,dict):continue
+        s=(" ".join(str(r.get(k,"")) for k in ("name","description","message","level"))).lower()
+        for name,words in keywords.items():
+            if any(w in s for w in words):found.add(name)
+    return found
 
 def analyze(ca):
-    pairs = dex_pairs(ca)
-    p = choose_pair(pairs)
-    if not p:
-        return "❌ Solana market/pair bulunamadı."
+    try:p=dex_pair(ca)
+    except Exception:p=None
+    if not p:return "❌ DEX Screener üzerinde Solana pair bulunamadı."
 
-    liq = as_float((p.get("liquidity") or {}).get("usd"))
-    market_cap_raw = as_float(p.get("marketCap"))
-    fdv = as_float(p.get("fdv"))
-    mc = market_cap_raw if market_cap_raw is not None else fdv
+    mc=num(p.get("marketCap"))
+    if mc is None: mc=num(p.get("fdv"))
+    liq=num((p.get("liquidity") or {}).get("usd"))
+    tx5=(p.get("txns") or {}).get("m5") or {}
+    tx1=(p.get("txns") or {}).get("h1") or {}
+    buys5=int(num(tx5.get("buys"),0) or 0); sells5=int(num(tx5.get("sells"),0) or 0)
+    buys1=int(num(tx1.get("buys"),0) or 0); sells1=int(num(tx1.get("sells"),0) or 0)
+    vol5=num((p.get("volume") or {}).get("m5"),0) or 0
+    ch5=num((p.get("priceChange") or {}).get("m5"),0) or 0
 
-    tx = p.get("txns") or {}
-    m5 = tx.get("m5") or {}
-    h1 = tx.get("h1") or {}
-    buys5 = int(as_float(m5.get("buys")) or 0)
-    sells5 = int(as_float(m5.get("sells")) or 0)
-    buys1 = int(as_float(h1.get("buys")) or 0)
-    sells1 = int(as_float(h1.get("sells")) or 0)
-    volume5 = as_float((p.get("volume") or {}).get("m5"))
-    price5 = as_float((p.get("priceChange") or {}).get("m5"))
+    rug=rug_report(ca)
+    top1,top5,top10=holder_stats(rug)
+    mint=authority_state(rug,"mintAuthority")
+    freeze=authority_state(rug,"freezeAuthority")
+    signals=rug_signals(rug)
 
-    rc, rug_ok = rugcheck(ca)
-    risks = rc.get("risks") or []
-    risk_text = " ".join(str(x).lower() for x in risks)
+    score=70
+    risks=[]; data=[]
 
-    top10 = as_float(rc.get("topHoldersPercentage"))
-    mint = rc.get("mintAuthority")
-    freeze = rc.get("freezeAuthority")
+    if mc is None:data.append("Market cap verisi alınamadı"); score-=15
+    elif not MC_MIN<=mc<=MC_MAX:risks.append("Market cap 2K–10K giriş bölgesi dışında"); score-=15
 
-    score = 100
-    flags = []
-    data_warnings = []
+    if liq is None:data.append("Likidite verisi alınamadı")
+    elif liq<5000:risks.append("Likidite < $5K"); score-=20
+    else:score+=5
 
-    # Market-cap gate
-    if mc is None:
-        score -= 20
-        data_warnings.append("Market cap/FDV verisi alınamadı")
-    elif not (MC_MIN <= mc <= MC_MAX):
-        score -= 35
-        flags.append("Market cap 2K–10K giriş bölgesi dışında")
+    if sells5>buys5:risks.append("5dk satış baskısı"); score-=10
+    elif buys5>sells5*1.4 and buys5>=10:score+=8
+    if vol5<500:risks.append("5dk hacim zayıf"); score-=8
+    elif vol5>=5000:score+=5
+    if ch5>=100:risks.append("5dk aşırı pump"); score-=18
 
-    # Liquidity: V9.1'de None ile gerçek 0 ayrılır.
-    if liq is None:
-        score -= 20
-        data_warnings.append("Likidite verisi alınamadı")
-    elif liq == 0:
-        score -= 40
-        flags.append("Likidite gerçek $0")
-    elif liq < 5_000:
-        score -= 35
-        flags.append("Likidite < $5K")
-    elif liq < 15_000:
-        score -= 22
-        flags.append("Likidite düşük")
-    elif liq < 30_000:
-        score -= 10
-
-    # RugCheck / holder / authority
-    if not rug_ok:
-        score -= 10
-        data_warnings.append("RugCheck verisi alınamadı")
+    if rug is None:
+        data.append("RugCheck verisi alınamadı"); score-=10
     else:
-        if top10 is None:
-            data_warnings.append("Top-10 holder yüzdesi API yanıtında yok")
-        elif top10 >= 60:
-            score -= 25
-            flags.append("Top-10 holder ≥ %60")
-        elif top10 >= 40:
-            score -= 15
-            flags.append("Top-10 holder ≥ %40")
+        if top10 is None:data.append("Top-10 holder yüzdesi API yanıtında yok")
+        else:
+            if top10>=50:risks.append(f"Top-10 holder çok yüksek: %{top10:.1f}"); score-=25
+            elif top10>=35:risks.append(f"Top-10 holder yüksek: %{top10:.1f}"); score-=15
+            else:score+=5
+        if top1 is not None and top1>=20:risks.append(f"En büyük holder yüksek: %{top1:.1f}"); score-=15
+        if mint is True:risks.append("Mint authority aktif"); score-=20
+        elif mint is False:score+=5
+        else:data.append("Mint authority durumu alınamadı")
+        if freeze is True:risks.append("Freeze authority aktif"); score-=20
+        elif freeze is False:score+=5
+        else:data.append("Freeze authority durumu alınamadı")
+        penalties={"bundler":15,"insider":15,"sniper":10,"honeypot":30,"rug":30}
+        labels={"bundler":"Bundler riski","insider":"Insider riski","sniper":"Sniper riski",
+                "honeypot":"Honeypot riski","rug":"Rug-pull sinyali"}
+        for s in sorted(signals):
+            risks.append(labels[s]); score-=penalties[s]
 
-        if mint:
-            score -= 20
-            flags.append("Mint authority aktif")
-        if freeze:
-            score -= 15
-            flags.append("Freeze authority aktif")
+    score=max(0,min(100,score))
+    critical=(liq is None or rug is None or top10 is None)
+    if score>=75 and mc is not None and MC_MIN<=mc<=MC_MAX and not critical:
+        verdict="🟢 UYGUN GİRİŞ ADAYI"
+    elif score>=50:
+        verdict="🟡 BEKLE / KRİTİK VERİ EKSİK" if critical else "🟡 BEKLE / DİKKATLİ İNCELE"
+    else:verdict="🔴 GİRME / YÜKSEK RİSK"
 
-        danger_words = ("honeypot", "rug", "bundl", "insider", "sniper")
-        if any(w in risk_text for w in danger_words):
-            score -= 20
-            flags.append("RugCheck kritik uyarı")
+    name=(p.get("baseToken") or {}).get("name") or "Token"
+    symbol=(p.get("baseToken") or {}).get("symbol") or "?"
+    holder_line="N/A" if top10 is None else f"%{top10:.1f}"
+    auth=lambda v: "⚠️ N/A" if v is None else ("🔴 AKTİF" if v else "✅ KAPALI")
+    risk_text="\n".join("• "+x for x in risks) or "• Belirgin kritik sinyal yok"
+    data_text="\n".join("• "+x for x in data) or "• Kritik veri eksiği yok"
 
-    # Momentum / activity
-    if buys5 > sells5 * 1.35 and buys5 >= 8:
-        score += 8
-    elif sells5 > buys5 * 1.4:
-        score -= 12
-        flags.append("5dk satış baskısı")
-
-    if volume5 is None:
-        data_warnings.append("5dk hacim verisi alınamadı")
-    elif volume5 < 250:
-        score -= 8
-        flags.append("5dk hacim zayıf")
-
-    if price5 is None:
-        data_warnings.append("5dk fiyat değişimi alınamadı")
-    else:
-        if price5 > 80:
-            score -= 10
-            flags.append("5dk aşırı pump")
-        if price5 < -25:
-            score -= 10
-            flags.append("5dk sert düşüş")
-
-    score = max(0, min(100, score))
-
-    # Kritik veri eksikse yeşil sonuç verme.
-    critical_missing = mc is None or liq is None or not rug_ok
-    if critical_missing:
-        verdict = "🟡 BEKLE / KRİTİK VERİ EKSİK"
-    elif MC_MIN <= mc <= MC_MAX and score >= 75:
-        verdict = "🟢 UYGUN GİRİŞ ADAYI"
-    elif score >= 50:
-        verdict = "🟡 BEKLE / DİKKATLİ İNCELE"
-    else:
-        verdict = "🔴 GİRME / YÜKSEK RİSK"
-
-    name = (p.get("baseToken") or {}).get("name") or "Token"
-    symbol = (p.get("baseToken") or {}).get("symbol") or "?"
-    flags_s = "\n".join(f"• {x}" for x in flags[:8]) or "• Belirgin kritik risk sinyali yok"
-    warnings_s = "\n".join(f"• {x}" for x in data_warnings[:8]) or "• Kritik veri eksiği yok"
-
-    top10_text = f"%{top10:.1f}" if top10 is not None else "N/A"
-    rug_text = "✅ ALINDI" if rug_ok else "⚠️ ALINAMADI"
-    price_text = f"{price5:+.1f}%" if price5 is not None else "N/A"
-
-    return f"""🦅 HUNTERELITE V9.1
+    return f"""🦅 HUNTERELITE V9.2
 
 {name} ({symbol})
 CA: {ca}
@@ -204,66 +175,48 @@ Likidite: {money(liq)}
 
 ⚡ 5dk: {buys5} buy / {sells5} sell
 📊 1s: {buys1} buy / {sells1} sell
-💵 5dk hacim: {money(volume5)}
-📈 5dk fiyat: {price_text}
+💵 5dk hacim: {money(vol5)}
+📈 5dk fiyat: {ch5:+.1f}%
 
-🧪 Veri Kontrolü
-DEX Pair: ✅ ALINDI
-RugCheck: {rug_text}
-Top-10 holder: {top10_text}
+🧪 RugCheck Derin Kontrol
+RugCheck: {"✅ ALINDI" if rug is not None else "⚠️ ALINAMADI"}
+Top-10 holder: {holder_line}
+Mint authority: {auth(mint)}
+Freeze authority: {auth(freeze)}
+Bundler: {"🔴 SİNYAL" if "bundler" in signals else "✅ YOK"}
+Insider: {"🔴 SİNYAL" if "insider" in signals else "✅ YOK"}
+Sniper: {"🟠 SİNYAL" if "sniper" in signals else "✅ YOK"}
 
 🛡 Hunter Elite Score: {score}/100
 {verdict}
 
 ⚠️ Riskler:
-{flags_s}
+{risk_text}
 
 📡 Veri Durumu:
-{warnings_s}
+{data_text}
 
 Not: Bu rapor risk filtresidir; kâr garantisi değildir."""
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🦅 HunterEliteBot V9.1 aktif!\n\n"
-        "Solana kontrat adresini gönder.\n"
-        "🎯 Ana giriş taraması: $2K–$10K market cap"
-    )
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "✅ HunterElite V9.1 ONLINE\n"
-        "🎯 Market giriş filtresi: $2K–$10K\n"
-        "📡 Eksik veri koruması: AKTİF"
-    )
-
-async def handle_ca(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ca = (update.message.text or "").strip()
-    if len(ca) < 30 or " " in ca:
-        await update.message.reply_text("Solana kontrat adresini tek satır olarak gönder.")
-        return
-
-    msg = await update.message.reply_text("🔎 V9.1 tarıyor...")
-    try:
-        result = await asyncio.to_thread(analyze, ca)
-    except requests.RequestException:
-        result = "❌ DEX/API bağlantı hatası. Biraz sonra tekrar dene."
-    except Exception as e:
-        result = f"❌ Analiz hatası: {type(e).__name__}"
-
+async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🦅 HunterEliteBot V9.2 aktif!\nSolana kontrat adresini gönder.")
+async def status(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ HunterElite V9.2 ONLINE\n🎯 Market giriş filtresi: $2K–$10K")
+async def handle(update:Update,context:ContextTypes.DEFAULT_TYPE):
+    ca=(update.message.text or "").strip()
+    if len(ca)<30 or " " in ca:
+        await update.message.reply_text("Solana kontrat adresini tek satır olarak gönder.");return
+    msg=await update.message.reply_text("🔎 V9.2 derin tarıyor...")
+    try:result=await asyncio.to_thread(analyze,ca)
+    except Exception as e:result=f"❌ Analiz hatası: {type(e).__name__}"
     await msg.edit_text(result)
 
 def main():
-    if not TOKEN:
-        raise RuntimeError("Railway Variables içinde TOKEN eksik.")
-
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_ca))
-
-    print("HUNTERELITE V9.1 ONLINE")
+    if not TOKEN:raise RuntimeError("Railway Variables içinde TOKEN eksik.")
+    app=ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start",start))
+    app.add_handler(CommandHandler("status",status))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,handle))
+    print("HUNTERELITE V9.2 ONLINE")
     app.run_polling(drop_pending_updates=True)
-
-if __name__ == "__main__":
-    main()
+if __name__=="__main__":main()

@@ -1,15 +1,10 @@
-# HunterEliteBot V9.1 CLEAN
+# HunterEliteBot V9.2 CLEAN
 
-V9.1 düzeltmeleri:
-- DEX Screener güncel token endpoint'i
-- Likidite gerçek $0 ile veri alınamadı ayrımı
-- Kritik veri eksikse yeşil giriş sonucu verilmez
-- RugCheck veri durumu görünür
-- Top-10 holder veri durumu görünür
-- DEX pair seçimi likidite/hacme göre yapılır
-- $2K-$10K market-cap giriş filtresi korunur
+V9.2 derin risk kontrolü:
+- Top-1 / Top-5 / Top-10 holder yüzdesini API sağlıyorsa değerlendirir
+- Mint authority ve freeze authority durumunu skora dahil eder
+- RugCheck yanıtındaki bundler, insider, sniper, honeypot ve rug sinyallerini tarar
+- Eksik veriyi güvenli kabul etmez
+- DEX Screener likidite verisi yoksa $0 yerine VERİ ALINAMADI gösterir
 
-Railway Variable:
-TOKEN = BotFather'dan aldığın güncel token
-
-Not: Risk filtresidir; kâr garantisi değildir.
+Railway variable: TOKEN
