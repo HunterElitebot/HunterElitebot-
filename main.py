@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.5 SINGLE ENGINE FIX"
+VERSION = "V11.6 EARLY ENTRY"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -19,10 +19,10 @@ BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 # still work via sendMessage using SIGNAL_CHAT_ID.
 POLLING_ENABLED = os.getenv("POLLING_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
 
-MC_MIN = 2000
+MC_MIN = 1000
 MC_MAX = 15000
 EARLY_MC_MAX = 10000
-MIN_LIQUIDITY = 1200
+MIN_LIQUIDITY = 800
 
 # V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
 WATCH_SCORE = 47
@@ -474,7 +474,7 @@ def calculate_score(pair, report):
         score -= 10
         risks.append("Holder daÄŸÄ±lÄ±mÄ± doÄŸrulanamadÄ±")
     else:
-        if top10 >= 80:
+        if top10 >= 82:
             score -= 40
             risks.append("Top-10 holder aÅŸÄ±rÄ± yoÄŸun")
         elif top10 >= 70:
@@ -1286,7 +1286,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Automatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nAutomatic signal engine is running.""")
 
 
 def startup():
@@ -1294,6 +1294,7 @@ def startup():
     print(f"TELEGRAM POLLING: {'ON' if POLLING_ENABLED else 'OFF - AUTO SIGNAL MODE'}", flush=True)
     print("EARLY HUNTER ACTIVE", flush=True)
     print(f"SCAN INTERVAL: {SCAN_INTERVAL}s", flush=True)
+    print(f"EARLY ENTRY FILTERS: MC>={MC_MIN}, LIQ>={MIN_LIQUIDITY}, TOP10<=82% target", flush=True)
     print(
         f"TUNING: watch={WATCH_SCORE}, signal={SIGNAL_SCORE}, "
         f"momentum>={MIN_MOMENTUM_SIGNAL}, MC growth>={int((MIN_MC_GROWTH-1)*100)}%, "
