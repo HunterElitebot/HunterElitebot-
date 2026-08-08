@@ -1,54 +1,181 @@
-import asyncio,logging,re
+import os
+import asyncio
+import requests
 from telegram import Update
-from telegram.ext import ApplicationBuilder,CommandHandler,ContextTypes,MessageHandler,filters
-from config import TOKEN,OWNER_ID,AUTO_HUNTER_ENABLED,AUTO_HUNTER_INTERVAL
-from scanner import scan_token
-from analyzer import analyze_token
-from report import build_report,build_alert_report,build_scan_error
-from hunter import discover_candidates
-logging.basicConfig(level=logging.INFO,format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"); logging.getLogger("httpx").setLevel(logging.WARNING); logger=logging.getLogger("HunterElite")
-SOLANA_ADDRESS_RE=re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$"); _seen_alerts=set()
-def is_owner(u):
-    user=u.effective_user; return bool(user and OWNER_ID is not None and user.id==OWNER_ID)
-async def require_owner(u):
-    if is_owner(u):return True
-    if u.effective_message:await u.effective_message.reply_text("⛔ Yetkisiz kullanıcı.")
-    return False
-async def start_command(u,c):
-    if not await require_owner(u):return
-    await u.effective_message.reply_text("🛡 HUNTERELITE V5 FINAL AKTİF\n\n📩 Solana kontrat adresi gönder → analiz et\n🤖 Auto Hunter → güçlü adayları otomatik tara\n🔥 100X motoru aktif\n🎯 Trade Plan aktif\n🔒 Owner-only aktif")
-async def version_command(u,c):
-    if await require_owner(u):await u.effective_message.reply_text("HunterElite V5 FINAL")
-async def status_command(u,c):
-    if not await require_owner(u):return
-    await u.effective_message.reply_text(f"🟢 HunterElite V5 çalışıyor.\n🤖 Auto Hunter: {'AKTİF' if AUTO_HUNTER_ENABLED else 'KAPALI'}\n⏱ Tarama aralığı: {AUTO_HUNTER_INTERVAL} sn\n🔥 100X motoru aktif.\n🎯 Trade Plan aktif.\n🔒 Owner-only aktif.")
-async def analyze_message(u,c):
-    if not await require_owner(u):return
-    m=u.effective_message
-    if m is None or not m.text:return
-    contract=m.text.strip().replace(" ","")
-    if not SOLANA_ADDRESS_RE.fullmatch(contract):await m.reply_text("❌ Geçerli bir Solana kontrat adresine benzemiyor."); return
-    s=await m.reply_text("🔎 HunterElite V5 analiz ediyor...")
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+
+TOKEN = os.getenv("TOKEN")
+OWNER_ID = os.getenv("OWNER_ID", "").strip()
+
+MC_MIN = 2_000
+MC_MAX = 10_000
+
+def money(v):
     try:
-        r=await asyncio.to_thread(scan_token,contract)
-        if not r.get("success"):await s.edit_text(build_scan_error(r.get("errors",[]))); return
-        t=r.get("token")
-        if not t:await s.edit_text("❌ Token piyasa verisi alınamadı."); return
-        a=await asyncio.to_thread(analyze_token,t,r.get("rug")); await s.edit_text(build_report(t,a))
-    except Exception as e:logger.exception("Manual analysis failed: %s",e); await s.edit_text("❌ Analiz sırasında hata oluştu.")
-async def auto_hunter_job(c):
-    if not AUTO_HUNTER_ENABLED or OWNER_ID is None:return
+        v = float(v or 0)
+        if v >= 1_000_000: return f"${v/1_000_000:.2f}M"
+        if v >= 1_000: return f"${v/1_000:.2f}K"
+        return f"${v:.2f}"
+    except:
+        return "$0"
+
+def pct(v):
+    try: return f"{float(v):.1f}%"
+    except: return "N/A"
+
+def dex_pair(ca):
+    url = f"https://api.dexscreener.com/latest/dex/tokens/{ca}"
+    r = requests.get(url, timeout=12)
+    r.raise_for_status()
+    pairs = r.json().get("pairs") or []
+    sol = [p for p in pairs if p.get("chainId") == "solana"]
+    if not sol:
+        return None
+    return max(sol, key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0))
+
+def rugcheck(ca):
     try:
-        for address,t,a in await asyncio.to_thread(discover_candidates,25):
-            if address in _seen_alerts:continue
-            _seen_alerts.add(address); await c.bot.send_message(chat_id=OWNER_ID,text=build_alert_report(t,a))
-        if len(_seen_alerts)>2000:_seen_alerts.clear()
-    except Exception as e:logger.exception("Auto Hunter failed: %s",e)
-async def error_handler(u,c):logger.error("Telegram handler error",exc_info=c.error)
+        r = requests.get(f"https://api.rugcheck.xyz/v1/tokens/{ca}/report", timeout=15)
+        if r.ok:
+            return r.json()
+    except:
+        pass
+    return {}
+
+def analyze(ca):
+    p = dex_pair(ca)
+    if not p:
+        return "❌ Solana market/pair bulunamadı."
+
+    liq = float((p.get("liquidity") or {}).get("usd") or 0)
+    mc = float(p.get("marketCap") or p.get("fdv") or 0)
+    tx = p.get("txns") or {}
+    m5 = tx.get("m5") or {}
+    h1 = tx.get("h1") or {}
+    buys5, sells5 = int(m5.get("buys") or 0), int(m5.get("sells") or 0)
+    buys1, sells1 = int(h1.get("buys") or 0), int(h1.get("sells") or 0)
+    volume5 = float((p.get("volume") or {}).get("m5") or 0)
+    price5 = float((p.get("priceChange") or {}).get("m5") or 0)
+
+    rc = rugcheck(ca)
+    risks = rc.get("risks") or []
+    risk_text = " ".join(str(x).lower() for x in risks)
+    top10 = rc.get("topHoldersPercentage")
+    mint = rc.get("mintAuthority")
+    freeze = rc.get("freezeAuthority")
+
+    score = 100
+    flags = []
+
+    # V9: 2K–10K market-entry gate
+    if not (MC_MIN <= mc <= MC_MAX):
+        score -= 35
+        flags.append("Market cap 2K–10K giriş bölgesi dışında")
+
+    # Liquidity
+    if liq < 5_000:
+        score -= 35; flags.append("Likidite < $5K")
+    elif liq < 15_000:
+        score -= 22; flags.append("Likidite düşük")
+    elif liq < 30_000:
+        score -= 10
+
+    # Holder / authority / RugCheck layer
+    try:
+        t = float(top10)
+        if t >= 60: score -= 25; flags.append("Top-10 holder ≥ %60")
+        elif t >= 40: score -= 15; flags.append("Top-10 holder ≥ %40")
+    except: pass
+
+    if mint:
+        score -= 20; flags.append("Mint authority aktif")
+    if freeze:
+        score -= 15; flags.append("Freeze authority aktif")
+
+    danger_words = ("honeypot", "rug", "bundl", "insider", "sniper")
+    if any(w in risk_text for w in danger_words):
+        score -= 20
+        flags.append("RugCheck kritik uyarı")
+
+    # Momentum / activity
+    if buys5 > sells5 * 1.35 and buys5 >= 8:
+        score += 8
+    elif sells5 > buys5 * 1.4:
+        score -= 12; flags.append("5dk satış baskısı")
+
+    if volume5 < 250:
+        score -= 8; flags.append("5dk hacim zayıf")
+    if price5 > 80:
+        score -= 10; flags.append("5dk aşırı pump")
+    if price5 < -25:
+        score -= 10; flags.append("5dk sert düşüş")
+
+    score = max(0, min(100, score))
+
+    if MC_MIN <= mc <= MC_MAX and score >= 75:
+        verdict = "🟢 UYGUN GİRİŞ ADAYI"
+    elif score >= 50:
+        verdict = "🟡 BEKLE / DİKKATLİ İNCELE"
+    else:
+        verdict = "🔴 GİRME / YÜKSEK RİSK"
+
+    name = (p.get("baseToken") or {}).get("name") or "Token"
+    symbol = (p.get("baseToken") or {}).get("symbol") or "?"
+    flags_s = "\n".join(f"• {x}" for x in flags[:8]) or "• Belirgin kritik sinyal yok"
+
+    return f"""🦅 HUNTERELITE V9
+
+{name} ({symbol})
+CA: {ca}
+
+🎯 Market Giriş Bölgesi: $2K–$10K
+Market Cap: {money(mc)}
+Likidite: {money(liq)}
+
+⚡ 5dk: {buys5} buy / {sells5} sell
+📊 1s: {buys1} buy / {sells1} sell
+💵 5dk hacim: {money(volume5)}
+📈 5dk fiyat: {price5:+.1f}%
+
+🛡 Hunter Elite Score: {score}/100
+{verdict}
+
+⚠️ Kontroller:
+{flags_s}
+
+Not: Bu rapor risk filtresidir; kâr garantisi değildir."""
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🦅 HunterEliteBot V9 aktif!\n\n"
+        "Solana kontrat adresini gönder.\n"
+        "🎯 Ana giriş taraması: $2K–$10K market cap"
+    )
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ HunterElite V9 ONLINE\n🎯 Market giriş filtresi: $2K–$10K")
+
+async def handle_ca(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ca = (update.message.text or "").strip()
+    if len(ca) < 30 or " " in ca:
+        await update.message.reply_text("Solana kontrat adresini tek satır olarak gönder.")
+        return
+    msg = await update.message.reply_text("🔎 V9 tarıyor...")
+    try:
+        result = await asyncio.to_thread(analyze, ca)
+    except Exception as e:
+        result = f"❌ Analiz hatası: {type(e).__name__}"
+    await msg.edit_text(result)
+
 def main():
-    if not TOKEN:raise RuntimeError("Railway Variables içinde TOKEN bulunamadı.")
-    if OWNER_ID is None:raise RuntimeError("Railway Variables içinde geçerli OWNER_ID bulunamadı.")
-    app=ApplicationBuilder().token(TOKEN).build(); app.add_handler(CommandHandler("start",start_command)); app.add_handler(CommandHandler("version",version_command)); app.add_handler(CommandHandler("status",status_command)); app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,analyze_message)); app.add_error_handler(error_handler)
-    if AUTO_HUNTER_ENABLED:app.job_queue.run_repeating(auto_hunter_job,interval=AUTO_HUNTER_INTERVAL,first=20)
-    logger.info("Telegram polling başlatılıyor."); app.run_polling(drop_pending_updates=True)
-if __name__=="__main__":main()
+    if not TOKEN:
+        raise RuntimeError("Railway Variables içinde TOKEN eksik.")
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_ca))
+    print("HUNTERELITE V9 ONLINE")
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
