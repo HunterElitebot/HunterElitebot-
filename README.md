@@ -1,22 +1,15 @@
-# HunterEliteBot V9
+# HunterEliteBot V9.1 CLEAN
 
-Telefon/GitHub/Railway için hazır paket.
+V9.1 düzeltmeleri:
+- DEX Screener güncel token endpoint'i
+- Likidite gerçek $0 ile veri alınamadı ayrımı
+- Kritik veri eksikse yeşil giriş sonucu verilmez
+- RugCheck veri durumu görünür
+- Top-10 holder veri durumu görünür
+- DEX pair seçimi likidite/hacme göre yapılır
+- $2K-$10K market-cap giriş filtresi korunur
 
-## Railway Variable
-TOKEN = Telegram BotFather'dan aldığın YENİ bot tokenı.
+Railway Variable:
+TOKEN = BotFather'dan aldığın güncel token
 
-ÖNEMLİ: Daha önce sohbet içinde paylaşılan tokenları kullanma; BotFather'dan revoke edip yeni token üret.
-
-## V9
-- Solana kontrat analizi
-- 2K–10K market cap ana giriş filtresi
-- Likidite kontrolü
-- Buy/Sell momentum
-- RugCheck risk katmanı
-- Top-10 holder kontrolü (API verisi mevcutsa)
-- Mint/Freeze authority kontrolü (API verisi mevcutsa)
-- Honeypot/rug/bundler/insider/sniper risk kelimeleri
-- Hunter Elite Score
-- UYGUN GİRİŞ / BEKLE / GİRME raporu
-
-Not: Harici API alanları zamanla değişebilir. Eksik veri, güvenli kabul edilmez.
+Not: Risk filtresidir; kâr garantisi değildir.
