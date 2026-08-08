@@ -9,9 +9,15 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.4 TEST RADAR"
+VERSION = "V11.5 SINGLE ENGINE FIX"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
+
+# V11.5: single-engine mode.
+# Telegram getUpdates polling is OFF by default so another stale/duplicate
+# poller cannot interfere with automatic signal delivery. Automatic alerts
+# still work via sendMessage using SIGNAL_CHAT_ID.
+POLLING_ENABLED = os.getenv("POLLING_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
 
 MC_MIN = 2000
 MC_MAX = 15000
@@ -21,7 +27,7 @@ MIN_LIQUIDITY = 1200
 # V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
 WATCH_SCORE = 47
 SIGNAL_SCORE = 60
-SCAN_INTERVAL = 40
+SCAN_INTERVAL = 30
 
 BIRDEYE_POLL_INTERVAL = 300
 BIRDEYE_LIMIT = 20
@@ -62,6 +68,8 @@ birdeye_last_fetch = 0.0
 birdeye_last_error = ""
 
 radar_stats_lock = threading.Lock()
+last_diag_send = 0.0
+
 radar_stats = {
     "updated": 0,
     "radar": 0,
@@ -253,7 +261,7 @@ def birdeye_new_candidates(force=False):
             birdeye_last_fetch = now
             birdeye_last_error = ""
 
-        print(f"ğŸŸ¢ BIRDEYE RADAR: {len(found)} yeni Solana adayÄ±", flush=True)
+        print(f"BIRDEYE RADAR: {len(found)} new Solana candidates", flush=True)
         return found[:BIRDEYE_LIMIT]
 
     except urllib.error.HTTPError as e:
@@ -875,11 +883,11 @@ def filter_fail_reason(result, previous=None, momentum=0, for_signal=False):
 
 
 def auto_scanner():
-    print("ğŸš¨ EARLY HUNTER SCANNER ACTIVE", flush=True)
+    print("EARLY HUNTER SCANNER ACTIVE", flush=True)
     print(
-        "ğŸ“¡ WIDE RADAR: BIRDEYE + DEXSCREENER"
+        "WIDE RADAR: BIRDEYE + DEXSCREENER"
         if BIRDEYE_API_KEY
-        else "âš ï¸ WIDE RADAR: BIRDEYE KEY YOK, DEX ONLY",
+        else "WIDE RADAR: BIRDEYE KEY MISSING, DEX ONLY",
         flush=True,
     )
     time.sleep(10)
@@ -1051,7 +1059,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
                     print("TOKEN SCAN ERROR:", ca, repr(e), flush=True)
 
             print(
-                "ğŸ“Š SCAN SUMMARY | "
+                "SCAN SUMMARY | "
                 f"radar={stats['radar']} "
                 f"processed={stats['processed']} "
                 f"pair_yok={stats['pair_yok']} "
@@ -1074,6 +1082,23 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
                 radar_stats.clear()
                 radar_stats.update(stats)
                 radar_stats["updated"] = time.time()
+
+            # V11.5 heartbeat: proves the scanner is alive without waiting for a trade signal.
+            global last_diag_send
+            now_diag = time.time()
+            if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
+                diag = (
+                    f"RADAR ALIVE | candidates={stats.get('radar',0)} "
+                    f"processed={stats.get('processed',0)} pair_missing={stats.get('pair_yok',0)} "
+                    f"mc={stats.get('mc_fail',0)} liq={stats.get('liq_fail',0)} "
+                    f"holder={stats.get('holder_fail',0)} auth={stats.get('authority_fail',0)} "
+                    f"rug={stats.get('rug_fail',0)} score={stats.get('score_fail',0)} "
+                    f"buy={stats.get('buy_fail',0)} vol={stats.get('volume_fail',0)} "
+                    f"trend={stats.get('trend_fail',0)} momentum={stats.get('momentum_fail',0)}"
+                )
+                for chat_id in list(signal_chats):
+                    send(chat_id, diag)
+                last_diag_send = now_diag
 
             cutoff = time.time() - 21600
             with state_lock:
@@ -1135,8 +1160,7 @@ Komutlar:
 â± Birdeye yenileme: {BIRDEYE_POLL_INTERVAL} sn
 ğŸ’§ Min Likidite: {money(MIN_LIQUIDITY)}
 ğŸ“Š Market: $2Kâ€“$10K Ã¶ncelikli
-ğŸ’ 100X potansiyel filtresi: AKTÄ°F
-ğŸ“¡ /radar teÅŸhisi: AKTÄ°F""")
+ğŸ’ 100X potansiyel filtresi: AKTÄ°F\nğŸ“¡ /radar teÅŸhisi: AKTÄ°F\nğŸ§© Single Engine: AKTÄ°F""")
         return
 
     if command == "/signal_on":
@@ -1243,19 +1267,41 @@ def health_server():
     except Exception as e:
         print("HEALTH ERROR:", repr(e), flush=True)
 
+
+def startup_notify():
+    if not signal_chats:
+        print("WARNING: SIGNAL_CHAT_ID missing; automatic Telegram alerts have no destination.", flush=True)
+        return
+
+    mode = "COMMANDS ON" if POLLING_ENABLED else "AUTO SIGNAL MODE"
+    for chat_id in list(signal_chats):
+        send(chat_id, f"""HunterElite {VERSION} ONLINE
+
+Early Hunter: ACTIVE
+Scan: {SCAN_INTERVAL} sec
+Radar: {"BIRDEYE + DEX" if BIRDEYE_API_KEY else "DEX ONLY"}
+Birdeye: {"CONNECTED" if BIRDEYE_API_KEY else "KEY MISSING"}
+Watch Score: {WATCH_SCORE}
+Signal Score: {SIGNAL_SCORE}
+Min Liquidity: {money(MIN_LIQUIDITY)}
+Mode: {mode}
+
+Automatic signal engine is running.""")
+
+
 def startup():
-    print(f"âœ… HUNTERELITE {VERSION} ONLINE", flush=True)
-    print("ğŸ¯ MANUAL ANALYSIS ACTIVE", flush=True)
-    print("ğŸš¨ EARLY HUNTER ACTIVE", flush=True)
-    print(f"â± SCAN INTERVAL: {SCAN_INTERVAL}s", flush=True)
+    print(f"HUNTERELITE {VERSION} ONLINE", flush=True)
+    print(f"TELEGRAM POLLING: {'ON' if POLLING_ENABLED else 'OFF - AUTO SIGNAL MODE'}", flush=True)
+    print("EARLY HUNTER ACTIVE", flush=True)
+    print(f"SCAN INTERVAL: {SCAN_INTERVAL}s", flush=True)
     print(
-        f"ğŸ› TUNING: watch={WATCH_SCORE}, signal={SIGNAL_SCORE}, "
+        f"TUNING: watch={WATCH_SCORE}, signal={SIGNAL_SCORE}, "
         f"momentum>={MIN_MOMENTUM_SIGNAL}, MC growth>={int((MIN_MC_GROWTH-1)*100)}%, "
         f"pair age<={MAX_PAIR_AGE_HOURS:.0f}h",
         flush=True,
     )
     print(
-        f"ğŸŸ¢ BIRDEYE API KEY: {'READY' if BIRDEYE_API_KEY else 'MISSING'}",
+        f"BIRDEYE API KEY: {'READY' if BIRDEYE_API_KEY else 'MISSING'}",
         flush=True,
     )
     try:
@@ -1299,4 +1345,13 @@ if __name__ == "__main__":
     threading.Thread(target=health_server, daemon=True).start()
     startup()
     threading.Thread(target=auto_scanner, daemon=True).start()
-    polling()
+    time.sleep(2)
+    startup_notify()
+
+    if POLLING_ENABLED:
+        polling()
+    else:
+        # Keep the process alive while the scanner thread runs.
+        # This mode eliminates Telegram getUpdates 409 conflicts.
+        while True:
+            time.sleep(3600)
