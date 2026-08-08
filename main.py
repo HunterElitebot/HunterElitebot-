@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V10.1 FINAL FIX"
+VERSION = "V11 TREND HUNTER"
 TOKEN = os.getenv("TOKEN", "").strip()
 
 MC_MIN = 2000
@@ -22,7 +22,14 @@ SCAN_INTERVAL = 40
 
 # V10.1 FINAL FIX: only duplicate-watch and hard-drop filtering.
 WATCH_REPEAT_COOLDOWN = 21600   # 6 hours
-MAX_WATCH_DROP_5M = -20.0       # Do not send WATCH below -20% in 5m
+MAX_WATCH_DROP_5M = -10.0
+MAX_SIGNAL_DROP_1H = -10.0
+MAX_CRASH_DROP_6H = -35.0
+MAX_CRASH_DROP_24H = -55.0
+MIN_MOMENTUM_SIGNAL = 15
+MIN_MC_GROWTH = 1.05
+MAX_PAIR_AGE_HOURS = 8.0
+TREND_CONFIRM_SCANS = 2
 STATE_FILE = "/tmp/hunterelite_v10_1_state.json"
 
 if not TOKEN:
@@ -206,16 +213,36 @@ def rug_signals(report):
     return result
 
 def token_metrics(pair):
-    txns = pair.get("txns") or {}; m5 = txns.get("m5") or {}; h1 = txns.get("h1") or {}
-    volume = pair.get("volume") or {}; price = pair.get("priceChange") or {}; liquidity = pair.get("liquidity") or {}
+    txns = pair.get("txns") or {}
+    m5 = txns.get("m5") or {}
+    h1 = txns.get("h1") or {}
+    volume = pair.get("volume") or {}
+    price = pair.get("priceChange") or {}
+    liquidity = pair.get("liquidity") or {}
+
     market_cap = num(pair.get("marketCap"))
-    if market_cap is None: market_cap = num(pair.get("fdv"))
+    if market_cap is None:
+        market_cap = num(pair.get("fdv"))
+
+    created_ms = num(pair.get("pairCreatedAt"))
+    age_hours = None
+    if created_ms is not None:
+        age_hours = max(0.0, (time.time() * 1000 - created_ms) / 3_600_000)
+
     return {
-        "mc":market_cap,"liq":num(liquidity.get("usd")),
-        "buys5":safe_int(m5.get("buys")),"sells5":safe_int(m5.get("sells")),
-        "buys1h":safe_int(h1.get("buys")),"sells1h":safe_int(h1.get("sells")),
-        "vol5":num(volume.get("m5")),"vol1h":num(volume.get("h1")),
-        "price5":num(price.get("m5")),"price1h":num(price.get("h1")),
+        "mc": market_cap,
+        "liq": num(liquidity.get("usd")),
+        "buys5": safe_int(m5.get("buys")),
+        "sells5": safe_int(m5.get("sells")),
+        "buys1h": safe_int(h1.get("buys")),
+        "sells1h": safe_int(h1.get("sells")),
+        "vol5": num(volume.get("m5")),
+        "vol1h": num(volume.get("h1")),
+        "price5": num(price.get("m5")),
+        "price1h": num(price.get("h1")),
+        "price6h": num(price.get("h6")),
+        "price24h": num(price.get("h24")),
+        "age_hours": age_hours,
     }
 
 def calculate_score(pair, report):
@@ -326,23 +353,76 @@ def basic_signal_safe(result):
     if result["top10"] is not None and result["top10"] >= 70: return False
     return True
 
+def crash_guard(result):
+    if not result:
+        return False
+
+    p1 = result.get("price1h")
+    p6 = result.get("price6h")
+    p24 = result.get("price24h")
+    age = result.get("age_hours")
+
+    if p1 is not None and p1 < MAX_SIGNAL_DROP_1H:
+        return False
+    if p6 is not None and p6 < MAX_CRASH_DROP_6H:
+        return False
+    if p24 is not None and p24 < MAX_CRASH_DROP_24H:
+        return False
+    if age is not None and age > MAX_PAIR_AGE_HOURS:
+        return False
+
+    return True
+
+
+def trend_confirmed(previous, current):
+    if not previous or not current:
+        return False
+
+    old_mc = previous.get("mc") or 0
+    new_mc = current.get("mc") or 0
+    if old_mc <= 0 or new_mc < old_mc * MIN_MC_GROWTH:
+        return False
+
+    if current.get("price5") is None or current["price5"] <= 0:
+        return False
+
+    if current.get("buys5", 0) < previous.get("buys5", 0):
+        return False
+
+    old_vol = previous.get("vol5")
+    new_vol = current.get("vol5")
+    if old_vol is not None and new_vol is not None and new_vol < old_vol * 1.05:
+        return False
+
+    return True
+
+
 def watch_candidate(result):
     if not basic_signal_safe(result): return False
+    if not crash_guard(result): return False
     if result["score"] < WATCH_SCORE: return False
     if result["buys5"] < 5: return False
     if result["vol5"] is not None and result["vol5"] < 250: return False
     if result["price5"] is not None and result["price5"] < MAX_WATCH_DROP_5M: return False
     return True
 
-def strong_signal(result, momentum):
+
+def strong_signal(result, momentum, previous=None):
     if not basic_signal_safe(result): return False
+    if not crash_guard(result): return False
+    if previous is None: return False
+    if momentum < MIN_MOMENTUM_SIGNAL: return False
+    if not trend_confirmed(previous, result): return False
     if result["score"] + momentum < SIGNAL_SCORE: return False
     if result["mc"] > EARLY_MC_MAX: return False
+
     buys, sells = result["buys5"], result["sells5"]
     if buys < 8: return False
-    if sells > 0 and buys < sells * 1.25: return False
-    if result["vol5"] is not None and result["vol5"] < 400: return False
+    if sells > 0 and buys < sells * 1.35: return False
+    if result["vol5"] is not None and result["vol5"] < 500: return False
+
     return True
+
 
 def auto_scanner():
     print("🚨 EARLY HUNTER SCANNER ACTIVE", flush=True)
@@ -361,13 +441,15 @@ def auto_scanner():
                     with state_lock: previous = token_states.get(ca)
                     old_metrics = previous.get("metrics") if previous else None
                     momentum = momentum_score(old_metrics, result)
+                    seen_count = (previous.get("seen_count", 0) + 1) if previous else 1
                     stage = previous.get("stage","NEW") if previous else "NEW"
                     last_sent = previous.get("last_sent",0) if previous else 0
                     new_stage, message = stage, None
                     base = pair.get("baseToken") or {}; name = base.get("name","Unknown"); symbol = base.get("symbol","N/A")
-                    if strong_signal(result, momentum) and stage != "SIGNAL":
+                    if seen_count >= TREND_CONFIRM_SCANS and strong_signal(result, momentum, old_metrics) and stage != "SIGNAL":
                         new_stage = "SIGNAL"
                         final_score = min(100, result["score"] + momentum)
+                        age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
                         message = f"""🚨 HUNTERELITE EARLY SIGNAL
 
 {name} ({symbol})
@@ -384,6 +466,9 @@ CA: {ca}
 
 🛡 Risk Score: {result["score"]}/100
 🚀 Momentum: +{momentum}
+📈 1s fiyat: {percent(result["price1h"])}
+📊 6s fiyat: {percent(result["price6h"])}
+⏱ Pair yaşı: {age_text}
 🎯 Final Score: {final_score}/100
 
 🔥 DURUM: ERKEN MOMENTUM
@@ -427,7 +512,7 @@ Score: {result["score"]}/100
                         for chat_id in list(signal_chats): send(chat_id, message)
                         last_sent = now
                     with state_lock:
-                        token_states[ca] = {"metrics":result,"stage":new_stage,"last_sent":last_sent,"seen":now}
+                        token_states[ca] = {"metrics":result,"stage":new_stage,"last_sent":last_sent,"seen":now,"seen_count":seen_count}
                     save_state()
                     time.sleep(1)
                 except Exception as e:
@@ -475,6 +560,7 @@ Komutlar:
 ⏱ Tarama: {SCAN_INTERVAL} sn
 🎯 Watch Score: {WATCH_SCORE}
 🔥 Signal Score: {SIGNAL_SCORE}
+📈 Trend teyidi: {TREND_CONFIRM_SCANS} tarama / min momentum {MIN_MOMENTUM_SIGNAL}
 💧 Min Likidite: {money(MIN_LIQUIDITY)}
 📊 Market: $2K–$10K öncelikli"""); return
     if command == "/signal_on":
