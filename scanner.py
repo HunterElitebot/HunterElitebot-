@@ -285,6 +285,89 @@ def _rug_holder_stats(r):
 
 
 def normalize_rug_report(raw):
-    raw = raw or {}
+        raw = raw or {}
+    top1, top5, top10 = _rug_holder_stats(raw)
 
-    top1, top5, top
+    score = safe_int(raw.get("score"), 0)
+    if score > 100:
+        score = min(100, round(score / 10))
+
+    risks = raw.get("risks") or []
+    ws = []
+
+    if isinstance(risks, list):
+        for x in risks[:10]:
+            if isinstance(x, dict):
+                t = x.get("name") or x.get("description") or x.get("value")
+                if t:
+                    ws.append(str(t))
+            elif x:
+                ws.append(str(x))
+
+    return {
+        "score": max(0, min(100, score)),
+        "top1": top1,
+        "top5": top5,
+        "top10": top10,
+        "mintAuthority": raw.get("mintAuthority"),
+        "freezeAuthority": raw.get("freezeAuthority"),
+        "warnings": ws,
+        "raw": raw,
+    }
+
+
+def scan_token(c):
+    res = {
+        "success": False,
+        "contract": c,
+        "pair": None,
+        "token": None,
+        "rug": None,
+        "errors": [],
+    }
+
+    try:
+        p = DexScreenerClient().get_best_pair(c)
+        if p is None:
+            res["errors"].append("DexScreener üzerinde Solana pair bulunamadı.")
+        else:
+            res["pair"] = p
+            res["token"] = normalize_pair(p)
+            res["success"] = True
+    except Exception as e:
+        logger.exception("DexScreener tarama hatası")
+        res["errors"].append(f"DexScreener hatası: {e}")
+
+    try:
+        res["rug"] = normalize_rug_report(RugCheckClient().get_report(c))
+    except Exception as e:
+        logger.warning("RugCheck verisi alınamadı: %s", e)
+        res["errors"].append(f"RugCheck hatası: {e}")
+        res["rug"] = normalize_rug_report({})
+
+    return res
+
+
+def scan_market_only(c):
+    res = {
+        "success": False,
+        "contract": c,
+        "token": None,
+        "errors": [],
+    }
+
+    try:
+        p = DexScreenerClient().get_best_pair(c)
+
+        if p is None:
+            res["errors"].append("Solana pair bulunamadı.")
+            return res
+
+        res["token"] = normalize_pair(p)
+        res["success"] = True
+
+    except Exception as e:
+        logger.warning("Flash scan error: %s", e)
+        res["errors"].append(str(e))
+
+    return res
