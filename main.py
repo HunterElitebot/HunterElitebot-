@@ -9,8 +9,9 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11 TREND HUNTER"
+VERSION = "V11.1 WIDE RADAR FINAL"
 TOKEN = os.getenv("TOKEN", "").strip()
+BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
 MC_MIN = 2000
 MC_MAX = 15000
@@ -20,15 +21,22 @@ WATCH_SCORE = 55
 SIGNAL_SCORE = 70
 SCAN_INTERVAL = 40
 
+# V11.1 WIDE RADAR
+# Birdeye New Listing costs 30 CU/request. Cache it so Standard quota is not
+# consumed every 40-second HunterElite scan.
+BIRDEYE_POLL_INTERVAL = 300
+BIRDEYE_LIMIT = 20
+BIRDEYE_NEW_LISTING = "https://public-api.birdeye.so/defi/v2/tokens/new_listing"
+
 # V10.1 FINAL FIX: only duplicate-watch and hard-drop filtering.
 WATCH_REPEAT_COOLDOWN = 21600   # 6 hours
 MAX_WATCH_DROP_5M = -10.0
 MAX_SIGNAL_DROP_1H = -10.0
 MAX_CRASH_DROP_6H = -35.0
 MAX_CRASH_DROP_24H = -55.0
-MIN_MOMENTUM_SIGNAL = 15
-MIN_MC_GROWTH = 1.05
-MAX_PAIR_AGE_HOURS = 8.0
+MIN_MOMENTUM_SIGNAL = 10
+MIN_MC_GROWTH = 1.03
+MAX_PAIR_AGE_HOURS = 12.0
 TREND_CONFIRM_SCANS = 2
 STATE_FILE = "/tmp/hunterelite_v10_1_state.json"
 
@@ -41,6 +49,10 @@ SOL_CA = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 signal_chats = set()
 token_states = {}
 state_lock = threading.Lock()
+birdeye_lock = threading.Lock()
+birdeye_cache = []
+birdeye_last_fetch = 0.0
+birdeye_last_error = ""
 
 def load_state():
     try:
@@ -73,10 +85,18 @@ for env_name in ("SIGNAL_CHAT_ID", "CHAT_ID", "TELEGRAM_CHAT_ID", "USER_ID"):
             if part.lstrip("-").isdigit():
                 signal_chats.add(int(part))
 
-def get_json(url, timeout=15):
-    req = urllib.request.Request(url, headers={"User-Agent": "HunterElite-V10","Accept": "application/json"})
+def get_json(url, timeout=15, headers=None):
+    req_headers = {
+        "User-Agent": "HunterElite-V11.1",
+        "Accept": "application/json",
+    }
+    if headers:
+        req_headers.update(headers)
+
+    req = urllib.request.Request(url, headers=req_headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8", errors="replace"))
+
 
 def telegram(method, data=None, timeout=35):
     data = data or {}
@@ -136,6 +156,121 @@ def best_pair(ca):
     if not pairs: return None
     return max(pairs, key=lambda p: num((p.get("liquidity") or {}).get("usd"), 0))
 
+def extract_birdeye_items(payload):
+    """Accept Birdeye response-shape variants without breaking the scanner."""
+    if not isinstance(payload, dict):
+        return []
+
+    data = payload.get("data")
+    if isinstance(data, list):
+        return data
+
+    if isinstance(data, dict):
+        for key in ("items", "tokens", "list"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+
+    for key in ("items", "tokens", "list"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+
+    return []
+
+
+def birdeye_new_candidates(force=False):
+    global birdeye_cache, birdeye_last_fetch, birdeye_last_error
+
+    if not BIRDEYE_API_KEY:
+        return []
+
+    now = time.time()
+
+    with birdeye_lock:
+        if (
+            not force
+            and birdeye_cache
+            and now - birdeye_last_fetch < BIRDEYE_POLL_INTERVAL
+        ):
+            return list(birdeye_cache)
+
+    params = urllib.parse.urlencode({
+        "limit": BIRDEYE_LIMIT,
+        "meme_platform_enabled": "true",
+    })
+    url = f"{BIRDEYE_NEW_LISTING}?{params}"
+
+    try:
+        payload = get_json(
+            url,
+            timeout=15,
+            headers={
+                "X-API-KEY": BIRDEYE_API_KEY,
+                "x-chain": "solana",
+            },
+        )
+
+        found = []
+        seen = set()
+
+        for item in extract_birdeye_items(payload):
+            if not isinstance(item, dict):
+                continue
+
+            ca = ""
+            for key in (
+                "address",
+                "token_address",
+                "tokenAddress",
+                "mint",
+                "mintAddress",
+            ):
+                raw = item.get(key)
+                if raw:
+                    ca = str(raw).strip()
+                    break
+
+            if ca and SOL_CA.match(ca) and ca not in seen:
+                seen.add(ca)
+                found.append(ca)
+
+        with birdeye_lock:
+            birdeye_cache = found[:BIRDEYE_LIMIT]
+            birdeye_last_fetch = now
+            birdeye_last_error = ""
+
+        print(
+            f"🟢 BIRDEYE RADAR: {len(found)} yeni Solana adayı",
+            flush=True,
+        )
+        return found[:BIRDEYE_LIMIT]
+
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+
+        err = f"HTTP {e.code}: {body[:220]}"
+        with birdeye_lock:
+            birdeye_last_error = err
+            birdeye_last_fetch = now
+
+        print("BIRDEYE ERROR:", err, flush=True)
+
+    except Exception as e:
+        err = repr(e)
+        with birdeye_lock:
+            birdeye_last_error = err
+            birdeye_last_fetch = now
+
+        print("BIRDEYE ERROR:", err, flush=True)
+
+    with birdeye_lock:
+        return list(birdeye_cache)
+
+
 def discovery_candidates():
     endpoints = [
         "https://api.dexscreener.com/token-profiles/latest/v1",
@@ -143,19 +278,38 @@ def discovery_candidates():
         "https://api.dexscreener.com/token-boosts/top/v1",
         "https://api.dexscreener.com/community-takeovers/latest/v1",
     ]
-    found, seen = [], set()
+
+    found = []
+    seen = set()
+
+    # 1) Birdeye fresh Solana listings, including meme-platform launches.
+    for ca in birdeye_new_candidates():
+        if ca not in seen:
+            seen.add(ca)
+            found.append(ca)
+
+    # 2) Existing DexScreener discovery radar remains as fallback/supplement.
     for url in endpoints:
         try:
             data = get_json(url)
-            if not isinstance(data, list): continue
+            if not isinstance(data, list):
+                continue
+
             for item in data:
-                if str(item.get("chainId","")).lower() != "solana": continue
-                ca = str(item.get("tokenAddress","")).strip()
+                if str(item.get("chainId", "")).lower() != "solana":
+                    continue
+
+                ca = str(item.get("tokenAddress", "")).strip()
                 if ca and SOL_CA.match(ca) and ca not in seen:
-                    seen.add(ca); found.append(ca)
+                    seen.add(ca)
+                    found.append(ca)
+
         except Exception as e:
             print("DISCOVERY ERROR:", repr(e), flush=True)
-    return found[:50]
+
+    # More candidates than V11, while preserving downstream safety filters.
+    return found[:80]
+
 
 def rugcheck(ca):
     try:
@@ -426,6 +580,12 @@ def strong_signal(result, momentum, previous=None):
 
 def auto_scanner():
     print("🚨 EARLY HUNTER SCANNER ACTIVE", flush=True)
+    print(
+        "📡 WIDE RADAR: BIRDEYE + DEXSCREENER"
+        if BIRDEYE_API_KEY
+        else "⚠️ WIDE RADAR: BIRDEYE KEY YOK, DEX ONLY",
+        flush=True,
+    )
     time.sleep(10)
     while True:
         try:
@@ -561,6 +721,9 @@ Komutlar:
 🎯 Watch Score: {WATCH_SCORE}
 🔥 Signal Score: {SIGNAL_SCORE}
 📈 Trend teyidi: {TREND_CONFIRM_SCANS} tarama / min momentum {MIN_MOMENTUM_SIGNAL}
+📡 Radar: {"BIRDEYE + DEX" if BIRDEYE_API_KEY else "DEX ONLY"}
+🟢 Birdeye API: {"BAĞLI" if BIRDEYE_API_KEY else "KEY YOK"}
+⏱ Birdeye yenileme: {BIRDEYE_POLL_INTERVAL} sn
 💧 Min Likidite: {money(MIN_LIQUIDITY)}
 📊 Market: $2K–$10K öncelikli"""); return
     if command == "/signal_on":
@@ -580,7 +743,7 @@ Komutlar:
 
 Gerçek aday taraması başladı."""); return
     if command == "/help":
-        send(chat_id, "HunterElite V10\n\nCA gönder → manuel analiz\n\n/ping\n/status\n/signal_on\n/signal_off\n/signal_test\n/start"); return
+        send(chat_id, "HunterElite V11.1 WIDE RADAR\n\nCA gönder → manuel analiz\n\n/ping\n/status\n/signal_on\n/signal_off\n/signal_test\n/start"); return
     ca = text
     if not SOL_CA.match(ca):
         matches = re.findall(r"[1-9A-HJ-NP-Za-km-z]{32,44}", text)
@@ -611,6 +774,14 @@ def startup():
     print("🎯 MANUAL ANALYSIS ACTIVE", flush=True)
     print("🚨 EARLY HUNTER ACTIVE", flush=True)
     print(f"⏱ SCAN INTERVAL: {SCAN_INTERVAL}s", flush=True)
+    print(
+        f"🎛 TUNING: momentum>={MIN_MOMENTUM_SIGNAL}, MC growth>={int((MIN_MC_GROWTH-1)*100)}%, pair age<={MAX_PAIR_AGE_HOURS:.0f}h",
+        flush=True,
+    )
+    print(
+        f"🟢 BIRDEYE API KEY: {'READY' if BIRDEYE_API_KEY else 'MISSING'}",
+        flush=True,
+    )
     try: telegram("deleteWebhook", {"drop_pending_updates":"false"})
     except Exception as e: print("WEBHOOK CLEAN WARNING:", repr(e), flush=True)
 
