@@ -9,36 +9,43 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.1 WIDE RADAR FINAL"
+VERSION = "V11.3 EARLY 100X RADAR"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
 MC_MIN = 2000
 MC_MAX = 15000
 EARLY_MC_MAX = 10000
-MIN_LIQUIDITY = 1500
-WATCH_SCORE = 55
-SIGNAL_SCORE = 70
+MIN_LIQUIDITY = 1200
+
+# V11.2 — daha erken aday yakala, sert rug korumalarını koru
+WATCH_SCORE = 47
+SIGNAL_SCORE = 60
 SCAN_INTERVAL = 40
 
-# V11.1 WIDE RADAR
-# Birdeye New Listing costs 30 CU/request. Cache it so Standard quota is not
-# consumed every 40-second HunterElite scan.
 BIRDEYE_POLL_INTERVAL = 300
 BIRDEYE_LIMIT = 20
 BIRDEYE_NEW_LISTING = "https://public-api.birdeye.so/defi/v2/tokens/new_listing"
 
-# V10.1 FINAL FIX: only duplicate-watch and hard-drop filtering.
-WATCH_REPEAT_COOLDOWN = 21600   # 6 hours
+WATCH_REPEAT_COOLDOWN = 21600
 MAX_WATCH_DROP_5M = -10.0
 MAX_SIGNAL_DROP_1H = -10.0
 MAX_CRASH_DROP_6H = -35.0
 MAX_CRASH_DROP_24H = -55.0
+
 MIN_MOMENTUM_SIGNAL = 10
-MIN_MC_GROWTH = 1.03
+MIN_MC_GROWTH = 1.005
 MAX_PAIR_AGE_HOURS = 12.0
 TREND_CONFIRM_SCANS = 2
-STATE_FILE = "/tmp/hunterelite_v10_1_state.json"
+
+WATCH_MIN_BUYS_5M = 2
+WATCH_MIN_VOL_5M = 60
+SIGNAL_MIN_BUYS_5M = 4
+SIGNAL_MIN_BUY_SELL_RATIO = 1.10
+SIGNAL_MIN_VOL_5M = 180
+MIN_VOL_GROWTH = 1.00
+
+STATE_FILE = "/tmp/hunterelite_v11_2_state.json"
 
 if not TOKEN:
     raise RuntimeError("Railway TOKEN variable bulunamadi!")
@@ -70,10 +77,7 @@ def save_state():
     try:
         with state_lock:
             data = dict(token_states)
-        Path(STATE_FILE).write_text(
-            json.dumps(data, ensure_ascii=False),
-            encoding="utf-8"
-        )
+        Path(STATE_FILE).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     except Exception as e:
         print("STATE SAVE WARNING:", repr(e), flush=True)
 
@@ -86,17 +90,12 @@ for env_name in ("SIGNAL_CHAT_ID", "CHAT_ID", "TELEGRAM_CHAT_ID", "USER_ID"):
                 signal_chats.add(int(part))
 
 def get_json(url, timeout=15, headers=None):
-    req_headers = {
-        "User-Agent": "HunterElite-V11.1",
-        "Accept": "application/json",
-    }
+    req_headers = {"User-Agent": "HunterElite-V11.2", "Accept": "application/json"}
     if headers:
         req_headers.update(headers)
-
     req = urllib.request.Request(url, headers=req_headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8", errors="replace"))
-
 
 def telegram(method, data=None, timeout=35):
     data = data or {}
@@ -107,31 +106,42 @@ def telegram(method, data=None, timeout=35):
 
 def send(chat_id, text):
     try:
-        telegram("sendMessage", {"chat_id": str(chat_id),"text": str(text)[:4000],"disable_web_page_preview": "true"})
+        telegram("sendMessage", {
+            "chat_id": str(chat_id),
+            "text": str(text)[:4000],
+            "disable_web_page_preview": "true"
+        })
     except Exception as e:
         print("SEND ERROR:", repr(e), flush=True)
 
 def num(value, default=None):
     try:
-        if value is None: return default
+        if value is None:
+            return default
         return float(value)
     except Exception:
         return default
 
 def safe_int(value):
-    try: return int(value or 0)
-    except Exception: return 0
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
 
 def money(value):
     value = num(value)
-    if value is None: return "⚠️ VERİ ALINAMADI"
-    if abs(value) >= 1_000_000: return f"${value/1_000_000:.2f}M"
-    if abs(value) >= 1_000: return f"${value/1_000:.2f}K"
+    if value is None:
+        return "⚠️ VERİ ALINAMADI"
+    if abs(value) >= 1_000_000:
+        return f"${value/1_000_000:.2f}M"
+    if abs(value) >= 1_000:
+        return f"${value/1_000:.2f}K"
     return f"${value:.2f}"
 
 def percent(value):
     value = num(value)
-    if value is None: return "N/A"
+    if value is None:
+        return "N/A"
     return f"{value:.1f}%"
 
 def dex_pairs(ca):
@@ -142,42 +152,41 @@ def dex_pairs(ca):
     for url in urls:
         try:
             data = get_json(url)
-            if isinstance(data, list): pairs = data
-            elif isinstance(data, dict): pairs = data.get("pairs") or []
-            else: pairs = []
-            sol_pairs = [p for p in pairs if str(p.get("chainId","solana")).lower()=="solana"]
-            if sol_pairs: return sol_pairs
+            if isinstance(data, list):
+                pairs = data
+            elif isinstance(data, dict):
+                pairs = data.get("pairs") or []
+            else:
+                pairs = []
+            sol_pairs = [p for p in pairs if str(p.get("chainId", "solana")).lower() == "solana"]
+            if sol_pairs:
+                return sol_pairs
         except Exception as e:
             print("DEX PAIR ERROR:", repr(e), flush=True)
     return []
 
 def best_pair(ca):
     pairs = dex_pairs(ca)
-    if not pairs: return None
+    if not pairs:
+        return None
     return max(pairs, key=lambda p: num((p.get("liquidity") or {}).get("usd"), 0))
 
 def extract_birdeye_items(payload):
-    """Accept Birdeye response-shape variants without breaking the scanner."""
     if not isinstance(payload, dict):
         return []
-
     data = payload.get("data")
     if isinstance(data, list):
         return data
-
     if isinstance(data, dict):
         for key in ("items", "tokens", "list"):
             value = data.get(key)
             if isinstance(value, list):
                 return value
-
     for key in ("items", "tokens", "list"):
         value = payload.get(key)
         if isinstance(value, list):
             return value
-
     return []
-
 
 def birdeye_new_candidates(force=False):
     global birdeye_cache, birdeye_last_fetch, birdeye_last_error
@@ -186,13 +195,8 @@ def birdeye_new_candidates(force=False):
         return []
 
     now = time.time()
-
     with birdeye_lock:
-        if (
-            not force
-            and birdeye_cache
-            and now - birdeye_last_fetch < BIRDEYE_POLL_INTERVAL
-        ):
+        if not force and birdeye_cache and now - birdeye_last_fetch < BIRDEYE_POLL_INTERVAL:
             return list(birdeye_cache)
 
     params = urllib.parse.urlencode({
@@ -205,32 +209,19 @@ def birdeye_new_candidates(force=False):
         payload = get_json(
             url,
             timeout=15,
-            headers={
-                "X-API-KEY": BIRDEYE_API_KEY,
-                "x-chain": "solana",
-            },
+            headers={"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"},
         )
 
-        found = []
-        seen = set()
-
+        found, seen = [], set()
         for item in extract_birdeye_items(payload):
             if not isinstance(item, dict):
                 continue
-
             ca = ""
-            for key in (
-                "address",
-                "token_address",
-                "tokenAddress",
-                "mint",
-                "mintAddress",
-            ):
+            for key in ("address", "token_address", "tokenAddress", "mint", "mintAddress"):
                 raw = item.get(key)
                 if raw:
                     ca = str(raw).strip()
                     break
-
             if ca and SOL_CA.match(ca) and ca not in seen:
                 seen.add(ca)
                 found.append(ca)
@@ -240,10 +231,7 @@ def birdeye_new_candidates(force=False):
             birdeye_last_fetch = now
             birdeye_last_error = ""
 
-        print(
-            f"🟢 BIRDEYE RADAR: {len(found)} yeni Solana adayı",
-            flush=True,
-        )
+        print(f"🟢 BIRDEYE RADAR: {len(found)} yeni Solana adayı", flush=True)
         return found[:BIRDEYE_LIMIT]
 
     except urllib.error.HTTPError as e:
@@ -251,12 +239,10 @@ def birdeye_new_candidates(force=False):
             body = e.read().decode("utf-8", errors="replace")
         except Exception:
             body = ""
-
         err = f"HTTP {e.code}: {body[:220]}"
         with birdeye_lock:
             birdeye_last_error = err
             birdeye_last_fetch = now
-
         print("BIRDEYE ERROR:", err, flush=True)
 
     except Exception as e:
@@ -264,12 +250,10 @@ def birdeye_new_candidates(force=False):
         with birdeye_lock:
             birdeye_last_error = err
             birdeye_last_fetch = now
-
         print("BIRDEYE ERROR:", err, flush=True)
 
     with birdeye_lock:
         return list(birdeye_cache)
-
 
 def discovery_candidates():
     endpoints = [
@@ -279,37 +263,29 @@ def discovery_candidates():
         "https://api.dexscreener.com/community-takeovers/latest/v1",
     ]
 
-    found = []
-    seen = set()
+    found, seen = [], set()
 
-    # 1) Birdeye fresh Solana listings, including meme-platform launches.
     for ca in birdeye_new_candidates():
         if ca not in seen:
             seen.add(ca)
             found.append(ca)
 
-    # 2) Existing DexScreener discovery radar remains as fallback/supplement.
     for url in endpoints:
         try:
             data = get_json(url)
             if not isinstance(data, list):
                 continue
-
             for item in data:
                 if str(item.get("chainId", "")).lower() != "solana":
                     continue
-
                 ca = str(item.get("tokenAddress", "")).strip()
                 if ca and SOL_CA.match(ca) and ca not in seen:
                     seen.add(ca)
                     found.append(ca)
-
         except Exception as e:
             print("DISCOVERY ERROR:", repr(e), flush=True)
 
-    # More candidates than V11, while preserving downstream safety filters.
     return found[:80]
-
 
 def rugcheck(ca):
     try:
@@ -319,51 +295,88 @@ def rugcheck(ca):
         return None
 
 def holder_pct(holder):
-    if not isinstance(holder, dict): return None
-    for key in ("pct","percentage","percent","ownershipPercentage"):
+    if not isinstance(holder, dict):
+        return None
+    for key in ("pct", "percentage", "percent", "ownershipPercentage"):
         value = holder.get(key)
-        if value is None: continue
+        if value is None:
+            continue
         value = num(value)
-        if value is None: continue
-        if 0 <= value <= 1: value *= 100
+        if value is None:
+            continue
+        if 0 <= value <= 1:
+            value *= 100
         return value
     return None
 
 def holders(report):
-    if not report: return None, None, None
+    if not report:
+        return None, None, None
     items = report.get("topHolders") or report.get("top_holders") or []
     values = [v for v in (holder_pct(i) for i in items) if v is not None]
-    if not values: return None, None, None
+    if not values:
+        return None, None, None
     return values[0], sum(values[:5]), sum(values[:10])
 
 def authority(report, key):
-    if not report: return None
-    values = [report.get(key),(report.get("token") or {}).get(key),(report.get("tokenMeta") or {}).get(key)]
+    if not report:
+        return None
+    values = [
+        report.get(key),
+        (report.get("token") or {}).get(key),
+        (report.get("tokenMeta") or {}).get(key)
+    ]
     for value in values:
-        if value is None: continue
-        if value is False: return False
-        if value is True: return True
+        if value is None:
+            continue
+        if value is False:
+            return False
+        if value is True:
+            return True
         text = str(value).strip().lower()
-        if text in ("","none","null","false","revoked","disabled"): return False
+        if text in ("", "none", "null", "false", "revoked", "disabled"):
+            return False
         return True
     return None
 
 def rug_signals(report):
-    result = {"rug":False,"honeypot":False,"insider":False,"sniper":False,"bundler":False}
-    if not report: return result
-    try: blob = json.dumps(report, ensure_ascii=False).lower()
-    except Exception: blob = str(report).lower()
+    result = {"rug": False, "honeypot": False, "insider": False, "sniper": False, "bundler": False}
+    if not report:
+        return result
+    try:
+        blob = json.dumps(report, ensure_ascii=False).lower()
+    except Exception:
+        blob = str(report).lower()
     risks = report.get("risks") or []
-    try: risks_blob = json.dumps(risks, ensure_ascii=False).lower()
-    except Exception: risks_blob = ""
-    if report.get("rugged") is True: result["rug"] = True
-    words = {"honeypot":("honeypot",),"insider":("insider",),"sniper":("sniper","sniping"),"bundler":("bundler","bundle")}
+    try:
+        risks_blob = json.dumps(risks, ensure_ascii=False).lower()
+    except Exception:
+        risks_blob = ""
+
+    if report.get("rugged") is True:
+        result["rug"] = True
+
+    words = {
+        "honeypot": ("honeypot",),
+        "insider": ("insider",),
+        "sniper": ("sniper", "sniping"),
+        "bundler": ("bundler", "bundle"),
+    }
     for key, variants in words.items():
         for word in variants:
-            if word in risks_blob: result[key] = True
-            patterns = [f'"{word}":true',f'"{word}": true',f"{word} detected",f"{word} risk"]
-            if any(p in blob for p in patterns): result[key] = True
-    if "rug pull" in risks_blob or "rugpull" in risks_blob: result["rug"] = True
+            if word in risks_blob:
+                result[key] = True
+            patterns = [
+                f'"{word}":true',
+                f'"{word}": true',
+                f"{word} detected",
+                f"{word} risk",
+            ]
+            if any(p in blob for p in patterns):
+                result[key] = True
+
+    if "rug pull" in risks_blob or "rugpull" in risks_blob:
+        result["rug"] = True
     return result
 
 def token_metrics(pair):
@@ -400,69 +413,246 @@ def token_metrics(pair):
     }
 
 def calculate_score(pair, report):
-    m = token_metrics(pair); score = 100; risks = []
+    m = token_metrics(pair)
+    score = 100
+    risks = []
     mc, liq = m["mc"], m["liq"]
-    if mc is None: score -= 20; risks.append("Market cap verisi yok")
-    elif mc < MC_MIN or mc > MC_MAX: score -= 20; risks.append("Market cap hedef bölgesi dışında")
-    if liq is None: score -= 25; risks.append("Likidite verisi yok")
-    elif liq < 1000: score -= 35; risks.append("Likidite çok düşük")
-    elif liq < MIN_LIQUIDITY: score -= 20; risks.append("Likidite düşük")
+
+    if mc is None:
+        score -= 20
+        risks.append("Market cap verisi yok")
+    elif mc < MC_MIN or mc > MC_MAX:
+        score -= 20
+        risks.append("Market cap hedef bölgesi dışında")
+
+    if liq is None:
+        score -= 25
+        risks.append("Likidite verisi yok")
+    elif liq < 1000:
+        score -= 35
+        risks.append("Likidite çok düşük")
+    elif liq < MIN_LIQUIDITY:
+        score -= 20
+        risks.append("Likidite düşük")
+
     top1, top5, top10 = holders(report)
-    if report is None: score -= 15; risks.append("RugCheck verisi yok")
-    elif top10 is None: score -= 10; risks.append("Holder dağılımı doğrulanamadı")
+
+    if report is None:
+        score -= 15
+        risks.append("RugCheck verisi yok")
+    elif top10 is None:
+        score -= 10
+        risks.append("Holder dağılımı doğrulanamadı")
     else:
-        if top10 >= 80: score -= 40; risks.append("Top-10 holder aşırı yoğun")
-        elif top10 >= 70: score -= 30; risks.append("Top-10 holder çok yüksek")
-        elif top10 >= 60: score -= 20; risks.append("Top-10 holder yüksek")
-        elif top10 >= 50: score -= 10; risks.append("Top-10 holder dikkat")
-    mint = authority(report, "mintAuthority"); freeze = authority(report, "freezeAuthority")
-    if mint is True: score -= 30; risks.append("Mint authority aktif")
-    elif mint is None: score -= 5; risks.append("Mint authority doğrulanamadı")
-    if freeze is True: score -= 30; risks.append("Freeze authority aktif")
-    elif freeze is None: score -= 5; risks.append("Freeze authority doğrulanamadı")
+        if top10 >= 80:
+            score -= 40
+            risks.append("Top-10 holder aşırı yoğun")
+        elif top10 >= 70:
+            score -= 30
+            risks.append("Top-10 holder çok yüksek")
+        elif top10 >= 60:
+            score -= 20
+            risks.append("Top-10 holder yüksek")
+        elif top10 >= 50:
+            score -= 10
+            risks.append("Top-10 holder dikkat")
+
+    mint = authority(report, "mintAuthority")
+    freeze = authority(report, "freezeAuthority")
+
+    if mint is True:
+        score -= 30
+        risks.append("Mint authority aktif")
+    elif mint is None:
+        score -= 5
+        risks.append("Mint authority doğrulanamadı")
+
+    if freeze is True:
+        score -= 30
+        risks.append("Freeze authority aktif")
+    elif freeze is None:
+        score -= 5
+        risks.append("Freeze authority doğrulanamadı")
+
     sig = rug_signals(report)
-    if sig["rug"]: score -= 60; risks.append("RUG sinyali")
-    if sig["honeypot"]: score -= 50; risks.append("Honeypot sinyali")
-    if sig["insider"]: score -= 15; risks.append("Insider sinyali")
-    if sig["sniper"]: score -= 10; risks.append("Sniper yoğunluğu")
-    if sig["bundler"]: score -= 10; risks.append("Bundler sinyali")
+
+    if sig["rug"]:
+        score -= 60
+        risks.append("RUG sinyali")
+    if sig["honeypot"]:
+        score -= 50
+        risks.append("Honeypot sinyali")
+    if sig["insider"]:
+        score -= 15
+        risks.append("Insider sinyali")
+    if sig["sniper"]:
+        score -= 10
+        risks.append("Sniper yoğunluğu")
+    if sig["bundler"]:
+        score -= 10
+        risks.append("Bundler sinyali")
+
     buys, sells = m["buys5"], m["sells5"]
-    if buys + sells >= 10 and sells > buys * 1.5: score -= 10; risks.append("5dk satış baskısı")
-    if m["price5"] is not None and m["price5"] <= -25: score -= 10; risks.append("5dk sert fiyat düşüşü")
+    if buys + sells >= 10 and sells > buys * 1.5:
+        score -= 10
+        risks.append("5dk satış baskısı")
+
+    if m["price5"] is not None and m["price5"] <= -25:
+        score -= 10
+        risks.append("5dk sert fiyat düşüşü")
+
     score = max(0, min(100, int(score)))
-    severe = sig["rug"] or sig["honeypot"] or mint is True or freeze is True or (top10 is not None and top10 >= 80)
-    if severe: decision = "🔴 GİRME"
-    elif score >= 75 and mc is not None and MC_MIN <= mc <= EARLY_MC_MAX: decision = "🟢 UYGUN GİRİŞ"
-    elif score >= 55: decision = "🟡 BEKLE"
-    else: decision = "🔴 GİRME"
-    return {**m,"score":score,"decision":decision,"risks":risks,"top1":top1,"top5":top5,"top10":top10,"mint":mint,"freeze":freeze,"signals":sig}
+
+    severe = (
+        sig["rug"]
+        or sig["honeypot"]
+        or mint is True
+        or freeze is True
+        or (top10 is not None and top10 >= 80)
+    )
+
+    if severe:
+        decision = "🔴 GİRME"
+    elif score >= 75 and mc is not None and MC_MIN <= mc <= EARLY_MC_MAX:
+        decision = "🟢 UYGUN GİRİŞ"
+    elif score >= 55:
+        decision = "🟡 BEKLE"
+    else:
+        decision = "🔴 GİRME"
+
+    return {
+        **m,
+        "score": score,
+        "decision": decision,
+        "risks": risks,
+        "top1": top1,
+        "top5": top5,
+        "top10": top10,
+        "mint": mint,
+        "freeze": freeze,
+        "signals": sig,
+    }
 
 def momentum_score(old, new):
-    if not old: return 0
+    if not old:
+        return 0
+
     points = 0
-    old_buys, new_buys = old.get("buys5",0), new.get("buys5",0)
-    if old_buys > 0 and new_buys >= old_buys * 1.4: points += 10
+
+    old_buys, new_buys = old.get("buys5", 0), new.get("buys5", 0)
+    if old_buys > 0 and new_buys >= old_buys * 1.15:
+        points += 10
+
     old_vol, new_vol = old.get("vol5") or 0, new.get("vol5") or 0
-    if old_vol > 0 and new_vol >= old_vol * 1.35: points += 10
+    if old_vol > 0 and new_vol >= old_vol * 1.12:
+        points += 10
+
     old_mc, new_mc = old.get("mc") or 0, new.get("mc") or 0
-    if old_mc > 0 and new_mc > old_mc * 1.08: points += 5
-    buys, sells = new.get("buys5",0), new.get("sells5",0)
-    if buys >= 8 and buys >= max(sells * 1.5, 1): points += 10
+    if old_mc > 0 and new_mc >= old_mc * 1.015:
+        points += 5
+
+    buys, sells = new.get("buys5", 0), new.get("sells5", 0)
+    if buys >= SIGNAL_MIN_BUYS_5M and buys >= max(sells * SIGNAL_MIN_BUY_SELL_RATIO, 1):
+        points += 10
+
     p5 = new.get("price5")
-    if p5 is not None and 2 <= p5 <= 40: points += 5
+    if p5 is not None and 0.5 <= p5 <= 55:
+        points += 5
+
     return points
 
 def authority_text(value):
-    if value is True: return "🚨 AKTİF"
-    if value is False: return "✅ KAPALI"
+    if value is True:
+        return "🚨 AKTİF"
+    if value is False:
+        return "✅ KAPALI"
     return "⚠️ N/A"
+
+def potential_label(result, momentum=0):
+    """Heuristic only: expresses upside setup quality, never a return guarantee."""
+    if not result:
+        return "❌ YETERSİZ VERİ"
+
+    # Hard safety blocks first.
+    if result["signals"]["rug"] or result["signals"]["honeypot"]:
+        return "⛔ RUG RİSKİ"
+    if result["mint"] is True or result["freeze"] is True:
+        return "⛔ YETKİ RİSKİ"
+    if result["liq"] is None or result["liq"] < MIN_LIQUIDITY:
+        return "🔴 ZAYIF"
+    if result["top10"] is not None and result["top10"] >= 75:
+        return "🔴 DAĞILIM RİSKİ"
+
+    score = result["score"] + momentum
+    mc = result["mc"] or 0
+    buys = result["buys5"]
+    sells = result["sells5"]
+    vol5 = result["vol5"] or 0
+    p5 = result["price5"]
+
+    buy_ratio_ok = sells == 0 or buys >= sells * 1.20
+
+    # "100X" is a potential tag, not a prediction.
+    if (
+        2000 <= mc <= 6500
+        and score >= 78
+        and buys >= 8
+        and buy_ratio_ok
+        and vol5 >= 500
+        and p5 is not None and 1 <= p5 <= 45
+    ):
+        return "💎 100X POTANSİYEL ADAYI"
+
+    if (
+        2000 <= mc <= 9000
+        and score >= 68
+        and buys >= 5
+        and buy_ratio_ok
+        and vol5 >= 250
+    ):
+        return "🚀 5X–10X POTANSİYEL ADAYI"
+
+    if score >= 58:
+        return "🟡 ERKEN / İZLE"
+
+    return "🔴 GİRME"
+
+
+def simple_action(result, momentum=0, previous=None):
+    if not result:
+        return "🔴 GİRME"
+
+    if not basic_signal_safe(result) or not crash_guard(result):
+        return "🔴 GİRME"
+
+    p5 = result.get("price5")
+    buys = result.get("buys5", 0)
+    sells = result.get("sells5", 0)
+
+    if p5 is not None and p5 <= -8:
+        return "🔴 SAT / GİRME"
+    if sells > buys * 1.35 and buys + sells >= 8:
+        return "🔴 SAT / GİRME"
+
+    if strong_signal(result, momentum, previous):
+        return "🟢 GİR"
+
+    if watch_candidate(result):
+        return "🟡 İZLE / ERKEN ADAY"
+
+    return "🔴 GİRME"
 
 def analyse(ca):
     pair = best_pair(ca)
     if pair is None:
         return None, f"🦅 HUNTERELITE {VERSION}\n\nCA: {ca}\n\n❌ DEX pair verisi bulunamadı.\n\n🔴 GİRME / VERİ BEKLE"
-    report = rugcheck(ca); result = calculate_score(pair, report)
-    base = pair.get("baseToken") or {}; name = base.get("name") or "Unknown"; symbol = base.get("symbol") or "N/A"
+
+    report = rugcheck(ca)
+    result = calculate_score(pair, report)
+    base = pair.get("baseToken") or {}
+    name = base.get("name") or "Unknown"
+    symbol = base.get("symbol") or "N/A"
+
     text = f"""🦅 HUNTERELITE {VERSION}
 
 {name} ({symbol})
@@ -491,20 +681,29 @@ Mint authority: {authority_text(result["mint"])}
 Freeze authority: {authority_text(result["freeze"])}
 
 🛡 Hunter Elite Score: {result["score"]}/100
+💎 Potansiyel: {potential_label(result)}
 
 🎯 Karar: {result["decision"]}"""
+
     if result["risks"]:
         text += "\n\n⚠️ Riskler:\n" + "".join(f"• {r}\n" for r in result["risks"][:7])
+
     text += "\nEksik veri güvenli kabul edilmez.\nBu sistem risk filtresidir, yatırım garantisi değildir."
     return result, text
 
 def basic_signal_safe(result):
-    if not result: return False
-    if result["signals"]["rug"] or result["signals"]["honeypot"]: return False
-    if result["mint"] is True or result["freeze"] is True: return False
-    if result["mc"] is None or not (MC_MIN <= result["mc"] <= MC_MAX): return False
-    if result["liq"] is None or result["liq"] < MIN_LIQUIDITY: return False
-    if result["top10"] is not None and result["top10"] >= 70: return False
+    if not result:
+        return False
+    if result["signals"]["rug"] or result["signals"]["honeypot"]:
+        return False
+    if result["mint"] is True or result["freeze"] is True:
+        return False
+    if result["mc"] is None or not (MC_MIN <= result["mc"] <= MC_MAX):
+        return False
+    if result["liq"] is None or result["liq"] < MIN_LIQUIDITY:
+        return False
+    if result["top10"] is not None and result["top10"] >= 75:
+        return False
     return True
 
 def crash_guard(result):
@@ -527,7 +726,6 @@ def crash_guard(result):
 
     return True
 
-
 def trend_confirmed(previous, current):
     if not previous or not current:
         return False
@@ -540,43 +738,56 @@ def trend_confirmed(previous, current):
     if current.get("price5") is None or current["price5"] <= 0:
         return False
 
-    if current.get("buys5", 0) < previous.get("buys5", 0):
+    if current.get("buys5", 0) < max(1, previous.get("buys5", 0) * 0.90):
         return False
 
     old_vol = previous.get("vol5")
     new_vol = current.get("vol5")
-    if old_vol is not None and new_vol is not None and new_vol < old_vol * 1.05:
+    if old_vol is not None and new_vol is not None and new_vol < old_vol * MIN_VOL_GROWTH:
         return False
 
     return True
 
-
 def watch_candidate(result):
-    if not basic_signal_safe(result): return False
-    if not crash_guard(result): return False
-    if result["score"] < WATCH_SCORE: return False
-    if result["buys5"] < 5: return False
-    if result["vol5"] is not None and result["vol5"] < 250: return False
-    if result["price5"] is not None and result["price5"] < MAX_WATCH_DROP_5M: return False
+    if not basic_signal_safe(result):
+        return False
+    if not crash_guard(result):
+        return False
+    if result["score"] < WATCH_SCORE:
+        return False
+    if result["buys5"] < WATCH_MIN_BUYS_5M:
+        return False
+    if result["vol5"] is not None and result["vol5"] < WATCH_MIN_VOL_5M:
+        return False
+    if result["price5"] is not None and result["price5"] < MAX_WATCH_DROP_5M:
+        return False
     return True
-
 
 def strong_signal(result, momentum, previous=None):
-    if not basic_signal_safe(result): return False
-    if not crash_guard(result): return False
-    if previous is None: return False
-    if momentum < MIN_MOMENTUM_SIGNAL: return False
-    if not trend_confirmed(previous, result): return False
-    if result["score"] + momentum < SIGNAL_SCORE: return False
-    if result["mc"] > EARLY_MC_MAX: return False
+    if not basic_signal_safe(result):
+        return False
+    if not crash_guard(result):
+        return False
+    if previous is None:
+        return False
+    if momentum < MIN_MOMENTUM_SIGNAL:
+        return False
+    if not trend_confirmed(previous, result):
+        return False
+    if result["score"] + momentum < SIGNAL_SCORE:
+        return False
+    if result["mc"] > EARLY_MC_MAX:
+        return False
 
     buys, sells = result["buys5"], result["sells5"]
-    if buys < 8: return False
-    if sells > 0 and buys < sells * 1.35: return False
-    if result["vol5"] is not None and result["vol5"] < 500: return False
+    if buys < SIGNAL_MIN_BUYS_5M:
+        return False
+    if sells > 0 and buys < sells * SIGNAL_MIN_BUY_SELL_RATIO:
+        return False
+    if result["vol5"] is not None and result["vol5"] < SIGNAL_MIN_VOL_5M:
+        return False
 
     return True
-
 
 def auto_scanner():
     print("🚨 EARLY HUNTER SCANNER ACTIVE", flush=True)
@@ -587,29 +798,65 @@ def auto_scanner():
         flush=True,
     )
     time.sleep(10)
+
     while True:
         try:
             if not signal_chats:
-                time.sleep(SCAN_INTERVAL); continue
-            for ca in discovery_candidates():
+                time.sleep(SCAN_INTERVAL)
+                continue
+
+            candidates = discovery_candidates()
+            stats = {
+                "radar": len(candidates),
+                "pair_yok": 0,
+                "basic_fail": 0,
+                "crash_fail": 0,
+                "watch": 0,
+                "signal": 0,
+                "processed": 0,
+            }
+
+            for ca in candidates:
                 try:
                     pair = best_pair(ca)
-                    if pair is None: continue
+                    if pair is None:
+                        stats["pair_yok"] += 1
+                        continue
+
                     report = rugcheck(ca)
                     result = calculate_score(pair, report)
+                    stats["processed"] += 1
+
+                    if not basic_signal_safe(result):
+                        stats["basic_fail"] += 1
+                    elif not crash_guard(result):
+                        stats["crash_fail"] += 1
+
                     now = time.time()
-                    with state_lock: previous = token_states.get(ca)
+                    with state_lock:
+                        previous = token_states.get(ca)
+
                     old_metrics = previous.get("metrics") if previous else None
                     momentum = momentum_score(old_metrics, result)
                     seen_count = (previous.get("seen_count", 0) + 1) if previous else 1
-                    stage = previous.get("stage","NEW") if previous else "NEW"
-                    last_sent = previous.get("last_sent",0) if previous else 0
+                    stage = previous.get("stage", "NEW") if previous else "NEW"
+                    last_sent = previous.get("last_sent", 0) if previous else 0
                     new_stage, message = stage, None
-                    base = pair.get("baseToken") or {}; name = base.get("name","Unknown"); symbol = base.get("symbol","N/A")
-                    if seen_count >= TREND_CONFIRM_SCANS and strong_signal(result, momentum, old_metrics) and stage != "SIGNAL":
+
+                    base = pair.get("baseToken") or {}
+                    name = base.get("name", "Unknown")
+                    symbol = base.get("symbol", "N/A")
+
+                    if (
+                        seen_count >= TREND_CONFIRM_SCANS
+                        and strong_signal(result, momentum, old_metrics)
+                        and stage != "SIGNAL"
+                    ):
                         new_stage = "SIGNAL"
+                        stats["signal"] += 1
                         final_score = min(100, result["score"] + momentum)
                         age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
+
                         message = f"""🚨 HUNTERELITE EARLY SIGNAL
 
 {name} ({symbol})
@@ -631,12 +878,20 @@ CA: {ca}
 ⏱ Pair yaşı: {age_text}
 🎯 Final Score: {final_score}/100
 
-🔥 DURUM: ERKEN MOMENTUM
+🟢 KARAR: GİR
+💎 POTANSİYEL: {potential_label(result, momentum)}
 
-⚠️ Otomatik sinyal alım emri değildir.
+⚠️ "100X / 5X–10X" etiketi yalnızca potansiyel sınıflamasıdır; garanti değildir.
 Axiom'da son kontrolünü yap."""
-                    elif watch_candidate(result) and stage == "NEW" and now - last_sent > WATCH_REPEAT_COOLDOWN:
+
+                    elif (
+                        watch_candidate(result)
+                        and stage == "NEW"
+                        and now - last_sent > WATCH_REPEAT_COOLDOWN
+                    ):
                         new_stage = "WATCH"
+                        stats["watch"] += 1
+
                         message = f"""👀 HUNTERELITE İZLE
 
 {name} ({symbol})
@@ -652,8 +907,11 @@ Likidite: {money(result["liq"])}
 Top-10: {percent(result["top10"])}
 
 Score: {result["score"]}/100
+💎 Potansiyel: {potential_label(result)}
 
+🟡 KARAR: İZLE / ERKEN ADAY
 ⏳ Momentum teyidi bekleniyor."""
+
                     if stage == "SIGNAL" and not basic_signal_safe(result):
                         new_stage = "CANCELLED"
                         message = f"""⚠️ HUNTERELITE SİNYAL İPTAL
@@ -667,29 +925,61 @@ Likidite: {money(result["liq"])}
 Top-10: {percent(result["top10"])}
 Score: {result["score"]}/100
 
-🔴 Yeni giriş için uygun değil."""
+🔴 KARAR: SAT / GİRME
+Yeni giriş için uygun değil."""
+
                     if message:
-                        for chat_id in list(signal_chats): send(chat_id, message)
+                        for chat_id in list(signal_chats):
+                            send(chat_id, message)
                         last_sent = now
+
                     with state_lock:
-                        token_states[ca] = {"metrics":result,"stage":new_stage,"last_sent":last_sent,"seen":now,"seen_count":seen_count}
+                        token_states[ca] = {
+                            "metrics": result,
+                            "stage": new_stage,
+                            "last_sent": last_sent,
+                            "seen": now,
+                            "seen_count": seen_count,
+                        }
+
                     save_state()
                     time.sleep(1)
+
                 except Exception as e:
                     print("TOKEN SCAN ERROR:", ca, repr(e), flush=True)
+
+            print(
+                "📊 SCAN SUMMARY | "
+                f"radar={stats['radar']} "
+                f"processed={stats['processed']} "
+                f"pair_yok={stats['pair_yok']} "
+                f"basic_fail={stats['basic_fail']} "
+                f"crash_fail={stats['crash_fail']} "
+                f"watch={stats['watch']} "
+                f"signal={stats['signal']}",
+                flush=True,
+            )
+
             cutoff = time.time() - 21600
             with state_lock:
-                for ca in [k for k,v in token_states.items() if v.get("seen",0) < cutoff]:
+                for ca in [k for k, v in token_states.items() if v.get("seen", 0) < cutoff]:
                     token_states.pop(ca, None)
+
         except Exception as e:
             print("SCANNER ERROR:", repr(e), flush=True)
+
         time.sleep(SCAN_INTERVAL)
 
 def process_message(message):
-    chat = message.get("chat") or {}; chat_id = chat.get("id")
-    text = str(message.get("text","")).strip()
-    if chat_id is None or not text: return
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    text = str(message.get("text", "")).strip()
+
+    if chat_id is None or not text:
+        return
+
     command = text.split()[0].lower().split("@")[0]
+
     if command == "/start":
         signal_chats.add(int(chat_id))
         send(chat_id, f"""✅ HunterElite {VERSION} ONLINE
@@ -708,9 +998,13 @@ Komutlar:
 /signal_on
 /signal_off
 /signal_test
-/help"""); return
+/help""")
+        return
+
     if command == "/ping":
-        send(chat_id, f"🏓 PONG — HunterElite {VERSION} ONLINE"); return
+        send(chat_id, f"🏓 PONG — HunterElite {VERSION} ONLINE")
+        return
+
     if command == "/status":
         active = int(chat_id) in signal_chats
         send(chat_id, f"""✅ HunterElite {VERSION} ONLINE
@@ -725,11 +1019,20 @@ Komutlar:
 🟢 Birdeye API: {"BAĞLI" if BIRDEYE_API_KEY else "KEY YOK"}
 ⏱ Birdeye yenileme: {BIRDEYE_POLL_INTERVAL} sn
 💧 Min Likidite: {money(MIN_LIQUIDITY)}
-📊 Market: $2K–$10K öncelikli"""); return
+📊 Market: $2K–$10K öncelikli
+💎 100X potansiyel filtresi: AKTİF""")
+        return
+
     if command == "/signal_on":
-        signal_chats.add(int(chat_id)); send(chat_id, "🚨 HunterElite otomatik sinyal AKTİF.\nEarly Hunter taraması başladı."); return
+        signal_chats.add(int(chat_id))
+        send(chat_id, "🚨 HunterElite otomatik sinyal AKTİF.\nEarly Hunter taraması başladı.")
+        return
+
     if command == "/signal_off":
-        signal_chats.discard(int(chat_id)); send(chat_id, "🔕 Otomatik sinyal KAPALI."); return
+        signal_chats.discard(int(chat_id))
+        send(chat_id, "🔕 Otomatik sinyal KAPALI.")
+        return
+
     if command == "/signal_test":
         signal_chats.add(int(chat_id))
         send(chat_id, f"""✅ HUNTERELITE TEST SİNYALİ
@@ -741,33 +1044,53 @@ Komutlar:
 🔎 Manuel analiz: AKTİF
 🔥 Early Hunter: AKTİF
 
-Gerçek aday taraması başladı."""); return
+Gerçek aday taraması başladı.""")
+        return
+
     if command == "/help":
-        send(chat_id, "HunterElite V11.1 WIDE RADAR\n\nCA gönder → manuel analiz\n\n/ping\n/status\n/signal_on\n/signal_off\n/signal_test\n/start"); return
+        send(
+            chat_id,
+            "HunterElite V11.3 EARLY 100X RADAR\n\n"
+            "CA gönder → manuel analiz\n\n"
+            "/ping\n/status\n/signal_on\n/signal_off\n/signal_test\n/start"
+        )
+        return
+
     ca = text
     if not SOL_CA.match(ca):
         matches = re.findall(r"[1-9A-HJ-NP-Za-km-z]{32,44}", text)
         ca = matches[0] if matches else ""
+
     if ca and SOL_CA.match(ca):
         send(chat_id, "🔎 Token analiz ediliyor...")
         try:
-            _, report = analyse(ca); send(chat_id, report)
+            _, report = analyse(ca)
+            send(chat_id, report)
         except Exception as e:
-            print("ANALYSIS ERROR:", repr(e), flush=True); send(chat_id, "❌ Analiz sırasında veri hatası oluştu.")
+            print("ANALYSIS ERROR:", repr(e), flush=True)
+            send(chat_id, "❌ Analiz sırasında veri hatası oluştu.")
         return
+
     send(chat_id, "Solana kontrat adresini gönder veya /help yaz.")
 
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
         body = f"HunterElite {VERSION} ONLINE".encode("utf-8")
-        self.send_response(200); self.send_header("Content-Type","text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
-    def log_message(self, format, *args): return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        return
 
 def health_server():
-    port = int(os.getenv("PORT","8080"))
-    try: HTTPServer(("0.0.0.0",port), Health).serve_forever()
-    except Exception as e: print("HEALTH ERROR:", repr(e), flush=True)
+    port = int(os.getenv("PORT", "8080"))
+    try:
+        HTTPServer(("0.0.0.0", port), Health).serve_forever()
+    except Exception as e:
+        print("HEALTH ERROR:", repr(e), flush=True)
 
 def startup():
     print(f"✅ HUNTERELITE {VERSION} ONLINE", flush=True)
@@ -775,34 +1098,50 @@ def startup():
     print("🚨 EARLY HUNTER ACTIVE", flush=True)
     print(f"⏱ SCAN INTERVAL: {SCAN_INTERVAL}s", flush=True)
     print(
-        f"🎛 TUNING: momentum>={MIN_MOMENTUM_SIGNAL}, MC growth>={int((MIN_MC_GROWTH-1)*100)}%, pair age<={MAX_PAIR_AGE_HOURS:.0f}h",
+        f"🎛 TUNING: watch={WATCH_SCORE}, signal={SIGNAL_SCORE}, "
+        f"momentum>={MIN_MOMENTUM_SIGNAL}, MC growth>={int((MIN_MC_GROWTH-1)*100)}%, "
+        f"pair age<={MAX_PAIR_AGE_HOURS:.0f}h",
         flush=True,
     )
     print(
         f"🟢 BIRDEYE API KEY: {'READY' if BIRDEYE_API_KEY else 'MISSING'}",
         flush=True,
     )
-    try: telegram("deleteWebhook", {"drop_pending_updates":"false"})
-    except Exception as e: print("WEBHOOK CLEAN WARNING:", repr(e), flush=True)
+    try:
+        telegram("deleteWebhook", {"drop_pending_updates": "false"})
+    except Exception as e:
+        print("WEBHOOK CLEAN WARNING:", repr(e), flush=True)
 
 def polling():
     offset = None
     while True:
         try:
-            data = {"timeout":25,"allowed_updates":json.dumps(["message"])}
-            if offset is not None: data["offset"] = offset
+            data = {"timeout": 25, "allowed_updates": json.dumps(["message"])}
+            if offset is not None:
+                data["offset"] = offset
+
             response = telegram("getUpdates", data, timeout=35)
+
             for update in response.get("result", []):
                 update_id = update.get("update_id")
-                if update_id is not None: offset = update_id + 1
+                if update_id is not None:
+                    offset = update_id + 1
+
                 message = update.get("message")
-                if message: process_message(message)
+                if message:
+                    process_message(message)
+
         except urllib.error.HTTPError as e:
-            try: body = e.read().decode("utf-8", errors="replace")
-            except Exception: body = ""
-            print("TELEGRAM HTTP ERROR:", e.code, body, flush=True); time.sleep(3)
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                body = ""
+            print("TELEGRAM HTTP ERROR:", e.code, body, flush=True)
+            time.sleep(3)
+
         except Exception as e:
-            print("POLL ERROR:", repr(e), flush=True); time.sleep(3)
+            print("POLL ERROR:", repr(e), flush=True)
+            time.sleep(3)
 
 if __name__ == "__main__":
     load_state()
