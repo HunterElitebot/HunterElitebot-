@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V12.3 HOLDER RECOVERY FINAL"
+VERSION = "V12.4 RPC HOLDER FIX FINAL"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -383,97 +383,75 @@ def _holder_rpc_prequal(metrics):
 
 
 
-def rpc_holder_top10(ca, report=None):
-    """
-    Fallback holder verification from Solana RPC:
-    - getTokenLargestAccounts gives the 20 largest SPL token accounts.
-    - getTokenSupply gives circulating token supply for percentage calculation.
-    - getMultipleAccounts(jsonParsed) resolves token-account owners so duplicate
-      accounts can be merged and protocol/AMM inventories can be excluded.
-    Returns (top1, top5, top10, reliable).
-    """
+def rpc_holder_top10(ca: str):
+    """V12.4 robust Solana Top-10 verification with owner lookup as best-effort."""
     now = time.time()
     cached = HOLDER_RPC_CACHE.get(ca)
     if cached and now - cached[0] < HOLDER_RPC_CACHE_TTL:
         return cached[1]
-
     try:
-        largest_result = rpc_json("getTokenLargestAccounts", [ca, {"commitment": "confirmed"}])
-        supply_result = rpc_json("getTokenSupply", [ca, {"commitment": "confirmed"}])
-        largest = (largest_result or {}).get("value") or []
-        supply_value = ((supply_result or {}).get("value") or {}).get("amount")
-        supply = float(supply_value or 0)
-        if supply <= 0 or not largest:
+        largest = solana_rpc_call("getTokenLargestAccounts", [ca, {"commitment": "confirmed"}])
+        supply_resp = solana_rpc_call("getTokenSupply", [ca, {"commitment": "confirmed"}])
+        vals = ((largest or {}).get("result") or {}).get("value") or []
+        supply_obj = (((supply_resp or {}).get("result") or {}).get("value") or {})
+        supply_raw = num(supply_obj.get("amount"))
+        if not vals or not supply_raw or supply_raw <= 0:
             result = (None, None, None, False)
             HOLDER_RPC_CACHE[ca] = (now, result)
             return result
 
-        account_addresses = [str(x.get("address")) for x in largest if isinstance(x, dict) and x.get("address")]
-        if not account_addresses:
-            result = (None, None, None, False)
-            HOLDER_RPC_CACHE[ca] = (now, result)
-            return result
-
-        parsed_result = rpc_json(
-            "getMultipleAccounts",
-            [account_addresses, {"encoding": "jsonParsed", "commitment": "confirmed"}],
-        )
-        parsed_values = (parsed_result or {}).get("value") or []
-
-        protocol_addresses, protocol_owners = _protocol_holder_accounts(report)
-        owner_amounts = {}
-        usable_rows = 0
-
-        for idx, row in enumerate(largest[:20]):
+        accounts = []
+        for row in vals:
             if not isinstance(row, dict):
                 continue
-            address = str(row.get("address") or "")
-            if not address or address in protocol_addresses:
-                continue
-            try:
-                amount = float(row.get("amount") or 0)
-            except Exception:
-                amount = 0.0
-            if amount <= 0:
-                continue
-
-            owner = None
-            if idx < len(parsed_values):
-                info = parsed_values[idx] or {}
-                try:
-                    owner = (((info.get("data") or {}).get("parsed") or {}).get("info") or {}).get("owner")
-                except Exception:
-                    owner = None
-            owner = str(owner) if owner else address
-            if owner in protocol_owners or owner in protocol_addresses:
-                continue
-
-            owner_amounts[owner] = owner_amounts.get(owner, 0.0) + amount
-            usable_rows += 1
-
-        amounts = sorted(owner_amounts.values(), reverse=True)
-        # We need enough independent wallets to call this a verified Top-10.
-        if len(amounts) < 10:
+            amount = num(row.get("amount"))
+            address = str(row.get("address") or "").strip()
+            if amount is not None and amount >= 0:
+                accounts.append((address, float(amount)))
+        if not accounts:
             result = (None, None, None, False)
             HOLDER_RPC_CACHE[ca] = (now, result)
             return result
 
-        pcts = [(amount / supply) * 100.0 for amount in amounts]
-        top1 = pcts[0]
-        top5 = sum(pcts[:5])
-        top10 = sum(pcts[:10])
-        reliable = 0 <= top1 <= 100 and 0 <= top10 <= 100.5
-        result = (top1, top5, top10 if reliable else None, reliable)
+        raw_amounts = sorted((a for _, a in accounts), reverse=True)
+        raw_top10 = max(0.0, min(100.0, 100.0 * sum(raw_amounts[:10]) / float(supply_raw)))
+
+        # Owner aggregation is useful but must not make the fallback collapse.
+        owner_totals = {}
+        for address, amount in accounts[:20]:
+            if not address:
+                continue
+            try:
+                info = solana_rpc_call("getAccountInfo", [
+                    address, {"encoding": "jsonParsed", "commitment": "confirmed"}
+                ])
+                value = ((info or {}).get("result") or {}).get("value") or {}
+                data = value.get("data") or {}
+                parsed = (data.get("parsed") or {}) if isinstance(data, dict) else {}
+                info_obj = parsed.get("info") or {}
+                owner = str(info_obj.get("owner") or "").strip()
+                if owner:
+                    owner_totals[owner] = owner_totals.get(owner, 0.0) + amount
+            except Exception:
+                continue
+
+        if owner_totals:
+            amounts = sorted(owner_totals.values(), reverse=True)
+            top10 = max(0.0, min(100.0, 100.0 * sum(amounts[:10]) / float(supply_raw)))
+            source = "SOLANA_RPC_OWNER"
+        else:
+            top10 = raw_top10
+            source = "SOLANA_RPC_ACCOUNTS"
+
+        reliable = 1.0 <= top10 < 98.0
+        result = (top10 if reliable else None, raw_top10, source, not reliable)
         HOLDER_RPC_CACHE[ca] = (now, result)
         return result
     except Exception as e:
         print("HOLDER RPC FALLBACK ERROR:", ca, repr(e), flush=True)
-        # Cache failures briefly so a transient public-RPC problem does not
-        # hammer the endpoint every 30 seconds.
         result = (None, None, None, False)
         HOLDER_RPC_CACHE[ca] = (time.time() - HOLDER_RPC_CACHE_TTL + 90, result)
         return result
-
 
 def telegram(method, data=None, timeout=35):
     data = data or {}
@@ -2121,7 +2099,7 @@ def auto_scanner():
                     holder_unreliable = bool(result.get("holder_unreliable"))
                     holder_raw_top10 = result.get("holder_raw_top10")
                     holder_source = result.get("holder_source")
-                    if holder_source == "SOLANA_RPC":
+                    if holder_source in ("SOLANA_RPC", "SOLANA_RPC_OWNER", "SOLANA_RPC_ACCOUNTS"):
                         stats["holder_rpc_verified"] = stats.get("holder_rpc_verified", 0) + 1
                     elif holder_source == "RUGCHECK":
                         stats["holder_rugcheck_verified"] = stats.get("holder_rugcheck_verified", 0) + 1
@@ -2412,7 +2390,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V12.3 | total={stats.get('radar',0)} "
+                    f"RADAR V12.4 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2654,7 +2632,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.3 HOLDER RECOVERY + FINAL GATE + FEED RESILIENCE: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.4 RPC HOLDER FIX + FINAL GATE + FEED RESILIENCE: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
