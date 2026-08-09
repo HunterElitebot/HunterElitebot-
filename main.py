@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.13 FRESH PAIR GATE"
+VERSION = "V11.14 AI VIRAL RADAR"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -76,11 +76,14 @@ RADAR_RAW_LIMIT = 160
 RADAR_TARGET = 80
 FRESH_PAIR_MAX_HOURS = 6.0
 
+VIRAL_RADAR_ENABLED = True
+VIRAL_SCORE_BONUS_MAX = 12
+
 radar_stats = {
     "updated": 0,
     "radar": 0,
     "processed": 0,
-    "pair_yok": 0, "stale_pair": 0,
+    "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0,
     "basic_fail": 0,
     "crash_fail": 0,
     "watch": 0,
@@ -912,6 +915,32 @@ def crash_guard_detail(result):
     return True, "ok"
 
 
+def market_viral_score(result):
+    """0-12 market-viral acceleration score from live DEX metrics."""
+    if not result:
+        return 0, "NO DATA"
+
+    buys = float(result.get("buys5") or 0)
+    sells = float(result.get("sells5") or 0)
+    vol5 = float(result.get("vol5") or 0)
+    p5 = float(result.get("price5m") or 0)
+    total = buys + sells
+    buy_ratio = buys / max(total, 1.0)
+
+    score = 0
+    if total >= 20: score += 2
+    if total >= 50: score += 2
+    if buy_ratio >= 0.58: score += 2
+    if buy_ratio >= 0.65: score += 1
+    if vol5 >= 1500: score += 2
+    if vol5 >= 4000: score += 1
+    if 3 <= p5 <= 35: score += 2
+
+    score = min(score, VIRAL_SCORE_BONUS_MAX)
+    label = "HOT" if score >= 8 else ("RISING" if score >= 5 else "LOW")
+    return score, label
+
+
 def auto_scanner():
     print("EARLY HUNTER SCANNER ACTIVE", flush=True)
     print(
@@ -951,7 +980,7 @@ def auto_scanner():
             stats = {
                 "radar": len(candidates),
                 "processed": 0,
-                "pair_yok": 0, "stale_pair": 0,
+                "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0,
                 "basic_fail": 0,
                 "crash_fail": 0,
                 "watch": 0,
@@ -993,6 +1022,18 @@ def auto_scanner():
                     report = rugcheck(ca)
                     result = calculate_score(pair, report)
                     stats["processed"] += 1
+
+                    viral_score, viral_label = market_viral_score(result)
+                    result["viral_score"] = viral_score
+                    result["viral_label"] = viral_label
+                    if viral_label == "HOT":
+                        stats["viral_hot"] += 1
+                    elif viral_label == "RISING":
+                        stats["viral_rising"] += 1
+
+                    # Viral activity can strengthen a candidate, never bypass hard safety.
+                    if viral_score and result.get("score") is not None:
+                        result["score"] = min(100, result["score"] + viral_score)
                     stats["pair_pass"] += 1
 
                     mc_ok = result.get("mc") is not None and MC_MIN <= result["mc"] <= MC_MAX
@@ -1204,7 +1245,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.13 | total={stats.get('radar',0)} "
+                    f"RADAR V11.14 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
@@ -1223,7 +1264,8 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
                     f"> TREND={stats.get('trend_pass',0)} "
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} "
-                    f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}"
+                    f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\\n"
+                    f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)}"
                 )
                 for chat_id in list(signal_chats):
                     send(chat_id, diag)
@@ -1415,7 +1457,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nFRESH-FIRST RADAR + <=6H PAIR GATE + SINGLE CRASH ENGINE: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nFRESH RADAR + SAFETY + MARKET VIRAL AI SCORE: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
