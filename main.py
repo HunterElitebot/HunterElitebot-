@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.23 BIRDEYE PRIORITY RADAR"
+VERSION = "V11.24 BIRDEYE DEEP FRESH"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -29,9 +29,9 @@ WATCH_SCORE = 47
 SIGNAL_SCORE = 60
 SCAN_INTERVAL = 30
 
-BIRDEYE_POLL_INTERVAL = 180
+BIRDEYE_POLL_INTERVAL = 120
 BIRDEYE_LIMIT = 20
-BIRDEYE_PAGES = 3
+BIRDEYE_PAGES = 6
 BIRDEYE_NEW_LISTING = "https://public-api.birdeye.so/defi/v2/tokens/new_listing"
 
 WATCH_REPEAT_COOLDOWN = 21600
@@ -76,7 +76,7 @@ discovery_seen_lock = threading.Lock()
 DISCOVERY_MEMORY_SECONDS = 21600
 RADAR_RAW_LIMIT = 240
 RADAR_TARGET = 80
-BIRDEYE_TARGET = 60
+BIRDEYE_TARGET = 80
 DEX_TARGET = 20
 MAX_REPEAT_PER_SCAN = 20
 FRESH_PAIR_MAX_HOURS = 6.0
@@ -401,7 +401,10 @@ def discovery_candidates():
         except Exception as e:
             print("DISCOVERY ERROR:", repr(e), flush=True)
 
-    return (birdeye_found[:BIRDEYE_TARGET] + dex_found[:DEX_TARGET])[:RADAR_TARGET]
+    birdeye_selected = birdeye_found[:BIRDEYE_TARGET]
+    remaining = max(0, RADAR_TARGET - len(birdeye_selected))
+    dex_selected = dex_found[:min(DEX_TARGET, remaining)]
+    return (birdeye_selected + dex_selected)[:RADAR_TARGET]
 
 def rugcheck(ca):
     try:
@@ -1364,7 +1367,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.23 | total={stats.get('radar',0)} "
+                    f"RADAR V11.24 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
@@ -1579,13 +1582,13 @@ def startup_notify():
 Early Hunter: ACTIVE
 Scan: {SCAN_INTERVAL} sec
 Radar: {"BIRDEYE + DEX" if BIRDEYE_API_KEY else "DEX ONLY"}
-Birdeye: {"CONNECTED" if BIRDEYE_API_KEY else "KEY MISSING"}\nBirdeye Fresh: up to 60 listings / 180 sec\nRadar Mix: Birdeye up to 60 + DEX max 20
+Birdeye: {"CONNECTED" if BIRDEYE_API_KEY else "KEY MISSING"}\nBirdeye Fresh: deep pull up to 120 listings / 120 sec\nRadar Mix: Birdeye fills first + DEX max 20 fallback
 Watch Score: {WATCH_SCORE}
 Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE PRIORITY 60 + DEX CAP 20 + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE DEEP FRESH + DEX FALLBACK + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
