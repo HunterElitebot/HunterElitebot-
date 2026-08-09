@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V12.4 RPC HOLDER FIX FINAL"
+VERSION = "V12.5 HOLDER ROOT FIX FINAL"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -1198,7 +1198,8 @@ def calculate_score(pair, report):
 
     # V11.57: only promising candidates spend RPC calls on secondary verification.
     ca = str(((pair.get("baseToken") or {}).get("address") or "")).strip()
-    if (top10 is None or holder_unreliable) and ca and _holder_rpc_prequal(m):
+    if (top10 is None or holder_unreliable) and _holder_rpc_prequal(metrics):
+        stats["holder_rpc_attempt"] = stats.get("holder_rpc_attempt", 0) + 1
         r1, r5, r10, rpc_reliable = rpc_holder_top10(ca, report)
         if rpc_reliable and r10 is not None:
             top1, top5, top10 = r1, r5, r10
@@ -2390,7 +2391,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V12.4 | total={stats.get('radar',0)} "
+                    f"RADAR V12.5 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2632,7 +2633,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.4 RPC HOLDER FIX + FINAL GATE + FEED RESILIENCE: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.5 HOLDER ROOT FIX + FINAL GATE + FEED RESILIENCE: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
