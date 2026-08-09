@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V12.1 FINAL CONSOLIDATED"
+VERSION = "V12.2 FINAL FEED RESILIENCE"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -218,6 +218,9 @@ GECKO_TARGET = 60
 gecko_cache = []
 gecko_last_fetch = 0
 gecko_last_error = ""
+gecko_fail_count = 0
+gecko_next_retry = 0
+gecko_last_status = "INIT"
 gecko_lock = threading.Lock()
 gecko_liq_cache = {}
 GECKO_LIQ_CACHE_TTL = 300
@@ -750,105 +753,123 @@ def birdeye_new_candidates(force=False):
 
 def gecko_new_candidates(force=False):
     """
-    Keyless GeckoTerminal Solana new-pools fallback.
-    Captures fresh token CA + pool reserve/liquidity in USD.
+    V12.2 resilient GeckoTerminal feed.
+    - Per-page isolation: one failed page no longer kills the whole feed.
+    - Alternate endpoint fallback.
+    - Exponential retry backoff on 429/5xx/network errors.
+    - Keeps last good cache instead of dropping radar coverage to zero.
     """
     global gecko_cache, gecko_last_fetch, gecko_last_error, gecko_liq_cache
+    global gecko_fail_count, gecko_next_retry, gecko_last_status
 
     now = time.time()
     with gecko_lock:
+        if not force and now < gecko_next_retry:
+            gecko_last_status = "BACKOFF"
+            return list(gecko_cache)
         if not force and gecko_cache and now - gecko_last_fetch < GECKO_POLL_INTERVAL:
+            gecko_last_status = "CACHE"
             return list(gecko_cache)
 
-    found, seen = [], set()
-    liq_updates = {}
+    found, seen, liq_updates = [], set(), {}
+    errors = []
+    pages_ok = 0
 
-    try:
+    endpoint_templates = [
+        "https://api.geckoterminal.com/api/v2/networks/solana/new_pools",
+        "https://api.geckoterminal.com/api/v2/networks/solana/pools",
+    ]
+
+    for endpoint in endpoint_templates:
+        endpoint_found_before = len(found)
         for page in range(1, GECKO_PAGES + 1):
-            url = (
-                "https://api.geckoterminal.com/api/v2/networks/solana/new_pools?"
-                + urllib.parse.urlencode({
-                    "include": "base_token",
-                    "page": page,
-                })
-            )
-            payload = get_json(
-                url,
-                timeout=15,
-                headers={"accept": "application/json"},
-            )
+            url = endpoint + "?" + urllib.parse.urlencode({
+                "include": "base_token",
+                "page": page,
+            })
+            try:
+                payload = get_json(
+                    url,
+                    timeout=15,
+                    headers={
+                        "accept": "application/json",
+                        "User-Agent": "HunterElite-V12.2",
+                    },
+                )
+                if not isinstance(payload, dict):
+                    errors.append(f"page{page}:BAD_PAYLOAD")
+                    continue
 
-            if not isinstance(payload, dict):
-                continue
+                included_map = {}
+                included = payload.get("included")
+                if isinstance(included, list):
+                    for obj in included:
+                        if not isinstance(obj, dict):
+                            continue
+                        oid = str(obj.get("id") or "")
+                        attrs = obj.get("attributes")
+                        attrs = attrs if isinstance(attrs, dict) else {}
+                        address = str(attrs.get("address") or "").strip()
+                        if oid and address:
+                            included_map[oid] = address
 
-            included_map = {}
-            included = payload.get("included")
-            if isinstance(included, list):
-                for obj in included:
-                    if not isinstance(obj, dict):
+                rows = payload.get("data")
+                if not isinstance(rows, list):
+                    errors.append(f"page{page}:NO_DATA")
+                    continue
+
+                pages_ok += 1
+                for pool in rows:
+                    if not isinstance(pool, dict):
                         continue
-                    oid = str(obj.get("id") or "")
-                    attrs = obj.get("attributes")
+                    attrs = pool.get("attributes")
                     attrs = attrs if isinstance(attrs, dict) else {}
-                    address = str(attrs.get("address") or "").strip()
-                    if oid and address:
-                        included_map[oid] = address
+                    relationships = pool.get("relationships")
+                    relationships = relationships if isinstance(relationships, dict) else {}
+                    base_rel = relationships.get("base_token")
+                    base_rel = base_rel if isinstance(base_rel, dict) else {}
+                    base_data = base_rel.get("data")
+                    base_data = base_data if isinstance(base_data, dict) else {}
+                    base_id = str(base_data.get("id") or "")
 
-            rows = payload.get("data")
-            if not isinstance(rows, list):
+                    ca = included_map.get(base_id, "")
+                    if not ca and "_" in base_id:
+                        maybe = base_id.split("_", 1)[-1].strip()
+                        if SOL_CA.fullmatch(maybe):
+                            ca = maybe
+                    if not (ca and SOL_CA.fullmatch(ca)):
+                        continue
+
+                    gecko_liq = None
+                    for key in ("reserve_in_usd", "liquidity_usd", "reserve_usd"):
+                        gecko_liq = num(attrs.get(key))
+                        if gecko_liq is not None:
+                            break
+                    if gecko_liq is not None and gecko_liq > 0:
+                        liq_updates[ca] = (gecko_liq, now)
+
+                    if ca not in seen:
+                        seen.add(ca)
+                        found.append(ca)
+
+            except Exception as e:
+                errors.append(f"page{page}:{type(e).__name__}:{str(e)[:90]}")
                 continue
 
-            for pool in rows:
-                if not isinstance(pool, dict):
-                    continue
+        # Prefer new_pools; only use broad pools endpoint if new_pools gave nothing.
+        if len(found) > endpoint_found_before:
+            break
 
-                attrs = pool.get("attributes")
-                attrs = attrs if isinstance(attrs, dict) else {}
-
-                relationships = pool.get("relationships")
-                relationships = relationships if isinstance(relationships, dict) else {}
-                base_rel = relationships.get("base_token")
-                base_rel = base_rel if isinstance(base_rel, dict) else {}
-                base_data = base_rel.get("data")
-                base_data = base_data if isinstance(base_data, dict) else {}
-                base_id = str(base_data.get("id") or "")
-
-                ca = included_map.get(base_id, "")
-
-                if not ca and "_" in base_id:
-                    maybe = base_id.split("_", 1)[-1].strip()
-                    if SOL_CA.fullmatch(maybe):
-                        ca = maybe
-
-                if not (ca and SOL_CA.fullmatch(ca)):
-                    continue
-
-                # GeckoTerminal new_pools commonly exposes reserve_in_usd.
-                gecko_liq = None
-                for key in ("reserve_in_usd", "liquidity_usd", "reserve_usd"):
-                    gecko_liq = num(attrs.get(key))
-                    if gecko_liq is not None:
-                        break
-
-                if gecko_liq is not None and gecko_liq > 0:
-                    liq_updates[ca] = (gecko_liq, now)
-
-                if ca not in seen:
-                    seen.add(ca)
-                    found.append(ca)
-
-        with gecko_lock:
-            merged = []
-            merged_seen = set()
+    with gecko_lock:
+        if found:
+            merged, merged_seen = [], set()
             for ca in found + list(gecko_cache):
                 if ca not in merged_seen:
                     merged_seen.add(ca)
                     merged.append(ca)
-
             gecko_cache = merged[:80]
             gecko_liq_cache.update(liq_updates)
 
-            # Trim expired liquidity entries.
             expired = [
                 ca for ca, (_, ts) in gecko_liq_cache.items()
                 if now - ts > GECKO_LIQ_CACHE_TTL
@@ -857,23 +878,29 @@ def gecko_new_candidates(force=False):
                 gecko_liq_cache.pop(ca, None)
 
             gecko_last_fetch = now
-            gecko_last_error = ""
-
-        print(
-            f"GECKO FRESH OK: api={len(found)} cache={len(gecko_cache)} "
-            f"liq={len(liq_updates)}",
-            flush=True,
-        )
-        return list(gecko_cache)
-
-    except Exception as e:
-        err = repr(e)
-        with gecko_lock:
-            gecko_last_error = err
+            gecko_fail_count = 0
+            gecko_next_retry = 0
+            gecko_last_error = "; ".join(errors[-2:]) if errors else ""
+            gecko_last_status = "PARTIAL" if errors else "OK"
+        else:
+            gecko_fail_count += 1
+            # 30s, 60s, 120s, 240s, capped at 5m.
+            backoff = min(300, 30 * (2 ** min(gecko_fail_count - 1, 4)))
+            gecko_next_retry = now + backoff
             gecko_last_fetch = now
-            cached = list(gecko_cache)
-        print("GECKO FRESH ERROR:", err, flush=True)
-        return cached
+            gecko_last_error = "; ".join(errors[-3:]) if errors else "NO_RESULTS"
+            gecko_last_status = "BACKOFF" if gecko_cache else "ERR"
+
+        cached = list(gecko_cache)
+
+    print(
+        f"GECKO FEED {gecko_last_status}: api={len(found)} cache={len(cached)} "
+        f"liq={len(liq_updates)} pages_ok={pages_ok} "
+        f"retry={max(0,int(gecko_next_retry-time.time()))}s "
+        f"err={gecko_last_error[:180]}",
+        flush=True,
+    )
+    return cached
 
 def discovery_candidates():
     endpoints = [
@@ -2382,17 +2409,20 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V12.1 | total={stats.get('radar',0)} "
+                    f"RADAR V12.2 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
                     f"SOURCE_ACCOUNTED={stats.get('src_birdeye',0)+stats.get('src_gecko',0)+stats.get('src_dex',0)}\n"
+                    f"DATA_HEALTH={'DEGRADED' if (stats.get('src_birdeye',0)==0 and stats.get('src_gecko',0)==0) else 'OK'}\n"
                     f"BIRDEYE_FEED={'COOLDOWN' if time.time() < birdeye_cooldown_until else ('OK' if not birdeye_last_error else 'ERR')} "
                     f"cache={len(birdeye_cache)} "
                     f"cooldown={max(0, int(birdeye_cooldown_until-time.time()))}s\n"
                     f"BIRDEYE_ERR={birdeye_last_error[:180] if birdeye_last_error else '-'}\n"
-                    f"GECKO_FEED={'OK' if not gecko_last_error else 'ERR'} cache={len(gecko_cache)} liq_cache={len(gecko_liq_cache)}\n"
+                    f"GECKO_FEED={gecko_last_status} cache={len(gecko_cache)} liq_cache={len(gecko_liq_cache)} "
+                    f"retry={max(0,int(gecko_next_retry-time.time()))}s\n"
+                    f"GECKO_ERR={gecko_last_error[:180] if gecko_last_error else '-'}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
                     f"> LIQ={stats.get('liq_pass',0)} "
@@ -2620,7 +2650,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.1 FINAL GATE + HOLDER VALIDATION + DATA FAILSAFE: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.2 FINAL GATE + FEED RESILIENCE + DATA FAILSAFE: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
