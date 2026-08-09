@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.50 EARLY QUALITY GIR"
+VERSION = "V11.51 WATCH RISK LABELS"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -1066,7 +1066,7 @@ Mint authority: {authority_text(result["mint"])}
 Freeze authority: {authority_text(result["freeze"])}
 
 ğŸ›¡ Hunter Elite Score: {result["score"]}/100
-ğŸ’ Potansiyel: IZLE
+ğŸ’ Potansiyel: {_watch_potential}
 
 ğŸ¯ Karar: {result["decision"]}"""
 
@@ -1847,10 +1847,10 @@ Top-10: {percent(result["top10"])}
 Score: {result["score"]}/100
 
 Potansiyel: IZLE
-KARAR: IZLE / ERKEN ADAY
-GIR BLOCK: {gir_block_reason(result, result["score"])}
+KARAR: {_watch_decision}
+GIR BLOCK: {_gir_block}
 
-Momentum teyidi bekleniyor."""
+GIR icin HunterElite teyidini bekle."""
 
                     # Missing liquidity is a data-wait state, not a sell/cancel signal.
                     cancel_has_liq = result.get("liq") is not None
@@ -1922,7 +1922,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.50 | total={stats.get('radar',0)} "
+                    f"RADAR V11.51 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2157,7 +2157,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nEARLY QUALITY GIR 52+ + BREAKOUT 60+ + EXTREME 70+ + MULTI-FEED: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nWATCH RISK LABELS + EARLY QUALITY GIR + BREAKOUT + MULTI-FEED: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
