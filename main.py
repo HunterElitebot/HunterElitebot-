@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.14 AI VIRAL RADAR"
+VERSION = "V11.15 H1 SMART CRASH FIX"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -35,7 +35,7 @@ BIRDEYE_NEW_LISTING = "https://public-api.birdeye.so/defi/v2/tokens/new_listing"
 
 WATCH_REPEAT_COOLDOWN = 21600
 MAX_WATCH_DROP_5M = -10.0
-MAX_SIGNAL_DROP_1H = -10.0
+MAX_SIGNAL_DROP_1H = -35.0
 MAX_CRASH_DROP_6H = -35.0
 MAX_CRASH_DROP_24H = -55.0
 
@@ -83,7 +83,7 @@ radar_stats = {
     "updated": 0,
     "radar": 0,
     "processed": 0,
-    "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0,
+    "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [],
     "basic_fail": 0,
     "crash_fail": 0,
     "watch": 0,
@@ -980,7 +980,7 @@ def auto_scanner():
             stats = {
                 "radar": len(candidates),
                 "processed": 0,
-                "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0,
+                "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [],
                 "basic_fail": 0,
                 "crash_fail": 0,
                 "watch": 0,
@@ -1066,6 +1066,9 @@ def auto_scanner():
                             stats["age_fail"] += 1
                         elif crash_reason == "h1":
                             stats["h1_fail"] += 1
+                            h1v = result.get("price1h")
+                            if h1v is not None and len(stats["h1_fail_values"]) < 8:
+                                stats["h1_fail_values"].append(round(float(h1v), 1))
                         elif crash_reason == "h6":
                             stats["h6_fail"] += 1
                         elif crash_reason == "h24":
@@ -1245,7 +1248,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.14 | total={stats.get('radar',0)} "
+                    f"RADAR V11.15 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
@@ -1264,8 +1267,9 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
                     f"> TREND={stats.get('trend_pass',0)} "
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} "
-                    f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\\n"
-                    f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)}"
+                    f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
+                    f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)}\n"
+                    f"H1 SMART: limit={MAX_SIGNAL_DROP_1H:.0f}% fails={stats.get('h1_fail_values',[])}"
                 )
                 for chat_id in list(signal_chats):
                     send(chat_id, diag)
@@ -1457,7 +1461,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nFRESH RADAR + SAFETY + MARKET VIRAL AI SCORE: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nFRESH RADAR + SMART H1 CRASH + MARKET VIRAL AI SCORE: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
