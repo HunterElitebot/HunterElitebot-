@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.16 NEW-FIRST PRE-PUMP"
+VERSION = "V11.17 PRE-PUMP SAFE FIX"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -84,7 +84,7 @@ radar_stats = {
     "updated": 0,
     "radar": 0,
     "processed": 0,
-    "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [], "prepump": 0,
+    "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [], "prepump": 0, "prepump_safe": 0,
     "basic_fail": 0,
     "crash_fail": 0,
     "watch": 0,
@@ -924,7 +924,7 @@ def market_viral_score(result):
     buys = float(result.get("buys5") or 0)
     sells = float(result.get("sells5") or 0)
     vol5 = float(result.get("vol5") or 0)
-    p5 = float(result.get("price5m") or 0)
+    p5 = float(result.get("price5") or 0)
     total = buys + sells
     buy_ratio = buys / max(total, 1.0)
 
@@ -984,7 +984,7 @@ def auto_scanner():
             stats = {
                 "radar": len(candidates),
                 "processed": 0,
-                "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [], "prepump": 0,
+                "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [], "prepump": 0, "prepump_safe": 0,
                 "basic_fail": 0,
                 "crash_fail": 0,
                 "watch": 0,
@@ -1032,7 +1032,7 @@ def auto_scanner():
                     result["viral_label"] = viral_label
 
                     # PRE-PUMP candidate: rising activity without an already-vertical 5m move.
-                    p5 = float(result.get("price5m") or 0)
+                    p5 = float(result.get("price5") or 0)
                     buys5 = float(result.get("buys5") or 0)
                     sells5 = float(result.get("sells5") or 0)
                     vol5 = float(result.get("vol5") or 0)
@@ -1093,7 +1093,10 @@ def auto_scanner():
                             stats["h24_fail"] += 1
 
                     safety_ok = crash_ok
-                    if safety_ok: stats["safety_pass"] += 1
+                    if safety_ok:
+                        stats["safety_pass"] += 1
+                        if result.get("prepump"):
+                            stats["prepump_safe"] += 1
 
                     score_ok = safety_ok and result.get("score", 0) >= WATCH_SCORE
                     if score_ok: stats["score_pass"] += 1
@@ -1266,7 +1269,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.16 | total={stats.get('radar',0)} "
+                    f"RADAR V11.17 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
@@ -1286,7 +1289,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
-                    f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)}\n"
+                    f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"
                     f"H1 SMART: limit={MAX_SIGNAL_DROP_1H:.0f}% fails={stats.get('h1_fail_values',[])}"
                 )
                 for chat_id in list(signal_chats):
@@ -1479,7 +1482,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nNEW-FIRST DISCOVERY + PRE-PUMP MOMENTUM + SMART CRASH: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nNEW-FIRST + CORRECT 5M PRE-PUMP + HARD-SAFE PREPUMP: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
