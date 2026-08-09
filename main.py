@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.8 SAFETY BREAKDOWN"
+VERSION = "V11.9 CRASH FIX DIAGNOSTIC"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -93,7 +93,7 @@ radar_stats = {
     "trend_fail": 0,
     "momentum_fail": 0,
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
-    "liq_pass": 0, "holder_pass": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0,
+    "liq_pass": 0, "holder_pass": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
     "momentum_pass": 0,
 }
@@ -889,6 +889,29 @@ def filter_fail_reason(result, previous=None, momentum=0, for_signal=False):
     return "basic_fail"
 
 
+
+def crash_guard_detail(result):
+    """Return (ok, reason) without changing the existing hard-safety policy."""
+    if not result:
+        return False, "unknown"
+
+    p1 = result.get("price1h")
+    p6 = result.get("price6h")
+    p24 = result.get("price24h")
+    age = result.get("age_hours")
+
+    if p1 is not None and p1 < MAX_SIGNAL_DROP_1H:
+        return False, "h1"
+    if p6 is not None and p6 < MAX_CRASH_DROP_6H:
+        return False, "h6"
+    if p24 is not None and p24 < MAX_CRASH_DROP_24H:
+        return False, "h24"
+    if age is not None and age > MAX_PAIR_AGE_HOURS:
+        return False, "age"
+
+    return True, "ok"
+
+
 def auto_scanner():
     print("EARLY HUNTER SCANNER ACTIVE", flush=True)
     print(
@@ -937,7 +960,7 @@ def auto_scanner():
                 "trend_fail": 0,
                 "momentum_fail": 0,
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
-    "liq_pass": 0, "holder_pass": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0,
+    "liq_pass": 0, "holder_pass": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
     "momentum_pass": 0,
             }
@@ -977,8 +1000,20 @@ def auto_scanner():
                                and result.get("freeze") is not True)
                     if auth_ok: stats["auth_ok"] += 1
 
-                    crash_ok = auth_ok and crash_guard(result)
-                    if crash_ok: stats["crash_ok"] += 1
+                    crash_ok = False
+                    crash_reason = "unknown"
+                    if auth_ok:
+                        crash_ok, crash_reason = crash_guard_detail(result)
+                        if crash_ok:
+                            stats["crash_ok"] += 1
+                        elif crash_reason == "age":
+                            stats["age_fail"] += 1
+                        elif crash_reason == "h1":
+                            stats["h1_fail"] += 1
+                        elif crash_reason == "h6":
+                            stats["h6_fail"] += 1
+                        elif crash_reason == "h24":
+                            stats["h24_fail"] += 1
 
                     safety_ok = crash_ok
                     if safety_ok: stats["safety_pass"] += 1
@@ -1154,7 +1189,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.8 | total={stats.get('radar',0)} "
+                    f"RADAR V11.9 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
@@ -1164,6 +1199,10 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
                     f"> AUTH_OK={stats.get('auth_ok',0)} "
                     f"> CRASH_OK={stats.get('crash_ok',0)} "
                     f"> SAFE={stats.get('safety_pass',0)}\n"
+                    f"CRASH BREAKDOWN: AGE_FAIL={stats.get('age_fail',0)} "
+                    f"H1_FAIL={stats.get('h1_fail',0)} "
+                    f"H6_FAIL={stats.get('h6_fail',0)} "
+                    f"H24_FAIL={stats.get('h24_fail',0)}\n"
                     f"AFTER SAFE: SCORE={stats.get('score_pass',0)} "
                     f"> ACTIVITY={stats.get('activity_pass',0)} "
                     f"> TREND={stats.get('trend_pass',0)} "
@@ -1361,7 +1400,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nPASS PIPELINE + SAFETY BREAKDOWN + NEW/REPEAT RADAR: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nPASS PIPELINE + SAFETY BREAKDOWN + CRASH BREAKDOWN: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
