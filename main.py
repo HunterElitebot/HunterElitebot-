@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.12 FRESH RADAR"
+VERSION = "V11.13 FRESH PAIR GATE"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -74,12 +74,13 @@ discovery_seen_lock = threading.Lock()
 DISCOVERY_MEMORY_SECONDS = 21600
 RADAR_RAW_LIMIT = 160
 RADAR_TARGET = 80
+FRESH_PAIR_MAX_HOURS = 6.0
 
 radar_stats = {
     "updated": 0,
     "radar": 0,
     "processed": 0,
-    "pair_yok": 0,
+    "pair_yok": 0, "stale_pair": 0,
     "basic_fail": 0,
     "crash_fail": 0,
     "watch": 0,
@@ -950,7 +951,7 @@ def auto_scanner():
             stats = {
                 "radar": len(candidates),
                 "processed": 0,
-                "pair_yok": 0,
+                "pair_yok": 0, "stale_pair": 0,
                 "basic_fail": 0,
                 "crash_fail": 0,
                 "watch": 0,
@@ -979,6 +980,14 @@ def auto_scanner():
                     pair = best_pair(ca)
                     if pair is None:
                         stats["pair_yok"] += 1
+                        continue
+
+                    # V11.13: a token can be "new to the bot" without being newly launched.
+                    # Only genuinely fresh pairs enter the early-entry pipeline.
+                    pre_metrics = token_metrics(pair)
+                    pre_age = pre_metrics.get("age_hours")
+                    if pre_age is not None and pre_age > FRESH_PAIR_MAX_HOURS:
+                        stats["stale_pair"] += 1
                         continue
 
                     report = rugcheck(ca)
@@ -1195,7 +1204,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.12 | total={stats.get('radar',0)} "
+                    f"RADAR V11.13 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
@@ -1214,7 +1223,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
                     f"> TREND={stats.get('trend_pass',0)} "
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} "
-                    f"pair_missing={stats.get('pair_yok',0)}"
+                    f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}"
                 )
                 for chat_id in list(signal_chats):
                     send(chat_id, diag)
@@ -1406,7 +1415,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nFRESH-FIRST RADAR + SINGLE CRASH ENGINE: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nFRESH-FIRST RADAR + <=6H PAIR GATE + SINGLE CRASH ENGINE: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
