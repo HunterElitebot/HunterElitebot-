@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.40 BIRDEYE API FIX"
+VERSION = "V11.41 BIRDEYE RESTORE"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -313,84 +313,89 @@ def birdeye_new_candidates(force=False):
         if not force and birdeye_cache and now - birdeye_last_fetch < BIRDEYE_POLL_INTERVAL:
             return list(birdeye_cache)
 
-    last_err = ""
-    for attempt in range(3):
+    try:
+        # Keep the official request minimal. time_to is optional and is deliberately
+        # omitted because this exact form previously worked reliably for this bot.
+        url = (
+            f"{BIRDEYE_NEW_LISTING}?"
+            + urllib.parse.urlencode({
+                "limit": 20,
+                "meme_platform_enabled": "true",
+            })
+        )
+        payload = get_json(
+            url,
+            timeout=15,
+            headers={
+                "X-API-KEY": BIRDEYE_API_KEY,
+                "x-chain": "solana",
+                "accept": "application/json",
+            },
+        )
+        items = extract_birdeye_items(payload)
+
+        newest = []
+        listing_liq = {}
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            # Birdeye new-listing token address.
+            ca = str(item.get("address") or "").strip()
+            if not (ca and SOL_CA.fullmatch(ca)):
+                continue
+
+            newest.append(ca)
+
+            # New-listing response includes liquidity. Use it directly instead of
+            # hammering token market-data endpoints for newly indexed pump tokens.
+            liq = num(item.get("liquidity"))
+            if liq is not None and liq > 0:
+                listing_liq[ca] = liq
+                LIQ_CACHE[ca] = (liq, now)
+
+        with birdeye_lock:
+            merged = []
+            seen = set()
+            for ca in newest + list(birdeye_cache):
+                if ca not in seen:
+                    seen.add(ca)
+                    merged.append(ca)
+
+            birdeye_cache = merged[:80]
+            birdeye_listing_liq.update(listing_liq)
+            birdeye_last_fetch = now
+            birdeye_last_error = ""
+
+        print(
+            f"BIRDEYE RESTORED: api={len(newest)} cache={len(birdeye_cache)} "
+            f"listing_liq={len(listing_liq)}",
+            flush=True,
+        )
+        return list(birdeye_cache)
+
+    except urllib.error.HTTPError as e:
         try:
-            url = (
-                f"{BIRDEYE_NEW_LISTING}?"
-                + urllib.parse.urlencode({
-                    "limit": 20,
-                    "meme_platform_enabled": "true",
-                    "time_to": int(time.time()),
-                })
-            )
-            payload = get_json(
-                url,
-                timeout=15,
-                headers={"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"},
-            )
-            items = extract_birdeye_items(payload)
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        err = f"HTTP {e.code}: {body[:300]}"
+        with birdeye_lock:
+            birdeye_last_error = err
+            birdeye_last_fetch = now
+            cached = list(birdeye_cache)
+        print("BIRDEYE RESTORE ERROR:", err, flush=True)
+        return cached
 
-            newest = []
-            listing_liq = {}
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                ca = ""
-                for key in ("address", "token_address", "tokenAddress", "mint", "mintAddress"):
-                    raw = item.get(key)
-                    if raw:
-                        ca = str(raw).strip()
-                        break
-                if not (ca and SOL_CA.match(ca)):
-                    continue
-                newest.append(ca)
-
-                # Birdeye new-listing itself returns liquidity on Solana.
-                liq = None
-                for lk in ("liquidity", "liquidityUsd", "liquidity_usd"):
-                    liq = num(item.get(lk))
-                    if liq is not None:
-                        break
-                if liq is not None and liq > 0:
-                    listing_liq[ca] = liq
-
-            with birdeye_lock:
-                merged, seen = [], set()
-                for ca in newest + list(birdeye_cache):
-                    if ca not in seen:
-                        seen.add(ca)
-                        merged.append(ca)
-                birdeye_cache = merged[:80]
-                birdeye_listing_liq.update(listing_liq)
-                birdeye_last_fetch = now
-                birdeye_last_error = ""
-
-            print(
-                f"BIRDEYE STABLE FRESH: api={len(newest)} cache={len(birdeye_cache)} liq={len(listing_liq)}",
-                flush=True,
-            )
-            if newest or birdeye_cache:
-                return list(birdeye_cache)
-
-        except urllib.error.HTTPError as e:
-            try:
-                body = e.read().decode("utf-8", errors="replace")
-            except Exception:
-                body = ""
-            last_err = f"HTTP {e.code}: {body[:180]}"
-        except Exception as e:
-            last_err = repr(e)
-
-        if attempt < 2:
-            time.sleep(1.0 + attempt)
-
-    with birdeye_lock:
-        birdeye_last_error = last_err or "EMPTY_RESPONSE"
-        birdeye_last_fetch = now
-        cached = list(birdeye_cache)
-    print("BIRDEYE STABLE ERROR:", birdeye_last_error, flush=True)
-    return cached
+    except Exception as e:
+        err = repr(e)
+        with birdeye_lock:
+            birdeye_last_error = err
+            birdeye_last_fetch = now
+            cached = list(birdeye_cache)
+        print("BIRDEYE RESTORE ERROR:", err, flush=True)
+        return cached
 
 def discovery_candidates():
     endpoints = [
@@ -435,66 +440,7 @@ def discovery_candidates():
     return (birdeye_selected + dex_selected)[:RADAR_TARGET]
 
 def birdeye_market_data(ca):
-    """
-    Liquidity lookup:
-    1) Birdeye v3 market-data (official endpoint)
-    2) Birdeye token_overview fallback if v3 returns 400/empty
-    Both use canonical Solana x-chain header.
-    """
-    if not BIRDEYE_API_KEY:
-        return None
-
-    headers = {
-        "X-API-KEY": BIRDEYE_API_KEY,
-        "x-chain": "solana",
-        "accept": "application/json",
-    }
-
-    endpoints = [
-        (
-            "MARKET_V3",
-            "https://public-api.birdeye.so/defi/v3/token/market-data?"
-            + urllib.parse.urlencode({
-                "address": str(ca).strip(),
-                "ui_amount_mode": "scaled",
-            }),
-        ),
-        (
-            "OVERVIEW",
-            "https://public-api.birdeye.so/defi/token_overview?"
-            + urllib.parse.urlencode({
-                "address": str(ca).strip(),
-            }),
-        ),
-    ]
-
-    for source_name, url in endpoints:
-        try:
-            payload = get_json(url, timeout=12, headers=headers)
-            data = payload.get("data") if isinstance(payload, dict) else None
-            if not isinstance(data, dict):
-                continue
-
-            liq = None
-            for key in (
-                "liquidity", "liquidityUsd", "liquidity_usd",
-                "liquidityUSD", "liquidity_usd_value"
-            ):
-                val = num(data.get(key))
-                if val is not None and val >= 0:
-                    liq = val
-                    break
-
-            if liq is not None:
-                out = dict(data)
-                out["liquidity"] = liq
-                out["_source"] = source_name
-                return out
-
-        except Exception as e:
-            # Do not stop the scan: immediately try the official overview fallback.
-            print(f"BIRDEYE {source_name} FAIL:", ca, repr(e), flush=True)
-
+    """Disabled as a hard dependency: fresh listings use listing liquidity + DEX + cache."""
     return None
 
 
@@ -1394,17 +1340,10 @@ def auto_scanner():
                             LIQ_CACHE[str(ca)] = (liq, time.time())
                             stats["liq_fallback_ok"] += 1
 
-                    # If still missing, retry Birdeye Market Data.
-                    if mc_ok and liq is None and BIRDEYE_API_KEY:
-                        be_market = birdeye_market_data(ca)
-                        be_liq = num((be_market or {}).get("liquidity"))
-                        if be_liq is not None:
-                            liq = be_liq
-                            result["liq"] = be_liq
-                            result["liq_source"] = "BIRDEYE"
-                            stats["liq_fallback_ok"] += 1
-                        else:
-                            stats["liq_fallback_missing"] += 1
+                    # If still missing, do not fabricate liquidity.
+                    # The token remains pending and will be retried on the next scan.
+                    if mc_ok and liq is None:
+                        stats["liq_fallback_missing"] += 1
 
                     if mc_ok:
                         if liq is None:
@@ -1650,7 +1589,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.40 | total={stats.get('radar',0)} "
+                    f"RADAR V11.41 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
@@ -1879,7 +1818,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE API FIX + OVERVIEW FALLBACK + DATA GUARD + ONE-TAP AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE RESTORED + LISTING LIQ + DATA GUARD + ONE-TAP AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
