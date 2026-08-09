@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.45 GIR BLOCK DIAGNOSTIC"
+VERSION = "V11.46 HOLDER SOURCE DIAGNOSTIC"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -1594,6 +1594,17 @@ def auto_scanner():
                     top10 = result.get("top10")
 
                     if liq_ok:
+                        # V11.46 diagnostic only: sample actual Top10 by discovery source.
+                        if top10 is not None:
+                            _key = "holder_gecko_samples" if source_name == "GECKO" else "holder_dex_samples"
+                            _checked = "holder_gecko_checked" if source_name == "GECKO" else "holder_dex_checked"
+                            _high = "holder_gecko_82" if source_name == "GECKO" else "holder_dex_82"
+                            stats[_checked] = stats.get(_checked, 0) + 1
+                            if top10 >= 82:
+                                stats[_high] = stats.get(_high, 0) + 1
+                            _samples = stats.setdefault(_key, [])
+                            if len(_samples) < 8:
+                                _samples.append(round(float(top10), 1))
                         if top10 is None:
                             stats["holder_missing"] += 1
                         elif top10 >= 82:
@@ -1821,7 +1832,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.45 | total={stats.get('radar',0)} "
+                    f"RADAR V11.46 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -1848,6 +1859,7 @@ Yeni giris icin uygun degil."""
                     f"60-70={stats.get('holder_60_70',0)} "
                     f"70-82={stats.get('holder_70_82',0)} "
                     f"82+={stats.get('holder_82_plus',0)}\n"
+                    f"HOLDER SOURCE: GECKO checked={stats.get('holder_gecko_checked',0)} 82+={stats.get('holder_gecko_82',0)} samples={stats.get('holder_gecko_samples',[])} | DEX checked={stats.get('holder_dex_checked',0)} 82+={stats.get('holder_dex_82',0)} samples={stats.get('holder_dex_samples',[])}\\n"
                     f"SAFETY: RUG_OK={stats.get('rug_ok',0)} "
                     f"> AUTH_OK={stats.get('auth_ok',0)} "
                     f"> CRASH_OK={stats.get('crash_ok',0)} "
@@ -2055,7 +2067,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nMULTI-FEED + GECKO LIQ + GIR BLOCK DIAGNOSTIC + ONE-TAP AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nMULTI-FEED + GECKO LIQ + HOLDER SOURCE DIAGNOSTIC + GIR BLOCK: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
