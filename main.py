@@ -9,11 +9,14 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.56 QUALITY 10-20 MODE"
+VERSION = "V11.57 HOLDER FALLBACK QUALITY MODE"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
+SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com").strip()
+HOLDER_RPC_CACHE = {}
+HOLDER_RPC_CACHE_TTL = 300
 
 # V11.5: single-engine mode.
 # Telegram getUpdates polling is OFF by default so another stale/duplicate
@@ -32,7 +35,7 @@ SIGNAL_SCORE = 70
 HOLDER_HARD_MAX = 82.0
 SCAN_INTERVAL = 30
 
-# V11.56 QUALITY MODE
+# V11.57 QUALITY MODE
 # Target: roughly 10-20 high-quality alerts/day when the market provides them.
 # Never force a quota by lowering safety/quality.
 QUALITY_SEND_WATCH = False
@@ -222,6 +225,179 @@ def get_json(url, timeout=15, headers=None):
     req = urllib.request.Request(url, headers=req_headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8", errors="replace"))
+
+
+def rpc_json(method, params, timeout=10):
+    """Minimal Solana JSON-RPC POST helper; read-only holder verification only."""
+    payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        SOLANA_RPC_URL,
+        data=payload,
+        method="POST",
+        headers={
+            "User-Agent": "HunterElite-V11.57",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.loads(r.read().decode("utf-8", errors="replace"))
+    if not isinstance(data, dict) or data.get("error"):
+        raise RuntimeError(f"RPC {method} error: {data.get('error') if isinstance(data, dict) else data}")
+    return data.get("result")
+
+
+def _protocol_holder_accounts(report):
+    """
+    Build a conservative exclusion set for protocol/AMM inventory accounts.
+    RugCheck reports markets + knownAccounts; those are not ordinary user wallets.
+    """
+    addresses, owners = set(), set()
+    if not isinstance(report, dict):
+        return addresses, owners
+
+    for market in report.get("markets") or []:
+        if not isinstance(market, dict):
+            continue
+        for key in ("pubkey", "liquidityA", "liquidityB"):
+            value = market.get(key)
+            if value:
+                addresses.add(str(value))
+        for key in ("liquidityAAccount", "liquidityBAccount"):
+            acct = market.get(key) or {}
+            if isinstance(acct, dict):
+                owner = acct.get("owner")
+                if owner:
+                    owners.add(str(owner))
+
+    known = report.get("knownAccounts") or {}
+    if isinstance(known, dict):
+        for address, meta in known.items():
+            meta = meta or {}
+            blob = f"{meta.get('name','')} {meta.get('type','')}".lower() if isinstance(meta, dict) else str(meta).lower()
+            if any(word in blob for word in ("amm", "pool", "dex", "market", "bonding", "liquidity")):
+                addresses.add(str(address))
+
+    return addresses, owners
+
+
+def _holder_rpc_prequal(metrics):
+    """Avoid hammering public RPC: fallback is only for plausible quality candidates."""
+    if not isinstance(metrics, dict):
+        return False
+    mc = num(metrics.get("mc"))
+    liq = num(metrics.get("liq"))
+    buys = num(metrics.get("buys5")) or 0
+    sells = num(metrics.get("sells5")) or 0
+    vol = num(metrics.get("vol5")) or 0
+    p5 = num(metrics.get("price5"))
+    if mc is None or not (1000 <= mc <= 15000):
+        return False
+    if liq is None or liq < 1200:
+        return False
+    if buys < 12 or vol < 1000:
+        return False
+    if buys / max(sells, 1) < 1.10:
+        return False
+    if p5 is None or not (-10 <= p5 <= 150):
+        return False
+    return True
+
+
+def rpc_holder_top10(ca, report=None):
+    """
+    Fallback holder verification from Solana RPC:
+    - getTokenLargestAccounts gives the 20 largest SPL token accounts.
+    - getTokenSupply gives circulating token supply for percentage calculation.
+    - getMultipleAccounts(jsonParsed) resolves token-account owners so duplicate
+      accounts can be merged and protocol/AMM inventories can be excluded.
+    Returns (top1, top5, top10, reliable).
+    """
+    now = time.time()
+    cached = HOLDER_RPC_CACHE.get(ca)
+    if cached and now - cached[0] < HOLDER_RPC_CACHE_TTL:
+        return cached[1]
+
+    try:
+        largest_result = rpc_json("getTokenLargestAccounts", [ca, {"commitment": "confirmed"}])
+        supply_result = rpc_json("getTokenSupply", [ca, {"commitment": "confirmed"}])
+        largest = (largest_result or {}).get("value") or []
+        supply_value = ((supply_result or {}).get("value") or {}).get("amount")
+        supply = float(supply_value or 0)
+        if supply <= 0 or not largest:
+            result = (None, None, None, False)
+            HOLDER_RPC_CACHE[ca] = (now, result)
+            return result
+
+        account_addresses = [str(x.get("address")) for x in largest if isinstance(x, dict) and x.get("address")]
+        if not account_addresses:
+            result = (None, None, None, False)
+            HOLDER_RPC_CACHE[ca] = (now, result)
+            return result
+
+        parsed_result = rpc_json(
+            "getMultipleAccounts",
+            [account_addresses, {"encoding": "jsonParsed", "commitment": "confirmed"}],
+        )
+        parsed_values = (parsed_result or {}).get("value") or []
+
+        protocol_addresses, protocol_owners = _protocol_holder_accounts(report)
+        owner_amounts = {}
+        usable_rows = 0
+
+        for idx, row in enumerate(largest[:20]):
+            if not isinstance(row, dict):
+                continue
+            address = str(row.get("address") or "")
+            if not address or address in protocol_addresses:
+                continue
+            try:
+                amount = float(row.get("amount") or 0)
+            except Exception:
+                amount = 0.0
+            if amount <= 0:
+                continue
+
+            owner = None
+            if idx < len(parsed_values):
+                info = parsed_values[idx] or {}
+                try:
+                    owner = (((info.get("data") or {}).get("parsed") or {}).get("info") or {}).get("owner")
+                except Exception:
+                    owner = None
+            owner = str(owner) if owner else address
+            if owner in protocol_owners or owner in protocol_addresses:
+                continue
+
+            owner_amounts[owner] = owner_amounts.get(owner, 0.0) + amount
+            usable_rows += 1
+
+        amounts = sorted(owner_amounts.values(), reverse=True)
+        # We need enough independent wallets to call this a verified Top-10.
+        if len(amounts) < 10:
+            result = (None, None, None, False)
+            HOLDER_RPC_CACHE[ca] = (now, result)
+            return result
+
+        pcts = [(amount / supply) * 100.0 for amount in amounts]
+        top1 = pcts[0]
+        top5 = sum(pcts[:5])
+        top10 = sum(pcts[:10])
+        reliable = 0 <= top1 <= 100 and 0 <= top10 <= 100.5
+        result = (top1, top5, top10 if reliable else None, reliable)
+        HOLDER_RPC_CACHE[ca] = (now, result)
+        return result
+    except Exception as e:
+        print("HOLDER RPC FALLBACK ERROR:", ca, repr(e), flush=True)
+        result = (None, None, None, False)
+        HOLDER_RPC_CACHE[ca] = (now, result)
+        return result
+
 
 def telegram(method, data=None, timeout=35):
     data = data or {}
@@ -760,30 +936,43 @@ def _holder_identity(holder, index):
 
 def holders(report):
     """
-    Return Top-1/5/10 wallet concentration.
+    Primary Top-1/5/10 calculation from RugCheck.
 
-    RugCheck can expose multiple token-account rows for one owner and very fresh
-    bonding-curve/pool inventories can make the raw first 10 rows sum to ~100%.
-    We de-duplicate identifiable owners.  If the result is still ~100% but
-    RugCheck itself does not report holder concentration, mark the raw holder
-    number as unreliable instead of treating a protocol inventory as a whale.
+    V11.57 excludes accounts/owners that RugCheck itself identifies as
+    AMM/pool/market/bonding-curve inventory before calculating user-wallet
+    concentration. This prevents a pool inventory from masquerading as a
+    single whale while still keeping true user concentration as a hard gate.
     """
     if not report:
         return None, None, None, False, None
 
     items = report.get("topHolders") or report.get("top_holders") or []
-    rows = []
-    seen = set()
+    protocol_addresses, protocol_owners = _protocol_holder_accounts(report)
+    owner_values = {}
+    anonymous_values = []
+
     for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
         value = holder_pct(item)
         if value is None:
             continue
-        ident = _holder_identity(item, index)
-        if ident in seen:
-            continue
-        seen.add(ident)
-        rows.append(value)
 
+        address = str(item.get("address") or item.get("tokenAccount") or item.get("token_account") or "")
+        owner = str(item.get("owner") or "")
+
+        if address and address in protocol_addresses:
+            continue
+        if owner and (owner in protocol_owners or owner in protocol_addresses):
+            continue
+
+        if owner:
+            # Multiple token accounts belonging to the same wallet are one holder.
+            owner_values[owner] = owner_values.get(owner, 0.0) + value
+        else:
+            anonymous_values.append(value)
+
+    rows = sorted(list(owner_values.values()) + anonymous_values, reverse=True)
     if not rows:
         return None, None, None, False, None
 
@@ -794,9 +983,13 @@ def holders(report):
     if top1 > 100 or top5 > 100.5 or raw_top10 > 100.5:
         return None, None, None, True, raw_top10
 
-    # V11.53: a near-100 raw sum with no RugCheck concentration warning is
-    # treated as an unreliable protocol/bonding-curve inventory reading.
-    # It receives an uncertainty score penalty, but does not hard-kill the token.
+    # Verified primary path requires enough actual user-holder rows.
+    # If fewer than 10 remain, RPC fallback may complete verification later.
+    if len(rows) < 10:
+        return top1, top5, None, True, raw_top10
+
+    # A near-100 user-wallet sum remains suspicious unless RugCheck explicitly
+    # confirms holder concentration risk; do not silently bless ambiguous data.
     unreliable = raw_top10 >= 98.0 and not rugcheck_holder_risk(report)
     top10 = None if unreliable else raw_top10
     return top1, top5, top10, unreliable, raw_top10
@@ -919,6 +1112,17 @@ def calculate_score(pair, report):
         risks.append("Likidite dÃ¼ÅŸÃ¼k")
 
     top1, top5, top10, holder_unreliable, holder_raw_top10 = holders(report)
+    holder_source = "RUGCHECK" if top10 is not None and not holder_unreliable else "UNVERIFIED"
+
+    # V11.57: only promising candidates spend RPC calls on secondary verification.
+    ca = str(((pair.get("baseToken") or {}).get("address") or "")).strip()
+    if (top10 is None or holder_unreliable) and ca and _holder_rpc_prequal(m):
+        r1, r5, r10, rpc_reliable = rpc_holder_top10(ca, report)
+        if rpc_reliable and r10 is not None:
+            top1, top5, top10 = r1, r5, r10
+            holder_unreliable = False
+            holder_raw_top10 = r10
+            holder_source = "SOLANA_RPC"
 
     if report is None:
         score -= 15
@@ -1013,6 +1217,7 @@ def calculate_score(pair, report):
         "top10": top10,
         "holder_raw_top10": holder_raw_top10,
         "holder_unreliable": holder_unreliable,
+        "holder_source": holder_source,
         "mint": mint,
         "freeze": freeze,
         "signals": sig,
@@ -1912,7 +2117,7 @@ def auto_scanner():
                     new_stage, message = stage, None
 
                     # V11.54 FINAL: compute the central decision in scanner scope.
-                    # V11.53 referenced is_breakout/_watch_decision/_gir_block later
+                    # V11.57 referenced is_breakout/_watch_decision/_gir_block later
                     # without defining them here, which could abort exactly when a
                     # WATCH/SIGNAL message was ready to be delivered.
                     _central_decision = unified_gir_decision(result, momentum, old_metrics) if safety_ok else "IZLE"
@@ -1946,7 +2151,7 @@ def auto_scanner():
                     if signal_ok and not _holder_verified_for_gir:
                         signal_ok = False
 
-                    # V11.56 QUALITY MODE: final quality gate + delivery pacing.
+                    # V11.57 QUALITY MODE: final quality gate + delivery pacing.
                     if signal_ok and not quality_signal_gate(result):
                         signal_ok = False
                     if signal_ok and not quality_signal_slot_available(now):
@@ -1989,6 +2194,7 @@ Likidite: {money(result["liq"])}
 5dk fiyat: {percent(result["price5"])}
 
 Top-10: {percent(result["top10"])}
+Holder Verify: {result.get("holder_source", "N/A")}
 
 Risk Score: {result["score"]}/100
 Momentum: +{momentum}
@@ -2103,7 +2309,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.53 | total={stats.get('radar',0)} "
+                    f"RADAR V11.57 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2340,7 +2546,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nQUALITY 10-20 MODE + VERIFIED HOLDER + HARD SAFETY: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nHOLDER FALLBACK + QUALITY 10-20 + VERIFIED HOLDER + HARD SAFETY: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
