@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.44 GECKO LIQ BRIDGE"
+VERSION = "V11.45 GIR BLOCK DIAGNOSTIC"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -1122,6 +1122,36 @@ def watch_candidate(result):
         return False
     return True
 
+def gir_block_reason(result, score):
+    """Diagnostic only; never changes the GIR decision."""
+    liq = num(result.get("liq"))
+    top10 = num(result.get("top10"))
+    price5 = num(result.get("price5"))
+    buys5 = num(result.get("buys5")) or 0
+    sells5 = num(result.get("sells5")) or 0
+    vol5 = num(result.get("vol5")) or 0
+
+    if liq is None or top10 is None or price5 is None:
+        return "CRITICAL_DATA_WAIT"
+    if liq < MIN_LIQUIDITY:
+        return "LIQ_LOW"
+    if top10 > 82:
+        return "TOP10_HIGH"
+    if price5 < -8:
+        return "PRICE5_WEAK"
+    if price5 > 180:
+        return "PRICE5_TOO_HIGH"
+    if sells5 > buys5 * 1.15:
+        return "SELL_PRESSURE"
+    if buys5 < 10:
+        return "ACTIVITY_LOW"
+    if vol5 < 500:
+        return "VOLUME_LOW"
+    if score < SIGNAL_SCORE:
+        return "SCORE_BELOW_SIGNAL"
+    return "TREND_OR_MOMENTUM_WAIT"
+
+
 def unified_gir_decision(result, momentum=0, final_score=0):
     """
     One central promotion engine:
@@ -1717,6 +1747,7 @@ Score: {result["score"]}/100
 
 Potansiyel: IZLE
 KARAR: IZLE / ERKEN ADAY
+GIR BLOCK: {gir_block_reason(result, result["score"])}
 
 Momentum teyidi bekleniyor."""
 
@@ -1790,7 +1821,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.44 | total={stats.get('radar',0)} "
+                    f"RADAR V11.45 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2024,7 +2055,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nMULTI-FEED + GECKO LIQ BRIDGE + ONE-TAP AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nMULTI-FEED + GECKO LIQ + GIR BLOCK DIAGNOSTIC + ONE-TAP AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
