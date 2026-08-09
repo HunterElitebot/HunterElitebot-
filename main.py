@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.26 LIQUIDITY BREAKDOWN"
+VERSION = "V11.27 BIRDEYE LIQ FALLBACK"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -104,7 +104,7 @@ radar_stats = {
     "trend_fail": 0,
     "momentum_fail": 0,
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
-    "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
+    "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
     "momentum_pass": 0,
 }
@@ -381,6 +381,27 @@ def discovery_candidates():
     remaining = max(0, RADAR_TARGET - len(birdeye_selected))
     dex_selected = dex_found[:min(DEX_TARGET, remaining)]
     return (birdeye_selected + dex_selected)[:RADAR_TARGET]
+
+def birdeye_market_data(ca):
+    """Fetch Birdeye single-token market data as fallback when DEX liquidity is missing."""
+    if not BIRDEYE_API_KEY:
+        return None
+    try:
+        url = (
+            "https://public-api.birdeye.so/defi/v3/token/market-data?"
+            + urllib.parse.urlencode({"address": ca})
+        )
+        payload = get_json(
+            url,
+            timeout=12,
+            headers={"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"},
+        )
+        data = payload.get("data") if isinstance(payload, dict) else None
+        return data if isinstance(data, dict) else None
+    except Exception as e:
+        print("BIRDEYE MARKET DATA ERROR:", ca, repr(e), flush=True)
+        return None
+
 
 def rugcheck(ca):
     try:
@@ -1048,7 +1069,7 @@ def auto_scanner():
                 "src_birdeye_stale": 0, "src_dex_stale": 0,
                 "src_birdeye_safe": 0, "src_dex_safe": 0,
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
-    "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
+    "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
     "momentum_pass": 0,
             }
@@ -1117,6 +1138,20 @@ def auto_scanner():
                     if mc_ok: stats["mc_pass"] += 1
 
                     liq = result.get("liq")
+
+                    # DEX liquidity is sometimes unavailable for very fresh Birdeye listings.
+                    # Only in that case, ask Birdeye Market Data for the token's liquidity.
+                    if mc_ok and liq is None and BIRDEYE_API_KEY:
+                        be_market = birdeye_market_data(ca)
+                        be_liq = num((be_market or {}).get("liquidity"))
+                        if be_liq is not None:
+                            liq = be_liq
+                            result["liq"] = be_liq
+                            result["liq_source"] = "BIRDEYE"
+                            stats["liq_fallback_ok"] += 1
+                        else:
+                            stats["liq_fallback_missing"] += 1
+
                     if mc_ok:
                         if liq is None:
                             stats["liq_missing"] += 1
@@ -1356,7 +1391,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.26 | total={stats.get('radar',0)} "
+                    f"RADAR V11.27 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
@@ -1365,6 +1400,8 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
                     f"> MC={stats.get('mc_pass',0)} "
                     f"> LIQ={stats.get('liq_pass',0)} "
                     f"> HOLDER={stats.get('holder_pass',0)}\n"
+                    f"LIQ FALLBACK: birdeye_ok={stats.get('liq_fallback_ok',0)} "
+                    f"birdeye_missing={stats.get('liq_fallback_missing',0)}\n"
                     f"LIQ BREAKDOWN: missing={stats.get('liq_missing',0)} "
                     f"$0-200={stats.get('liq_0_200',0)} "
                     f"$200-500={stats.get('liq_200_500',0)} "
@@ -1582,7 +1619,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE ROLLING FRESH + LIQUIDITY BREAKDOWN + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE ROLLING FRESH + BIRDEYE LIQ FALLBACK + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
