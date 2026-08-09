@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.27 BIRDEYE LIQ FALLBACK"
+VERSION = "V11.28 TREND MOMENTUM FIX"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -658,10 +658,14 @@ def momentum_score(old, new):
     old_buys, new_buys = old.get("buys5", 0), new.get("buys5", 0)
     if old_buys > 0 and new_buys >= old_buys * 1.15:
         points += 10
+    elif old_buys > 0 and new_buys >= old_buys * 0.95:
+        points += 5
 
     old_vol, new_vol = old.get("vol5") or 0, new.get("vol5") or 0
     if old_vol > 0 and new_vol >= old_vol * 1.12:
         points += 10
+    elif old_vol > 0 and new_vol >= old_vol * 0.95:
+        points += 5
 
     old_mc, new_mc = old.get("mc") or 0, new.get("mc") or 0
     if old_mc > 0 and new_mc >= old_mc * 1.015:
@@ -828,26 +832,38 @@ def crash_guard(result):
 
 
 def trend_confirmed(previous, current):
+    """Fresh-token trend confirmation without weakening hard safety gates."""
     if not previous or not current:
         return False
 
     old_mc = previous.get("mc") or 0
     new_mc = current.get("mc") or 0
-    if old_mc <= 0 or new_mc < old_mc * MIN_MC_GROWTH:
-        return False
+    old_buys = previous.get("buys5", 0) or 0
+    new_buys = current.get("buys5", 0) or 0
+    old_vol = previous.get("vol5") or 0
+    new_vol = current.get("vol5") or 0
+    p5 = current.get("price5")
 
-    if current.get("price5") is None or current["price5"] <= 0:
-        return False
+    confirmations = 0
 
-    if current.get("buys5", 0) < max(1, previous.get("buys5", 0) * 0.90):
-        return False
+    # MC expansion.
+    if old_mc > 0 and new_mc >= old_mc * MIN_MC_GROWTH:
+        confirmations += 1
 
-    old_vol = previous.get("vol5")
-    new_vol = current.get("vol5")
-    if old_vol is not None and new_vol is not None and new_vol < old_vol * MIN_VOL_GROWTH:
-        return False
+    # Buy activity should be stable/rising; fresh 5m windows can reset, so don't demand +15%.
+    if old_buys > 0 and new_buys >= old_buys * 0.90:
+        confirmations += 1
 
-    return True
+    # Volume expansion / stability.
+    if old_vol > 0 and new_vol >= old_vol * 0.95:
+        confirmations += 1
+
+    # Current positive price impulse.
+    if p5 is not None and 1.0 <= p5 <= 55:
+        confirmations += 1
+
+    # Require two independent confirmations.
+    return confirmations >= 2
 
 def watch_candidate(result):
     if not basic_signal_safe(result):
@@ -1391,7 +1407,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.27 | total={stats.get('radar',0)} "
+                    f"RADAR V11.28 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
@@ -1619,7 +1635,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE ROLLING FRESH + BIRDEYE LIQ FALLBACK + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE LIQ FALLBACK + FRESH TREND/MOMENTUM CONFIRMATION: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
