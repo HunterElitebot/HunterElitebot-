@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V12.5 HOLDER ROOT FIX FINAL"
+VERSION = "V12.6 RUNNER ACCELERATION FINAL"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -32,6 +32,18 @@ MIN_LIQUIDITY = 800
 # V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
 WATCH_SCORE = 60
 SIGNAL_SCORE = 75
+
+# V12.6: runner continuation / acceleration (does NOT bypass hard safety gates)
+RUNNER_MAX_MC = 750000.0
+RUNNER_TTL_SEC = 3600
+RUNNER_MIN_SCORE = 72
+RUNNER_MIN_LIQ = 1500.0
+RUNNER_MIN_VOL_LIQ = 0.75
+RUNNER_MIN_BUY_SELL = 1.20
+RUNNER_MIN_PRICE5 = 2.0
+RUNNER_MAX_PRICE5 = 80.0
+RUNNER_STATE = {}
+FINAL_GATE_REJECTS = {}
 HOLDER_HARD_MAX = 82.0
 SCAN_INTERVAL = 30
 
@@ -105,6 +117,64 @@ def hard_rug_gate(result):
 
 
 
+
+def _v126_num(v, default=0.0):
+    try:
+        return float(v if v is not None else default)
+    except Exception:
+        return float(default)
+
+def _v126_metric(m, *names, default=0.0):
+    for name in names:
+        if isinstance(m, dict) and m.get(name) is not None:
+            return _v126_num(m.get(name), default)
+    return float(default)
+
+def v126_runner_metrics(metrics):
+    """Continuation score only. Never overrides rug/auth/holder/crash gates."""
+    mc = _v126_metric(metrics, "market_cap", "mc")
+    liq = _v126_metric(metrics, "liquidity", "liq")
+    vol5 = _v126_metric(metrics, "volume_m5", "vol5", "volume5")
+    buys = _v126_metric(metrics, "buys_m5", "buy5", "buys5")
+    sells = _v126_metric(metrics, "sells_m5", "sell5", "sells5")
+    p5 = _v126_metric(metrics, "price_change_m5", "price5", "price_m5")
+    vl = (vol5 / liq) if liq > 0 else 0.0
+    bs = buys / max(1.0, sells)
+    return mc, liq, vol5, buys, sells, p5, vl, bs
+
+def v126_runner_candidate(metrics, score):
+    mc, liq, vol5, buys, sells, p5, vl, bs = v126_runner_metrics(metrics)
+    return (
+        10000.0 <= mc <= RUNNER_MAX_MC
+        and liq >= RUNNER_MIN_LIQ
+        and score >= RUNNER_MIN_SCORE
+        and vl >= RUNNER_MIN_VOL_LIQ
+        and bs >= RUNNER_MIN_BUY_SELL
+        and RUNNER_MIN_PRICE5 <= p5 <= RUNNER_MAX_PRICE5
+    )
+
+def v126_track_runner(ca, metrics, score):
+    """Tracks multi-scan expansion so one-candle pumps do not become signals."""
+    now = time.time()
+    mc, liq, vol5, buys, sells, p5, vl, bs = v126_runner_metrics(metrics)
+    prev = RUNNER_STATE.get(ca)
+    RUNNER_STATE[ca] = {"ts": now, "mc": mc, "vol5": vol5, "liq": liq}
+    # prune
+    for k, v in list(RUNNER_STATE.items()):
+        if now - _v126_num(v.get("ts")) > RUNNER_TTL_SEC:
+            RUNNER_STATE.pop(k, None)
+    if not prev:
+        return False, 0.0, 0.0
+    mc_accel = ((mc / max(1.0, _v126_num(prev.get("mc")))) - 1.0) * 100.0
+    vol_accel = ((vol5 / max(1.0, _v126_num(prev.get("vol5")))) - 1.0) * 100.0
+    confirmed = v126_runner_candidate(metrics, score) and mc_accel >= 8.0 and vol_accel >= -15.0
+    return confirmed, mc_accel, vol_accel
+
+def v126_gate_reject(reason):
+    reason = str(reason or "UNKNOWN")
+    FINAL_GATE_REJECTS[reason] = FINAL_GATE_REJECTS.get(reason, 0) + 1
+    return False
+
 def final_gir_gate(result, old_metrics, seen_count, momentum, now):
     """
     V12.1 single authoritative GIR gate.
@@ -136,7 +206,6 @@ def final_gir_gate(result, old_metrics, seen_count, momentum, now):
         return False, "RATE_LIMIT"
 
     return True, "PASSED"
-
 
 
 def quality_signal_gate(result):
@@ -2391,7 +2460,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V12.5 | total={stats.get('radar',0)} "
+                    f"RADAR V12.6 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2438,6 +2507,7 @@ Yeni giris icin uygun degil."""
                     f"> ACTIVITY={stats.get('activity_pass',0)} "
                     f"> TREND={stats.get('trend_pass',0)} "
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
+                    f"FINAL GATE REJECTS: {dict(sorted(FINAL_GATE_REJECTS.items(), key=lambda x: -x[1])[:6])}\n"
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} BREAKOUT={stats.get('breakout',0)} STRONG_GIR={stats.get('strong_gir',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
                     f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"
@@ -2633,7 +2703,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.5 HOLDER ROOT FIX + FINAL GATE + FEED RESILIENCE: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.6 RUNNER ACCELERATION + FINAL GATE TRACE + HOLDER ROOT FIX: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
