@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V12.0 CLEAN HARD-RUG GATE"
+VERSION = "V12.1 FINAL CONSOLIDATED"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -104,6 +104,41 @@ def hard_rug_gate(result):
     return True, "OK"
 
 
+
+def final_gir_gate(result, old_metrics, seen_count, momentum, now):
+    """
+    V12.1 single authoritative GIR gate.
+    No BREAKOUT/EARLY/STRONG path can bypass these checks.
+    """
+    if old_metrics is None:
+        return False, "WARMUP"
+    if seen_count < TREND_CONFIRM_SCANS:
+        return False, "TREND_SCANS"
+    if not trend_confirmed(old_metrics, result):
+        return False, "TREND_NOT_CONFIRMED"
+    if momentum < MIN_MOMENTUM_SIGNAL:
+        return False, "MOMENTUM_LOW"
+
+    top10 = num(result.get("top10"))
+    if top10 is None or bool(result.get("holder_unreliable")):
+        return False, "HOLDER_UNVERIFIED"
+    if not (1.0 <= top10 <= QUALITY_MAX_TOP10):
+        return False, "HOLDER_RANGE"
+
+    rug_ok, rug_reason = hard_rug_gate(result)
+    if not rug_ok:
+        return False, rug_reason
+
+    if not quality_signal_gate(result):
+        return False, "QUALITY_GATE"
+
+    if not quality_signal_slot_available(now):
+        return False, "RATE_LIMIT"
+
+    return True, "PASSED"
+
+
+
 def quality_signal_gate(result):
     top10 = num(result.get("top10"))
     liq = num(result.get("liq"))
@@ -175,7 +210,7 @@ birdeye_last_fetch = 0.0
 birdeye_last_error = ""
 birdeye_last_error_body = ""
 birdeye_cooldown_until = 0
-BIRDEYE_COOLDOWN_SECONDS = 900
+BIRDEYE_COOLDOWN_SECONDS = 3600
 
 GECKO_POLL_INTERVAL = 60
 GECKO_PAGES = 3
@@ -1028,9 +1063,13 @@ def holders(report):
     if len(rows) < 10:
         return top1, top5, None, True, raw_top10
 
-    # A near-100 user-wallet sum remains suspicious unless RugCheck explicitly
-    # confirms holder concentration risk; do not silently bless ambiguous data.
-    unreliable = raw_top10 >= 98.0 and not rugcheck_holder_risk(report)
+    # V12.1: both extremes are suspicious on ultra-fresh meme tokens.
+    # <1% usually means protocol/pool exclusion or incomplete holder parsing;
+    # ~100% usually means protocol inventory was counted as holders.
+    unreliable = (
+        raw_top10 < 1.0
+        or (raw_top10 >= 98.0 and not rugcheck_holder_risk(report))
+    )
     top10 = None if unreliable else raw_top10
     return top1, top5, top10, unreliable, raw_top10
 
@@ -2180,40 +2219,13 @@ def auto_scanner():
                         safety_ok
                         and _central_decision in ("BREAKOUT_GIR", "STRONG_GIR")
                     )
-                    signal_ok = bool(_confirmed_signal or _calibrated_breakout)
-
-                    # V11.55 fail-closed holder gate for every GIR path.
-                    _verified_top10 = result.get("top10")
-                    _holder_verified_for_gir = (
-                        _verified_top10 is not None
-                        and not bool(result.get("holder_unreliable"))
-                        and float(_verified_top10) < HOLDER_HARD_MAX
+                    # Candidate paths may propose a signal, but V12.1 has ONE
+                    # authoritative final gate. No path can bypass it.
+                    _candidate_signal = bool(_confirmed_signal or _calibrated_breakout)
+                    _final_gate_ok, _final_gate_reason = final_gir_gate(
+                        result, old_metrics, seen_count, momentum, now
                     )
-                    if signal_ok and not _holder_verified_for_gir:
-                        signal_ok = False
-
-                    # V11.57 QUALITY MODE: final quality gate + delivery pacing.
-                    # V12 CLEAN: critical rug uncertainty is an absolute block.
-                    _hard_rug_ok, _hard_rug_reason = hard_rug_gate(result)
-                    if signal_ok and not _hard_rug_ok:
-                        signal_ok = False
-
-                    if signal_ok and not quality_signal_gate(result):
-                        signal_ok = False
-                    if signal_ok and not quality_signal_slot_available(now):
-                        signal_ok = False
-
-                    # V11.58: NO GIR on a one-scan breakout.
-                    # Every GIR, including BREAKOUT_GIR, must be confirmed across
-                    # repeated scans with positive momentum and improving activity.
-                    _confirmed_momentum_for_gir = (
-                        old_metrics is not None
-                        and seen_count >= TREND_CONFIRM_SCANS
-                        and trend_confirmed(old_metrics, result)
-                        and momentum >= MIN_MOMENTUM_SIGNAL
-                    )
-                    if signal_ok and not _confirmed_momentum_for_gir:
-                        signal_ok = False
+                    signal_ok = bool(_candidate_signal and _final_gate_ok)
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -2254,6 +2266,7 @@ Likidite: {money(result["liq"])}
 Top-10: {percent(result["top10"])}
 Holder Verify: {result.get("holder_source", "N/A")}
 Hard Rug Gate: PASSED
+Final Gate: PASSED
 
 Risk Score: {result["score"]}/100
 Momentum: +{momentum}
@@ -2369,7 +2382,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V12.0 | total={stats.get('radar',0)} "
+                    f"RADAR V12.1 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2407,6 +2420,7 @@ Yeni giris icin uygun degil."""
                     f"H6_FAIL={stats.get('h6_fail',0)} "
                     f"H24_FAIL={stats.get('h24_fail',0)}\n"
                     f"SAFE SCORES: samples={stats.get('safe_score_samples',[])} low={stats.get('score_fail_samples',[])}\n"
+                    f"WARMUP={'YES' if stats.get('repeat',0) == 0 else 'NO'} "
                     f"AFTER SAFE: SCORE={stats.get('score_pass',0)} "
                     f"> ACTIVITY={stats.get('activity_pass',0)} "
                     f"> TREND={stats.get('trend_pass',0)} "
@@ -2606,7 +2620,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12 CLEAN HARD-RUG GATE + CONFIRMED MOMENTUM + VERIFIED HOLDER: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.1 FINAL GATE + HOLDER VALIDATION + DATA FAILSAFE: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
