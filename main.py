@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.54 SIGNAL DELIVERY FINAL FIX"
+VERSION = "V11.56 QUALITY 10-20 MODE"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -27,10 +27,70 @@ EARLY_MC_MAX = 10000
 MIN_LIQUIDITY = 800
 
 # V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
-WATCH_SCORE = 47
-SIGNAL_SCORE = 60
+WATCH_SCORE = 60
+SIGNAL_SCORE = 70
 HOLDER_HARD_MAX = 82.0
 SCAN_INTERVAL = 30
+
+# V11.56 QUALITY MODE
+# Target: roughly 10-20 high-quality alerts/day when the market provides them.
+# Never force a quota by lowering safety/quality.
+QUALITY_SEND_WATCH = False
+QUALITY_DAILY_SIGNAL_CAP = 20
+QUALITY_SIGNAL_MIN_GAP_SEC = 2700   # 45 minutes
+QUALITY_MIN_SCORE = 65
+QUALITY_MAX_TOP10 = 65.0
+QUALITY_MIN_LIQ = 1500.0
+QUALITY_MIN_BUYS_5M = 20
+QUALITY_MIN_VOL_5M = 2000.0
+QUALITY_MIN_BUY_SELL_RATIO = 1.25
+QUALITY_MIN_PRICE5 = -5.0
+QUALITY_MAX_PRICE5 = 120.0
+
+_quality_day = None
+_quality_signal_count = 0
+_quality_last_signal_at = 0.0
+
+def quality_signal_slot_available(now):
+    global _quality_day, _quality_signal_count, _quality_last_signal_at
+    # Turkey local day (UTC+3); only a delivery cap, not a market-data assumption.
+    day = time.strftime("%Y-%m-%d", time.gmtime(now + 3 * 3600))
+    if _quality_day != day:
+        _quality_day = day
+        _quality_signal_count = 0
+        _quality_last_signal_at = 0.0
+    if _quality_signal_count >= QUALITY_DAILY_SIGNAL_CAP:
+        return False
+    if _quality_last_signal_at and now - _quality_last_signal_at < QUALITY_SIGNAL_MIN_GAP_SEC:
+        return False
+    return True
+
+def quality_signal_gate(result):
+    top10 = num(result.get("top10"))
+    liq = num(result.get("liq"))
+    price5 = num(result.get("price5"))
+    buys = num(result.get("buys5")) or 0
+    sells = num(result.get("sells5")) or 0
+    vol5 = num(result.get("vol5")) or 0
+    score = num(result.get("score")) or 0
+
+    if top10 is None or bool(result.get("holder_unreliable")):
+        return False
+    if top10 > QUALITY_MAX_TOP10:
+        return False
+    if liq is None or liq < QUALITY_MIN_LIQ:
+        return False
+    if score < QUALITY_MIN_SCORE:
+        return False
+    if buys < QUALITY_MIN_BUYS_5M:
+        return False
+    if vol5 < QUALITY_MIN_VOL_5M:
+        return False
+    if buys / max(sells, 1) < QUALITY_MIN_BUY_SELL_RATIO:
+        return False
+    if price5 is None or not (QUALITY_MIN_PRICE5 <= price5 <= QUALITY_MAX_PRICE5):
+        return False
+    return True
 
 BIRDEYE_POLL_INTERVAL = 180
 BIRDEYE_LIMIT = 20
@@ -48,11 +108,11 @@ MIN_MC_GROWTH = 1.005
 MAX_PAIR_AGE_HOURS = 12.0
 TREND_CONFIRM_SCANS = 2
 
-WATCH_MIN_BUYS_5M = 2
-WATCH_MIN_VOL_5M = 60
-SIGNAL_MIN_BUYS_5M = 4
-SIGNAL_MIN_BUY_SELL_RATIO = 1.10
-SIGNAL_MIN_VOL_5M = 180
+WATCH_MIN_BUYS_5M = 12
+WATCH_MIN_VOL_5M = 1000
+SIGNAL_MIN_BUYS_5M = 20
+SIGNAL_MIN_BUY_SELL_RATIO = 1.25
+SIGNAL_MIN_VOL_5M = 2000
 MIN_VOL_GROWTH = 1.00
 
 STATE_FILE = "/tmp/hunterelite_v11_2_state.json"
@@ -1402,6 +1462,9 @@ def breakout_signal(result):
 def strong_signal(result, momentum, previous=None):
     if not basic_signal_safe(result):
         return False
+    # V11.55: GIR requires verified holder concentration.
+    if result.get("top10") is None or bool(result.get("holder_unreliable")):
+        return False
     if not crash_guard(result):
         return False
     if previous is None:
@@ -1873,6 +1936,22 @@ def auto_scanner():
                     )
                     signal_ok = bool(_confirmed_signal or _calibrated_breakout)
 
+                    # V11.55 fail-closed holder gate for every GIR path.
+                    _verified_top10 = result.get("top10")
+                    _holder_verified_for_gir = (
+                        _verified_top10 is not None
+                        and not bool(result.get("holder_unreliable"))
+                        and float(_verified_top10) < HOLDER_HARD_MAX
+                    )
+                    if signal_ok and not _holder_verified_for_gir:
+                        signal_ok = False
+
+                    # V11.56 QUALITY MODE: final quality gate + delivery pacing.
+                    if signal_ok and not quality_signal_gate(result):
+                        signal_ok = False
+                    if signal_ok and not quality_signal_slot_available(now):
+                        signal_ok = False
+
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
                         stats[reason] = stats.get(reason, 0) + 1
@@ -1890,6 +1969,9 @@ def auto_scanner():
                     ):
                         new_stage = "SIGNAL"
                         stats["signal"] += 1
+                        global _quality_signal_count, _quality_last_signal_at
+                        _quality_signal_count += 1
+                        _quality_last_signal_at = now
                         final_score = min(100, result["score"] + momentum)
                         age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
 
@@ -1910,19 +1992,20 @@ Top-10: {percent(result["top10"])}
 
 Risk Score: {result["score"]}/100
 Momentum: +{momentum}
-1s fiyat: {percent(result["price1h"])}
-6s fiyat: {percent(result["price6h"])}
+1sa fiyat: {percent(result["price1h"])}
+6sa fiyat: {percent(result["price6h"])}
 Pair yasi: {age_text}
 Final Score: {final_score}/100
 
 KARAR: GIR
-POTANSIYEL: 5X-10X POTANSIYEL ADAYI
+POTANSIYEL: YUKSEK POTANSIYEL ADAYI
 
-UYARI: Potansiyel etiketi garanti degildir.
+UYARI: 5X-10X garanti degildir; Axiom'da son kontrol zorunludur.
 Axiom'da son kontrolunu yap."""
 
                     elif (
-                        watch_ok
+                        QUALITY_SEND_WATCH
+                        and watch_ok
                         and stage == "NEW"
                         and now - last_sent > WATCH_REPEAT_COOLDOWN
                     ):
@@ -2257,7 +2340,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nSIGNAL DELIVERY FINAL FIX + HOLDER PIPELINE + BIRDEYE TRACE + MULTI-FEED: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nQUALITY 10-20 MODE + VERIFIED HOLDER + HARD SAFETY: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
