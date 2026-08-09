@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.39 BIRDEYE STABLE FEED"
+VERSION = "V11.40 BIRDEYE API FIX"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -435,40 +435,66 @@ def discovery_candidates():
     return (birdeye_selected + dex_selected)[:RADAR_TARGET]
 
 def birdeye_market_data(ca):
-    """Birdeye liquidity fallback with retries and normalized response fields."""
+    """
+    Liquidity lookup:
+    1) Birdeye v3 market-data (official endpoint)
+    2) Birdeye token_overview fallback if v3 returns 400/empty
+    Both use canonical Solana x-chain header.
+    """
     if not BIRDEYE_API_KEY:
         return None
 
-    url = (
-        "https://public-api.birdeye.so/defi/v3/token/market-data?"
-        + urllib.parse.urlencode({"address": ca})
-    )
-    for attempt in range(2):
+    headers = {
+        "X-API-KEY": BIRDEYE_API_KEY,
+        "x-chain": "solana",
+        "accept": "application/json",
+    }
+
+    endpoints = [
+        (
+            "MARKET_V3",
+            "https://public-api.birdeye.so/defi/v3/token/market-data?"
+            + urllib.parse.urlencode({
+                "address": str(ca).strip(),
+                "ui_amount_mode": "scaled",
+            }),
+        ),
+        (
+            "OVERVIEW",
+            "https://public-api.birdeye.so/defi/token_overview?"
+            + urllib.parse.urlencode({
+                "address": str(ca).strip(),
+            }),
+        ),
+    ]
+
+    for source_name, url in endpoints:
         try:
-            payload = get_json(
-                url,
-                timeout=12,
-                headers={"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"},
-            )
+            payload = get_json(url, timeout=12, headers=headers)
             data = payload.get("data") if isinstance(payload, dict) else None
             if not isinstance(data, dict):
-                data = payload if isinstance(payload, dict) else {}
+                continue
 
-            # Normalize liquidity so the scanner always reads data["liquidity"].
             liq = None
-            for key in ("liquidity", "liquidityUsd", "liquidity_usd", "liquidityUSD"):
-                liq = num(data.get(key))
-                if liq is not None:
+            for key in (
+                "liquidity", "liquidityUsd", "liquidity_usd",
+                "liquidityUSD", "liquidity_usd_value"
+            ):
+                val = num(data.get(key))
+                if val is not None and val >= 0:
+                    liq = val
                     break
+
             if liq is not None:
-                data = dict(data)
-                data["liquidity"] = liq
-            return data
+                out = dict(data)
+                out["liquidity"] = liq
+                out["_source"] = source_name
+                return out
+
         except Exception as e:
-            if attempt == 1:
-                print("BIRDEYE MARKET DATA ERROR:", ca, repr(e), flush=True)
-            else:
-                time.sleep(0.35)
+            # Do not stop the scan: immediately try the official overview fallback.
+            print(f"BIRDEYE {source_name} FAIL:", ca, repr(e), flush=True)
+
     return None
 
 
@@ -1624,7 +1650,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.39 | total={stats.get('radar',0)} "
+                    f"RADAR V11.40 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
@@ -1853,7 +1879,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE STABLE FEED + DATA GUARD + ONE-TAP AXIOM + UNIFIED GIR: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE API FIX + OVERVIEW FALLBACK + DATA GUARD + ONE-TAP AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
