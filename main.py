@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.51 WATCH RISK LABELS"
+VERSION = "V11.53 HOLDER PIPELINE FIX"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -29,6 +29,7 @@ MIN_LIQUIDITY = 800
 # V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
 WATCH_SCORE = 47
 SIGNAL_SCORE = 60
+HOLDER_HARD_MAX = 82.0
 SCAN_INTERVAL = 30
 
 BIRDEYE_POLL_INTERVAL = 180
@@ -69,6 +70,7 @@ birdeye_lock = threading.Lock()
 birdeye_cache = []
 birdeye_last_fetch = 0.0
 birdeye_last_error = ""
+birdeye_last_error_body = ""
 birdeye_cooldown_until = 0
 BIRDEYE_COOLDOWN_SECONDS = 900
 
@@ -104,6 +106,7 @@ radar_stats = {
     "radar": 0,
     "processed": 0,
     "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [], "prepump": 0, "prepump_safe": 0, "src_birdeye": 0, "src_gecko": 0, "src_dex": 0, "src_birdeye_stale": 0, "src_gecko_stale": 0, "src_dex_stale": 0, "src_birdeye_safe": 0, "src_gecko_safe": 0, "src_dex_safe": 0,
+                "holder_unreliable": 0, "safe_score_samples": [], "score_fail_samples": [],
     "basic_fail": 0,
     "crash_fail": 0,
     "watch": 0,
@@ -316,7 +319,7 @@ def birdeye_item_time(item):
 
 def birdeye_new_candidates(force=False):
     global birdeye_cache, birdeye_last_fetch, birdeye_last_error
-    global birdeye_listing_liq, birdeye_cooldown_until
+    global birdeye_listing_liq, birdeye_cooldown_until, birdeye_last_error_body
 
     if not BIRDEYE_API_KEY:
         return []
@@ -382,6 +385,7 @@ def birdeye_new_candidates(force=False):
             birdeye_listing_liq.update(listing_liq)
             birdeye_last_fetch = now
             birdeye_last_error = ""
+            birdeye_last_error_body = ""
             birdeye_cooldown_until = 0
 
         print(
@@ -397,18 +401,24 @@ def birdeye_new_candidates(force=False):
         except Exception:
             body = ""
 
-        err = f"HTTP {e.code}: {body[:300]}"
+        body_clean = " ".join(body.split())[:900]
+        err = f"HTTP {e.code}: {body_clean}"
+
+        birdeye_last_error_body = body_clean
         err_lower = err.lower()
 
-        # Birdeye returns "exceeded" when quota/rate allowance is exhausted.
         if "exceeded" in err_lower or e.code == 429:
             birdeye_cooldown_until = now + BIRDEYE_COOLDOWN_SECONDS
             print(
-                f"BIRDEYE COOLDOWN ACTIVE: {BIRDEYE_COOLDOWN_SECONDS}s | {err}",
+                f"BIRDEYE COOLDOWN ACTIVE: {BIRDEYE_COOLDOWN_SECONDS}s | "
+                f"status={e.code} | body={body_clean}",
                 flush=True,
             )
         else:
-            print("BIRDEYE FEED ERROR:", err, flush=True)
+            print(
+                f"BIRDEYE FEED ERROR: status={e.code} | body={body_clean}",
+                flush=True,
+            )
 
         with birdeye_lock:
             birdeye_last_error = err
@@ -662,24 +672,74 @@ def holder_pct(holder):
 
     return None
 
+def rugcheck_holder_risk(report):
+    """Return True only when RugCheck itself reports holder concentration risk."""
+    if not isinstance(report, dict):
+        return False
+    try:
+        blob = json.dumps(report.get("risks") or [], ensure_ascii=False).lower()
+    except Exception:
+        blob = str(report.get("risks") or []).lower()
+    needles = (
+        "top 10 holder", "top10 holder", "top-10 holder",
+        "single holder", "holder ownership", "high ownership",
+        "large amount of the token supply", "holder concentrat",
+    )
+    return any(n in blob for n in needles)
+
+
+def _holder_identity(holder, index):
+    if not isinstance(holder, dict):
+        return f"row:{index}"
+    for key in ("owner", "address", "pubkey", "tokenAccount", "token_account"):
+        value = holder.get(key)
+        if value:
+            return str(value)
+    return f"row:{index}"
+
+
 def holders(report):
+    """
+    Return Top-1/5/10 wallet concentration.
+
+    RugCheck can expose multiple token-account rows for one owner and very fresh
+    bonding-curve/pool inventories can make the raw first 10 rows sum to ~100%.
+    We de-duplicate identifiable owners.  If the result is still ~100% but
+    RugCheck itself does not report holder concentration, mark the raw holder
+    number as unreliable instead of treating a protocol inventory as a whale.
+    """
     if not report:
-        return None, None, None
+        return None, None, None, False, None
 
     items = report.get("topHolders") or report.get("top_holders") or []
-    values = [v for v in (holder_pct(i) for i in items) if v is not None]
-    if not values:
-        return None, None, None
+    rows = []
+    seen = set()
+    for index, item in enumerate(items):
+        value = holder_pct(item)
+        if value is None:
+            continue
+        ident = _holder_identity(item, index)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        rows.append(value)
 
-    top1 = values[0]
-    top5 = sum(values[:5])
-    top10 = sum(values[:10])
+    if not rows:
+        return None, None, None, False, None
 
-    # Percentages above 100 are invalid data, not a reason to invent a safe value.
-    if top1 > 100 or top5 > 100.5 or top10 > 100.5:
-        return None, None, None
+    top1 = rows[0]
+    top5 = sum(rows[:5])
+    raw_top10 = sum(rows[:10])
 
-    return top1, top5, top10
+    if top1 > 100 or top5 > 100.5 or raw_top10 > 100.5:
+        return None, None, None, True, raw_top10
+
+    # V11.53: a near-100 raw sum with no RugCheck concentration warning is
+    # treated as an unreliable protocol/bonding-curve inventory reading.
+    # It receives an uncertainty score penalty, but does not hard-kill the token.
+    unreliable = raw_top10 >= 98.0 and not rugcheck_holder_risk(report)
+    top10 = None if unreliable else raw_top10
+    return top1, top5, top10, unreliable, raw_top10
 
 def authority(report, key):
     if not report:
@@ -798,7 +858,7 @@ def calculate_score(pair, report):
         score -= 20
         risks.append("Likidite dÃ¼ÅŸÃ¼k")
 
-    top1, top5, top10 = holders(report)
+    top1, top5, top10, holder_unreliable, holder_raw_top10 = holders(report)
 
     if report is None:
         score -= 15
@@ -891,6 +951,8 @@ def calculate_score(pair, report):
         "top1": top1,
         "top5": top5,
         "top10": top10,
+        "holder_raw_top10": holder_raw_top10,
+        "holder_unreliable": holder_unreliable,
         "mint": mint,
         "freeze": freeze,
         "signals": sig,
@@ -1087,7 +1149,7 @@ def basic_signal_safe(result):
         return False
     if result["liq"] is None or result["liq"] < MIN_LIQUIDITY:
         return False
-    if result["top10"] is not None and result["top10"] >= 75:
+    if result["top10"] is not None and result["top10"] >= HOLDER_HARD_MAX:
         return False
     return True
 
@@ -1385,7 +1447,7 @@ def filter_fail_reason(result, previous=None, momentum=0, for_signal=False):
         return "liq_fail"
 
     top10 = result.get("top10")
-    if top10 is not None and top10 >= 75:
+    if top10 is not None and top10 >= HOLDER_HARD_MAX:
         return "holder_fail"
 
     if not crash_guard(result):
@@ -1543,6 +1605,7 @@ def auto_scanner():
                 "src_birdeye": 0, "src_gecko": 0, "src_dex": 0,
                 "src_birdeye_stale": 0, "src_gecko_stale": 0, "src_dex_stale": 0,
                 "src_birdeye_safe": 0, "src_gecko_safe": 0, "src_dex_safe": 0,
+                "holder_unreliable": 0, "safe_score_samples": [], "score_fail_samples": [],
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
     "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "liq_gecko_ok": 0, "liq_gecko_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
@@ -1682,9 +1745,13 @@ def auto_scanner():
                     if liq_ok: stats["liq_pass"] += 1
 
                     top10 = result.get("top10")
+                    holder_unreliable = bool(result.get("holder_unreliable"))
+                    holder_raw_top10 = result.get("holder_raw_top10")
 
                     if liq_ok:
-                        # V11.46 diagnostic only: sample actual Top10 by discovery source.
+                        if holder_unreliable:
+                            stats["holder_unreliable"] = stats.get("holder_unreliable", 0) + 1
+                        # Diagnostic samples are grouped by DISCOVERY source, not holder-data source.
                         if top10 is not None:
                             _key = "holder_gecko_samples" if source_name == "GECKO" else "holder_dex_samples"
                             _checked = "holder_gecko_checked" if source_name == "GECKO" else "holder_dex_checked"
@@ -1706,7 +1773,7 @@ def auto_scanner():
                         elif top10 >= 50:
                             stats["holder_50_60"] += 1
 
-                    holder_ok = liq_ok and top10 is not None and top10 < 82
+                    holder_ok = liq_ok and ((top10 is not None and top10 < HOLDER_HARD_MAX) or holder_unreliable)
                     if holder_ok: stats["holder_pass"] += 1
 
                     sig = result.get("signals") or {}
@@ -1740,13 +1807,25 @@ def auto_scanner():
                     safety_ok = crash_ok
                     if safety_ok:
                         stats["safety_pass"] += 1
-                        if source_name == "BIRDEYE": stats["src_birdeye_safe"] += 1
-                        else: stats["src_dex_safe"] += 1
+                        if source_name == "BIRDEYE":
+                            stats["src_birdeye_safe"] += 1
+                        elif source_name == "GECKO":
+                            stats["src_gecko_safe"] += 1
+                        else:
+                            stats["src_dex_safe"] += 1
                         if result.get("prepump"):
                             stats["prepump_safe"] += 1
+                        if len(stats["safe_score_samples"]) < 8:
+                            stats["safe_score_samples"].append(int(result.get("score", 0)))
 
                     score_ok = safety_ok and result.get("score", 0) >= WATCH_SCORE
-                    if score_ok: stats["score_pass"] += 1
+                    if score_ok:
+                        stats["score_pass"] += 1
+                    elif safety_ok and len(stats["score_fail_samples"]) < 5:
+                        stats["score_fail_samples"].append({
+                            "score": int(result.get("score", 0)),
+                            "risks": list(result.get("risks") or [])[:3],
+                        })
 
                     vol5 = result.get("vol5")
                     activity_ok = (score_ok
@@ -1922,7 +2001,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.51 | total={stats.get('radar',0)} "
+                    f"RADAR V11.53 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -1931,6 +2010,7 @@ Yeni giris icin uygun degil."""
                     f"BIRDEYE_FEED={'COOLDOWN' if time.time() < birdeye_cooldown_until else ('OK' if not birdeye_last_error else 'ERR')} "
                     f"cache={len(birdeye_cache)} "
                     f"cooldown={max(0, int(birdeye_cooldown_until-time.time()))}s\n"
+                    f"BIRDEYE_ERR={birdeye_last_error[:180] if birdeye_last_error else '-'}\n"
                     f"GECKO_FEED={'OK' if not gecko_last_error else 'ERR'} cache={len(gecko_cache)} liq_cache={len(gecko_liq_cache)}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
@@ -1949,7 +2029,7 @@ Yeni giris icin uygun degil."""
                     f"60-70={stats.get('holder_60_70',0)} "
                     f"70-82={stats.get('holder_70_82',0)} "
                     f"82+={stats.get('holder_82_plus',0)}\n"
-                    f"HOLDER SOURCE: GECKO checked={stats.get('holder_gecko_checked',0)} 82+={stats.get('holder_gecko_82',0)} samples={stats.get('holder_gecko_samples',[])} | DEX checked={stats.get('holder_dex_checked',0)} 82+={stats.get('holder_dex_82',0)} samples={stats.get('holder_dex_samples',[])}\\n"
+                    f"HOLDER DISCOVERY: GECKO checked={stats.get('holder_gecko_checked',0)} 82+={stats.get('holder_gecko_82',0)} samples={stats.get('holder_gecko_samples',[])} | DEX checked={stats.get('holder_dex_checked',0)} 82+={stats.get('holder_dex_82',0)} samples={stats.get('holder_dex_samples',[])} | unreliable={stats.get('holder_unreliable',0)}\n"
                     f"SAFETY: RUG_OK={stats.get('rug_ok',0)} "
                     f"> AUTH_OK={stats.get('auth_ok',0)} "
                     f"> CRASH_OK={stats.get('crash_ok',0)} "
@@ -1958,6 +2038,7 @@ Yeni giris icin uygun degil."""
                     f"H1_FAIL={stats.get('h1_fail',0)} "
                     f"H6_FAIL={stats.get('h6_fail',0)} "
                     f"H24_FAIL={stats.get('h24_fail',0)}\n"
+                    f"SAFE SCORES: samples={stats.get('safe_score_samples',[])} low={stats.get('score_fail_samples',[])}\n"
                     f"AFTER SAFE: SCORE={stats.get('score_pass',0)} "
                     f"> ACTIVITY={stats.get('activity_pass',0)} "
                     f"> TREND={stats.get('trend_pass',0)} "
@@ -2157,7 +2238,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nWATCH RISK LABELS + EARLY QUALITY GIR + BREAKOUT + MULTI-FEED: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nHOLDER PIPELINE FIX + BIRDEYE TRACE + WATCH RISK + MULTI-FEED: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
