@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.57 HOLDER FALLBACK QUALITY MODE"
+VERSION = "V11.58 CONFIRMED MOMENTUM QUALITY MODE"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -93,6 +93,10 @@ def quality_signal_gate(result):
         return False
     if price5 is None or not (QUALITY_MIN_PRICE5 <= price5 <= QUALITY_MAX_PRICE5):
         return False
+    # Avoid chasing a candle that has already expanded too far in a single 5m window.
+    # A later confirmed scan can still qualify if activity remains healthy.
+    if price5 > 80:
+        return False
     return True
 
 BIRDEYE_POLL_INTERVAL = 180
@@ -106,7 +110,7 @@ MAX_SIGNAL_DROP_1H = -35.0
 MAX_CRASH_DROP_6H = -35.0
 MAX_CRASH_DROP_24H = -55.0
 
-MIN_MOMENTUM_SIGNAL = 10
+MIN_MOMENTUM_SIGNAL = 15
 MIN_MC_GROWTH = 1.005
 MAX_PAIR_AGE_HOURS = 12.0
 TREND_CONFIRM_SCANS = 2
@@ -2157,6 +2161,18 @@ def auto_scanner():
                     if signal_ok and not quality_signal_slot_available(now):
                         signal_ok = False
 
+                    # V11.58: NO GIR on a one-scan breakout.
+                    # Every GIR, including BREAKOUT_GIR, must be confirmed across
+                    # repeated scans with positive momentum and improving activity.
+                    _confirmed_momentum_for_gir = (
+                        old_metrics is not None
+                        and seen_count >= TREND_CONFIRM_SCANS
+                        and trend_confirmed(old_metrics, result)
+                        and momentum >= MIN_MOMENTUM_SIGNAL
+                    )
+                    if signal_ok and not _confirmed_momentum_for_gir:
+                        signal_ok = False
+
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
                         stats[reason] = stats.get(reason, 0) + 1
@@ -2198,6 +2214,7 @@ Holder Verify: {result.get("holder_source", "N/A")}
 
 Risk Score: {result["score"]}/100
 Momentum: +{momentum}
+Trend Teyidi: {seen_count} tarama / ONAYLI
 1sa fiyat: {percent(result["price1h"])}
 6sa fiyat: {percent(result["price6h"])}
 Pair yasi: {age_text}
@@ -2309,7 +2326,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.57 | total={stats.get('radar',0)} "
+                    f"RADAR V11.58 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2546,7 +2563,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nHOLDER FALLBACK + QUALITY 10-20 + VERIFIED HOLDER + HARD SAFETY: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nCONFIRMED MOMENTUM + HOLDER FALLBACK + QUALITY MODE: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
