@@ -9,7 +9,9 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.36 UNIFIED GIR ENGINE"
+VERSION = "V11.38 DATA GUARD QUICK AXIOM"
+LIQ_CACHE = {}
+LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -178,14 +180,25 @@ def clean_telegram_text(text):
         s = s.replace(old, new)
     return s.replace("\ufffd", "")
 
-def send(chat_id, text):
+def send_clickable_ca(chat_id, ca):
+    if not ca:
+        return
+    ca = str(ca).strip()
+    url = f"https://axiom.trade/t/{ca}?chain=sol"
+    send(chat_id, f'<a href="{url}">{ca}</a>', parse_mode="HTML")
+
+
+def send(chat_id, text, parse_mode=None):
     try:
         text = clean_telegram_text(text)
-        telegram("sendMessage", {
+        payload = {
             "chat_id": str(chat_id),
             "text": text[:4000],
             "disable_web_page_preview": "true"
-        })
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        telegram("sendMessage", payload)
     except Exception as e:
         print("SEND ERROR:", repr(e), flush=True)
 
@@ -943,7 +956,7 @@ def unified_gir_decision(result, momentum=0, final_score=0):
     score = result.get("score", 0) or 0
 
     if liq is None or top10 is None or price5 is None:
-        return "IZLE"
+        return "VERI_BEKLE"
 
     # Never bypass the existing core envelope.
     if mc < 1000 or mc > 15000 or liq < MIN_LIQUIDITY or top10 > 82:
@@ -1297,6 +1310,25 @@ def auto_scanner():
 
                     liq = result.get("liq")
 
+
+                    # Short cache fallback for temporary liquidity API gaps.
+
+                    _now = time.time()
+
+                    if liq is not None and liq > 0:
+
+                        LIQ_CACHE[str(ca)] = (liq, _now)
+
+                    else:
+
+                        _cached_liq = LIQ_CACHE.get(str(ca))
+
+                        if _cached_liq and (_now - _cached_liq[1]) <= LIQ_CACHE_TTL:
+
+                            liq = _cached_liq[0]
+
+                            result["liq"] = liq
+
                     # DEX liquidity is sometimes unavailable for very fresh Birdeye listings.
                     # Only in that case, ask Birdeye Market Data for the token's liquidity.
                     if mc_ok and liq is None and BIRDEYE_API_KEY:
@@ -1505,6 +1537,7 @@ Yeni giris icin uygun degil."""
                     if message:
                         for chat_id in list(signal_chats):
                             send(chat_id, message)
+                            send_clickable_ca(chat_id, ca)
                             cancelled_this_scan.add(ca)
                         last_sent = now
 
@@ -1553,7 +1586,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.36 | total={stats.get('radar',0)} "
+                    f"RADAR V11.38 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
@@ -1781,7 +1814,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nUNIFIED GIR ENGINE + RURU BREAKOUT + STATE LOCK: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nDATA GUARD + LIQ CACHE + ONE-TAP AXIOM + UNIFIED GIR: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
