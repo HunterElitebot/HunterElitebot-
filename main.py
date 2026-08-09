@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.49 EARLY BREAKOUT CALIBRATION"
+VERSION = "V11.50 EARLY QUALITY GIR"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -1183,6 +1183,19 @@ def gir_block_reason(result, score):
     if vol5 < 500:
         return "VOLUME_LOW"
     if score < SIGNAL_SCORE:
+        _mc = num(result.get("mc")) or 0
+        _ratio = buys5 / max(sells5, 1)
+        if (
+            25 <= price5 <= 150
+            and score >= 52
+            and buys5 >= 80
+            and _ratio >= 1.50
+            and vol5 >= 5000
+            and top10 <= 65
+            and liq >= 1500
+            and liq / max(_mc, 1) >= 0.25
+        ):
+            return "EARLY_QUALITY_GIR_READY"
         return "SCORE_BELOW_SIGNAL"
     return "TREND_OR_MOMENTUM_WAIT"
 
@@ -1222,6 +1235,21 @@ def unified_gir_decision(result, momentum=0, final_score=0):
         and vol5 >= 10000
         and top10 <= 70
         and liq / max(mc, 1) >= 0.20
+    ):
+        return "BREAKOUT_GIR"
+
+    # V11.50 quality override:
+    # A slightly lower composite score may still GIR when the live tape is
+    # exceptionally strong and holder/liquidity quality is clean.
+    if (
+        25 <= price5 <= 150
+        and 52 <= score < 60
+        and buys >= 80
+        and ratio >= 1.50
+        and vol5 >= 5000
+        and top10 <= 65
+        and liq >= 1500
+        and liq / max(mc, 1) >= 0.25
     ):
         return "BREAKOUT_GIR"
 
@@ -1894,7 +1922,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.49 | total={stats.get('radar',0)} "
+                    f"RADAR V11.50 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2129,7 +2157,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nEARLY BREAKOUT 60-69 + EXTREME >=70 + HOLDER FIX + MULTI-FEED: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nEARLY QUALITY GIR 52+ + BREAKOUT 60+ + EXTREME 70+ + MULTI-FEED: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
