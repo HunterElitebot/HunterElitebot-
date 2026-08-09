@@ -9,14 +9,14 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V12.2 FINAL FEED RESILIENCE"
+VERSION = "V12.3 HOLDER RECOVERY FINAL"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com").strip()
 HOLDER_RPC_CACHE = {}
-HOLDER_RPC_CACHE_TTL = 300
+HOLDER_RPC_CACHE_TTL = 900
 
 # V11.5: single-engine mode.
 # Telegram getUpdates polling is OFF by default so another stale/duplicate
@@ -365,26 +365,22 @@ def _protocol_holder_accounts(report):
 
 
 def _holder_rpc_prequal(metrics):
-    """Avoid hammering public RPC: fallback is only for plausible quality candidates."""
+    """
+    V12.3 holder recovery prequal.
+    Holder verification now runs for every plausible radar candidate that has
+    enough market/liquidity data, instead of waiting for strong activity.
+    This improves Top-10 coverage while the FINAL GIR gate remains unchanged.
+    """
     if not isinstance(metrics, dict):
         return False
     mc = num(metrics.get("mc"))
     liq = num(metrics.get("liq"))
-    buys = num(metrics.get("buys5")) or 0
-    sells = num(metrics.get("sells5")) or 0
-    vol = num(metrics.get("vol5")) or 0
-    p5 = num(metrics.get("price5"))
     if mc is None or not (1000 <= mc <= 15000):
         return False
-    if liq is None or liq < 1200:
-        return False
-    if buys < 12 or vol < 1000:
-        return False
-    if buys / max(sells, 1) < 1.10:
-        return False
-    if p5 is None or not (-10 <= p5 <= 150):
+    if liq is None or liq < 800:
         return False
     return True
+
 
 
 def rpc_holder_top10(ca, report=None):
@@ -472,8 +468,10 @@ def rpc_holder_top10(ca, report=None):
         return result
     except Exception as e:
         print("HOLDER RPC FALLBACK ERROR:", ca, repr(e), flush=True)
+        # Cache failures briefly so a transient public-RPC problem does not
+        # hammer the endpoint every 30 seconds.
         result = (None, None, None, False)
-        HOLDER_RPC_CACHE[ca] = (now, result)
+        HOLDER_RPC_CACHE[ca] = (time.time() - HOLDER_RPC_CACHE_TTL + 90, result)
         return result
 
 
@@ -2122,6 +2120,11 @@ def auto_scanner():
                     top10 = result.get("top10")
                     holder_unreliable = bool(result.get("holder_unreliable"))
                     holder_raw_top10 = result.get("holder_raw_top10")
+                    holder_source = result.get("holder_source")
+                    if holder_source == "SOLANA_RPC":
+                        stats["holder_rpc_verified"] = stats.get("holder_rpc_verified", 0) + 1
+                    elif holder_source == "RUGCHECK":
+                        stats["holder_rugcheck_verified"] = stats.get("holder_rugcheck_verified", 0) + 1
 
                     if liq_ok:
                         if holder_unreliable:
@@ -2409,7 +2412,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V12.2 | total={stats.get('radar',0)} "
+                    f"RADAR V12.3 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2440,6 +2443,7 @@ Yeni giris icin uygun degil."""
                     f"60-70={stats.get('holder_60_70',0)} "
                     f"70-82={stats.get('holder_70_82',0)} "
                     f"82+={stats.get('holder_82_plus',0)}\n"
+                    f"HOLDER RECOVERY: rpc={stats.get('holder_rpc_verified',0)} rugcheck={stats.get('holder_rugcheck_verified',0)}\n"
                     f"HOLDER DISCOVERY: GECKO checked={stats.get('holder_gecko_checked',0)} 82+={stats.get('holder_gecko_82',0)} samples={stats.get('holder_gecko_samples',[])} | DEX checked={stats.get('holder_dex_checked',0)} 82+={stats.get('holder_dex_82',0)} samples={stats.get('holder_dex_samples',[])} | unreliable={stats.get('holder_unreliable',0)}\n"
                     f"SAFETY: RUG_OK={stats.get('rug_ok',0)} "
                     f"> AUTH_OK={stats.get('auth_ok',0)} "
@@ -2650,7 +2654,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.2 FINAL GATE + FEED RESILIENCE + DATA FAILSAFE: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.3 HOLDER RECOVERY + FINAL GATE + FEED RESILIENCE: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
