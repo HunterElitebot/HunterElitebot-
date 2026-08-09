@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.22 SOURCE COUNTER FIX"
+VERSION = "V11.23 BIRDEYE PRIORITY RADAR"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -76,6 +76,8 @@ discovery_seen_lock = threading.Lock()
 DISCOVERY_MEMORY_SECONDS = 21600
 RADAR_RAW_LIMIT = 240
 RADAR_TARGET = 80
+BIRDEYE_TARGET = 60
+DEX_TARGET = 20
 MAX_REPEAT_PER_SCAN = 20
 FRESH_PAIR_MAX_HOURS = 6.0
 
@@ -369,23 +371,37 @@ def discovery_candidates():
         "https://api.dexscreener.com/token-boosts/top/v1",
         "https://api.dexscreener.com/community-takeovers/latest/v1",
     ]
-    found, seen = [], set()
+
     candidate_sources.clear()
+
+    birdeye_found, birdeye_seen = [], set()
     for ca in birdeye_new_candidates():
-        if ca: candidate_sources[ca] = "BIRDEYE"
-        if ca not in seen: seen.add(ca); found.append(ca)
+        if ca and ca not in birdeye_seen:
+            birdeye_seen.add(ca)
+            birdeye_found.append(ca)
+            candidate_sources[ca] = "BIRDEYE"
+
+    dex_found, dex_seen = [], set()
     for url in endpoints:
         try:
             data = get_json(url)
-            if not isinstance(data, list): continue
+            if not isinstance(data, list):
+                continue
             for item in data:
-                if str(item.get("chainId", "")).lower() != "solana": continue
+                if str(item.get("chainId", "")).lower() != "solana":
+                    continue
                 ca = str(item.get("tokenAddress", "")).strip()
-                if ca and SOL_CA.match(ca):
-                    candidate_sources.setdefault(ca, "DEX")
-                    if ca not in seen: seen.add(ca); found.append(ca)
-        except Exception as e: print("DISCOVERY ERROR:", repr(e), flush=True)
-    return found[:RADAR_RAW_LIMIT]
+                if not (ca and SOL_CA.match(ca)):
+                    continue
+                if ca in birdeye_seen or ca in dex_seen:
+                    continue
+                dex_seen.add(ca)
+                dex_found.append(ca)
+                candidate_sources[ca] = "DEX"
+        except Exception as e:
+            print("DISCOVERY ERROR:", repr(e), flush=True)
+
+    return (birdeye_found[:BIRDEYE_TARGET] + dex_found[:DEX_TARGET])[:RADAR_TARGET]
 
 def rugcheck(ca):
     try:
@@ -1017,14 +1033,8 @@ def auto_scanner():
             raw_candidates = discovery_candidates()
             scan_now = time.time()
 
-            # Fresh listings first; repeats only fill unused radar capacity.
-            with discovery_seen_lock:
-                fresh_cas = [ca for ca in raw_candidates if ca not in discovery_seen]
-                repeat_cas = [ca for ca in raw_candidates if ca in discovery_seen]
-            # V11.16: reserve most radar capacity for never-seen tokens.
-            # Repeats are capped so they cannot crowd out fresh discovery.
-            repeat_slots = min(MAX_REPEAT_PER_SCAN, max(0, RADAR_TARGET - len(fresh_cas)))
-            candidates = (fresh_cas[:RADAR_TARGET] + repeat_cas[:repeat_slots])[:RADAR_TARGET]
+            # Preserve the intended source allocation: Birdeye first, DEX capped.
+            candidates = raw_candidates[:RADAR_TARGET]
 
             unique_new, repeat = 0, 0
             with discovery_seen_lock:
@@ -1354,7 +1364,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.22 | total={stats.get('radar',0)} "
+                    f"RADAR V11.23 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
@@ -1569,13 +1579,13 @@ def startup_notify():
 Early Hunter: ACTIVE
 Scan: {SCAN_INTERVAL} sec
 Radar: {"BIRDEYE + DEX" if BIRDEYE_API_KEY else "DEX ONLY"}
-Birdeye: {"CONNECTED" if BIRDEYE_API_KEY else "KEY MISSING"}\nBirdeye Fresh: up to 60 listings / 180 sec
+Birdeye: {"CONNECTED" if BIRDEYE_API_KEY else "KEY MISSING"}\nBirdeye Fresh: up to 60 listings / 180 sec\nRadar Mix: Birdeye up to 60 + DEX max 20
 Watch Score: {WATCH_SCORE}
 Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nSOURCE COUNTER FIX + REAL FRESH + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE PRIORITY 60 + DEX CAP 20 + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
