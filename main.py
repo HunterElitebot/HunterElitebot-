@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.20 SOURCE SPLIT"
+VERSION = "V11.21 SOURCE SPLIT FIX"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -1066,9 +1066,15 @@ def auto_scanner():
 
             for ca in candidates:
                 try:
-                    source_name = candidate_sources.get(ca, "DEX")
-                    if source_name == "BIRDEYE": stats["src_birdeye"] += 1
-                    else: stats["src_dex"] += 1
+                    source_name = candidate_sources.get(ca)
+                    if source_name not in ("BIRDEYE", "DEX"):
+                        source_name = "DEX"
+
+                    if source_name == "BIRDEYE":
+                        stats["src_birdeye"] += 1
+                    else:
+                        stats["src_dex"] += 1
+
                     pair = best_pair(ca)
                     if pair is None:
                         stats["pair_yok"] += 1
@@ -1345,10 +1351,11 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.20 | total={stats.get('radar',0)} "
+                    f"RADAR V11.21 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
+                    f"SOURCE_ACCOUNTED={stats.get('src_birdeye',0)+stats.get('src_dex',0)}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
                     f"> LIQ={stats.get('liq_pass',0)} "
@@ -1565,7 +1572,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nSOURCE SPLIT + REAL FRESH + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nSOURCE SPLIT FIX + REAL FRESH + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
