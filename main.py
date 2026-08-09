@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.35 RURU BREAKOUT GIR"
+VERSION = "V11.36 UNIFIED GIR ENGINE"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -92,7 +92,7 @@ radar_stats = {
     "basic_fail": 0,
     "crash_fail": 0,
     "watch": 0,
-    "signal": 0, "breakout": 0,
+    "signal": 0, "breakout": 0, "strong_gir": 0, "decision_izle": 0,
     "mc_fail": 0,
     "liq_fail": 0,
     "holder_fail": 0,
@@ -781,13 +781,25 @@ def simple_action(result, momentum=0, previous=None):
     if sells > buys * 1.35 and buys + sells >= 8:
         return "ğŸ”´ SAT / GÄ°RME"
 
-    is_breakout = breakout_signal(result)
+    decision = unified_gir_decision(result, momentum, previous)
+
+    is_breakout = decision == "BREAKOUT_GIR"
+
+    is_strong_gir = decision == "STRONG_GIR"
 
     if is_breakout:
 
         stats["breakout"] = stats.get("breakout", 0) + 1
 
-    if is_breakout or strong_signal(result, momentum, previous):
+    elif is_strong_gir:
+
+        stats["strong_gir"] = stats.get("strong_gir", 0) + 1
+
+    else:
+
+        stats["decision_izle"] = stats.get("decision_izle", 0) + 1
+
+    if decision in ("BREAKOUT_GIR", "STRONG_GIR"):
         return "ğŸŸ¢ GÄ°R"
 
     if watch_candidate(result):
@@ -912,6 +924,63 @@ def watch_candidate(result):
     if result["price5"] is not None and result["price5"] < MAX_WATCH_DROP_5M:
         return False
     return True
+
+def unified_gir_decision(result, momentum=0, final_score=0):
+    """
+    One central promotion engine:
+    - BREAKOUT_GIR: RURU-style accelerating low-cap candidate.
+    - STRONG_GIR: hard-safe candidate with strong score/activity.
+    - IZLE: everything else.
+    Hard safety gates remain upstream and are never bypassed here.
+    """
+    mc = result.get("mc") or 0
+    liq = result.get("liq")
+    top10 = result.get("top10")
+    buys = result.get("buys5", 0) or 0
+    sells = result.get("sells5", 0) or 0
+    vol5 = result.get("vol5") or 0
+    price5 = result.get("price5")
+    score = result.get("score", 0) or 0
+
+    if liq is None or top10 is None or price5 is None:
+        return "IZLE"
+
+    # Never bypass the existing core envelope.
+    if mc < 1000 or mc > 15000 or liq < MIN_LIQUIDITY or top10 > 82:
+        return "IZLE"
+
+    ratio = buys / max(sells, 1)
+
+    # RURU/MUMU style breakout.
+    if (
+        25 <= price5 <= 300
+        and buys >= 30
+        and ratio >= 1.10
+        and vol5 >= 2500
+        and liq / max(mc, 1) >= 0.12
+        and score >= WATCH_SCORE
+    ):
+        return "BREAKOUT_GIR"
+
+    # Strong pre-breakout candidate: score + real activity + buy pressure.
+    if (
+        score >= SIGNAL_SCORE
+        and buys >= 25
+        and ratio >= 1.25
+        and vol5 >= 2000
+        and -8 <= price5 <= 60
+    ):
+        return "STRONG_GIR"
+
+    # Preserve the existing confirmed signal path.
+    try:
+        if strong_signal(result, momentum, final_score):
+            return "STRONG_GIR"
+    except Exception:
+        pass
+
+    return "IZLE"
+
 
 def breakout_signal(result):
     """RURU-style low-cap breakout path. Hard safety is still mandatory upstream."""
@@ -1484,7 +1553,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.35 | total={stats.get('radar',0)} "
+                    f"RADAR V11.36 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
@@ -1517,7 +1586,7 @@ Yeni giris icin uygun degil."""
                     f"> ACTIVITY={stats.get('activity_pass',0)} "
                     f"> TREND={stats.get('trend_pass',0)} "
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
-                    f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} BREAKOUT={stats.get('breakout',0)} "
+                    f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} BREAKOUT={stats.get('breakout',0)} STRONG_GIR={stats.get('strong_gir',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
                     f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"
                     f"H1 SMART: limit={MAX_SIGNAL_DROP_1H:.0f}% fails={stats.get('h1_fail_values',[])}"
@@ -1712,7 +1781,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nSTATE LOCK + RURU BREAKOUT GIR + CENTRAL OUTPUT: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nUNIFIED GIR ENGINE + RURU BREAKOUT + STATE LOCK: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
