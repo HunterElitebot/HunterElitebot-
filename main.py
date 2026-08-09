@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V12.6 RUNNER ACCELERATION FINAL"
+VERSION = "V12.7 RUNNER SIGNAL INTEGRATION FINAL"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -2299,10 +2299,30 @@ def auto_scanner():
                     )
                     # Candidate paths may propose a signal, but V12.1 has ONE
                     # authoritative final gate. No path can bypass it.
-                    _candidate_signal = bool(_confirmed_signal or _calibrated_breakout)
+                    # V12.7: wire the runner engine into the actual proposal path.
+                    # Runner can PROPOSE a signal, but it can never bypass final_gir_gate.
+                    _runner_confirmed, _runner_mc_accel, _runner_vol_accel = v126_track_runner(
+                        ca, result, int(result.get("score", 0) or 0)
+                    )
+                    _runner_signal = bool(
+                        safety_ok
+                        and _runner_confirmed
+                        and seen_count >= TREND_CONFIRM_SCANS
+                        and momentum >= MIN_MOMENTUM_SIGNAL
+                    )
+
+                    _candidate_signal = bool(
+                        _confirmed_signal
+                        or _calibrated_breakout
+                        or _runner_signal
+                    )
+
                     _final_gate_ok, _final_gate_reason = final_gir_gate(
                         result, old_metrics, seen_count, momentum, now
                     )
+                    if _candidate_signal and not _final_gate_ok:
+                        FINAL_GATE_REJECTS[_final_gate_reason] = FINAL_GATE_REJECTS.get(_final_gate_reason, 0) + 1
+
                     signal_ok = bool(_candidate_signal and _final_gate_ok)
 
                     if ca not in cancelled_this_scan and (not watch_ok):
@@ -2328,7 +2348,12 @@ def auto_scanner():
                         final_score = min(100, result["score"] + momentum)
                         age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
 
-                        signal_title = "HUNTERELITE BREAKOUT SIGNAL" if is_breakout else "HUNTERELITE EARLY SIGNAL"
+                        if _runner_signal:
+                            signal_title = "HUNTERELITE RUNNER SIGNAL"
+                        elif is_breakout:
+                            signal_title = "HUNTERELITE BREAKOUT SIGNAL"
+                        else:
+                            signal_title = "HUNTERELITE EARLY SIGNAL"
                         message = f"""{signal_title}
 
 {name} ({symbol})
@@ -2349,6 +2374,8 @@ Final Gate: PASSED
 Risk Score: {result["score"]}/100
 Momentum: +{momentum}
 Trend Teyidi: {seen_count} tarama / ONAYLI
+Runner MC Ivme: {_runner_mc_accel:+.1f}%
+Runner Hacim Ivme: {_runner_vol_accel:+.1f}%
 1sa fiyat: {percent(result["price1h"])}
 6sa fiyat: {percent(result["price6h"])}
 Pair yasi: {age_text}
@@ -2460,7 +2487,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V12.6 | total={stats.get('radar',0)} "
+                    f"RADAR V12.7 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2703,7 +2730,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.6 RUNNER ACCELERATION + FINAL GATE TRACE + HOLDER ROOT FIX: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.7 RUNNER SIGNAL INTEGRATION + FINAL GATE + HARD SAFETY: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
