@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.28 TREND MOMENTUM FIX"
+VERSION = "V11.29 CLEAN DECISION FINAL"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -801,7 +801,7 @@ Mint authority: {authority_text(result["mint"])}
 Freeze authority: {authority_text(result["freeze"])}
 
 ğŸ›¡ Hunter Elite Score: {result["score"]}/100
-ğŸ’ Potansiyel: {potential_label(result)}
+ğŸ’ Potansiyel: IZLE
 
 ğŸ¯ Karar: {result["decision"]}"""
 
@@ -1336,7 +1336,7 @@ Likidite: {money(result["liq"])}
 Top-10: {percent(result["top10"])}
 
 Score: {result["score"]}/100
-ğŸ’ Potansiyel: {potential_label(result)}
+ğŸ’ Potansiyel: IZLE
 
 ğŸŸ¡ KARAR: Ä°ZLE / ERKEN ADAY
 â³ Momentum teyidi bekleniyor."""
@@ -1407,7 +1407,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.28 | total={stats.get('radar',0)} "
+                    f"RADAR V11.29 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
@@ -1635,7 +1635,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE LIQ FALLBACK + FRESH TREND/MOMENTUM CONFIRMATION: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nCLEAN DECISION + TREND/MOMENTUM + LIQ FALLBACK: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
