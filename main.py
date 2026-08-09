@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.31 ASCII MESSAGE FIX"
+VERSION = "V11.32 FULL MESSAGE CLEAN"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -1343,19 +1343,19 @@ Momentum teyidi bekleniyor."""
 
                     if stage == "SIGNAL" and not basic_signal_safe(result):
                         new_stage = "CANCELLED"
-                        message = f"""âš ï¸ HUNTERELITE SÄ°NYAL Ä°PTAL
+                        message = f"""HUNTERELITE SINYAL IPTAL
 
 CA: {ca}
 
-Risk ÅŸartlarÄ± kÃ¶tÃ¼leÅŸti.
+Risk sartlari kotulesti.
 
 Market Cap: {money(result["mc"])}
 Likidite: {money(result["liq"])}
 Top-10: {percent(result["top10"])}
 Score: {result["score"]}/100
 
-ğŸ”´ KARAR: SAT / GÄ°RME
-Yeni giriÅŸ iÃ§in uygun deÄŸil."""
+KARAR: SAT / GIRME
+Yeni giris icin uygun degil."""
 
                     if message:
                         for chat_id in list(signal_chats):
@@ -1407,7 +1407,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.31 | total={stats.get('radar',0)} "
+                    f"RADAR V11.32 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
@@ -1635,7 +1635,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nASCII MESSAGE FIX + DECISION + TREND/MOMENTUM + LIQ FALLBACK: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nFULL MESSAGE CLEAN + DECISION + TREND/MOMENTUM + LIQ FALLBACK: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
