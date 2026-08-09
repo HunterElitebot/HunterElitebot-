@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.53 HOLDER PIPELINE FIX"
+VERSION = "V11.54 SIGNAL DELIVERY FINAL FIX"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -1848,11 +1848,30 @@ def auto_scanner():
                     last_sent = previous.get("last_sent", 0) if previous else 0
                     new_stage, message = stage, None
 
+                    # V11.54 FINAL: compute the central decision in scanner scope.
+                    # V11.53 referenced is_breakout/_watch_decision/_gir_block later
+                    # without defining them here, which could abort exactly when a
+                    # WATCH/SIGNAL message was ready to be delivered.
+                    _central_decision = unified_gir_decision(result, momentum, old_metrics) if safety_ok else "IZLE"
+                    is_breakout = _central_decision == "BREAKOUT_GIR"
+                    is_strong_gir = _central_decision == "STRONG_GIR"
+                    _watch_decision = "ğŸŸ¢ GÄ°R" if _central_decision in ("BREAKOUT_GIR", "STRONG_GIR") else "ğŸŸ¡ Ä°ZLE / ERKEN ADAY"
+                    _gir_block = gir_block_reason(result, int(result.get("score", 0)))
+
                     watch_ok = watch_candidate(result)
-                    signal_ok = (
+                    # Keep hard safety mandatory. Confirmed trend remains the main
+                    # path, while the already-existing calibrated breakout engine
+                    # can promote a hard-safe, high-activity candidate instead of
+                    # being calculated but never used.
+                    _confirmed_signal = (
                         seen_count >= TREND_CONFIRM_SCANS
                         and strong_signal(result, momentum, old_metrics)
                     )
+                    _calibrated_breakout = (
+                        safety_ok
+                        and _central_decision in ("BREAKOUT_GIR", "STRONG_GIR")
+                    )
+                    signal_ok = bool(_confirmed_signal or _calibrated_breakout)
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -1874,8 +1893,8 @@ def auto_scanner():
                         final_score = min(100, result["score"] + momentum)
                         age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
 
-                        signal_title = "HUNTERELITE BREAKOUT SIGNAL" if is_breakout else "{signal_title}"
-                        message = f"""HUNTERELITE EARLY SIGNAL
+                        signal_title = "HUNTERELITE BREAKOUT SIGNAL" if is_breakout else "HUNTERELITE EARLY SIGNAL"
+                        message = f"""{signal_title}
 
 {name} ({symbol})
 CA: {ca}
@@ -2238,7 +2257,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nHOLDER PIPELINE FIX + BIRDEYE TRACE + WATCH RISK + MULTI-FEED: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nSIGNAL DELIVERY FINAL FIX + HOLDER PIPELINE + BIRDEYE TRACE + MULTI-FEED: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
