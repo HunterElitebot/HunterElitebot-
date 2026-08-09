@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.7 PASS PIPELINE"
+VERSION = "V11.8 SAFETY BREAKDOWN"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -93,7 +93,7 @@ radar_stats = {
     "trend_fail": 0,
     "momentum_fail": 0,
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
-    "liq_pass": 0, "holder_pass": 0, "safety_pass": 0,
+    "liq_pass": 0, "holder_pass": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
     "momentum_pass": 0,
 }
@@ -937,7 +937,7 @@ def auto_scanner():
                 "trend_fail": 0,
                 "momentum_fail": 0,
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
-    "liq_pass": 0, "holder_pass": 0, "safety_pass": 0,
+    "liq_pass": 0, "holder_pass": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
     "momentum_pass": 0,
             }
@@ -968,10 +968,19 @@ def auto_scanner():
                     if holder_ok: stats["holder_pass"] += 1
 
                     sig = result.get("signals") or {}
-                    safety_ok = (holder_ok and not sig.get("rug") and not sig.get("honeypot")
-                                 and result.get("mint") is not True
-                                 and result.get("freeze") is not True
-                                 and crash_guard(result))
+
+                    rug_ok = holder_ok and not sig.get("rug") and not sig.get("honeypot")
+                    if rug_ok: stats["rug_ok"] += 1
+
+                    auth_ok = (rug_ok
+                               and result.get("mint") is not True
+                               and result.get("freeze") is not True)
+                    if auth_ok: stats["auth_ok"] += 1
+
+                    crash_ok = auth_ok and crash_guard(result)
+                    if crash_ok: stats["crash_ok"] += 1
+
+                    safety_ok = crash_ok
                     if safety_ok: stats["safety_pass"] += 1
 
                     score_ok = safety_ok and result.get("score", 0) >= WATCH_SCORE
@@ -1145,14 +1154,17 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.7 | total={stats.get('radar',0)} "
+                    f"RADAR V11.8 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
                     f"> LIQ={stats.get('liq_pass',0)} "
-                    f"> HOLDER={stats.get('holder_pass',0)} "
-                    f"> SAFE={stats.get('safety_pass',0)} "
-                    f"> SCORE={stats.get('score_pass',0)} "
+                    f"> HOLDER={stats.get('holder_pass',0)}\n"
+                    f"SAFETY: RUG_OK={stats.get('rug_ok',0)} "
+                    f"> AUTH_OK={stats.get('auth_ok',0)} "
+                    f"> CRASH_OK={stats.get('crash_ok',0)} "
+                    f"> SAFE={stats.get('safety_pass',0)}\n"
+                    f"AFTER SAFE: SCORE={stats.get('score_pass',0)} "
                     f"> ACTIVITY={stats.get('activity_pass',0)} "
                     f"> TREND={stats.get('trend_pass',0)} "
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
@@ -1349,7 +1361,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nPASS PIPELINE + NEW/REPEAT RADAR: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nPASS PIPELINE + SAFETY BREAKDOWN + NEW/REPEAT RADAR: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
