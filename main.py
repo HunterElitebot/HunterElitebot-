@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.42 BIRDEYE COOLDOWN STABLE"
+VERSION = "V11.43 MULTI FEED FAILSAFE"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -71,6 +71,14 @@ birdeye_last_fetch = 0.0
 birdeye_last_error = ""
 birdeye_cooldown_until = 0
 BIRDEYE_COOLDOWN_SECONDS = 900
+
+GECKO_POLL_INTERVAL = 60
+GECKO_PAGES = 3
+GECKO_TARGET = 60
+gecko_cache = []
+gecko_last_fetch = 0
+gecko_last_error = ""
+gecko_lock = threading.Lock()
 birdeye_listing_liq = {}
 
 radar_stats_lock = threading.Lock()
@@ -93,7 +101,7 @@ radar_stats = {
     "updated": 0,
     "radar": 0,
     "processed": 0,
-    "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [], "prepump": 0, "prepump_safe": 0, "src_birdeye": 0, "src_dex": 0, "src_birdeye_stale": 0, "src_dex_stale": 0, "src_birdeye_safe": 0, "src_dex_safe": 0,
+    "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [], "prepump": 0, "prepump_safe": 0, "src_birdeye": 0, "src_gecko": 0, "src_dex": 0, "src_birdeye_stale": 0, "src_gecko_stale": 0, "src_dex_stale": 0, "src_birdeye_safe": 0, "src_gecko_safe": 0, "src_dex_safe": 0,
     "basic_fail": 0,
     "crash_fail": 0,
     "watch": 0,
@@ -417,6 +425,107 @@ def birdeye_new_candidates(force=False):
         print("BIRDEYE FEED ERROR:", err, flush=True)
         return cached
 
+def gecko_new_candidates(force=False):
+    """
+    Keyless GeckoTerminal Solana new-pools fallback.
+    Uses the official public /networks/solana/new_pools route.
+    """
+    global gecko_cache, gecko_last_fetch, gecko_last_error
+
+    now = time.time()
+    with gecko_lock:
+        if not force and gecko_cache and now - gecko_last_fetch < GECKO_POLL_INTERVAL:
+            return list(gecko_cache)
+
+    found, seen = [], set()
+
+    try:
+        for page in range(1, GECKO_PAGES + 1):
+            url = (
+                "https://api.geckoterminal.com/api/v2/networks/solana/new_pools?"
+                + urllib.parse.urlencode({
+                    "include": "base_token",
+                    "page": page,
+                })
+            )
+            payload = get_json(
+                url,
+                timeout=15,
+                headers={"accept": "application/json"},
+            )
+
+            if not isinstance(payload, dict):
+                continue
+
+            included_map = {}
+            included = payload.get("included")
+            if isinstance(included, list):
+                for obj in included:
+                    if not isinstance(obj, dict):
+                        continue
+                    oid = str(obj.get("id") or "")
+                    attrs = obj.get("attributes")
+                    attrs = attrs if isinstance(attrs, dict) else {}
+                    address = str(attrs.get("address") or "").strip()
+                    if oid and address:
+                        included_map[oid] = address
+
+            rows = payload.get("data")
+            if not isinstance(rows, list):
+                continue
+
+            for pool in rows:
+                if not isinstance(pool, dict):
+                    continue
+
+                relationships = pool.get("relationships")
+                relationships = relationships if isinstance(relationships, dict) else {}
+                base_rel = relationships.get("base_token")
+                base_rel = base_rel if isinstance(base_rel, dict) else {}
+                base_data = base_rel.get("data")
+                base_data = base_data if isinstance(base_data, dict) else {}
+                base_id = str(base_data.get("id") or "")
+
+                ca = included_map.get(base_id, "")
+
+                # Public JSON:API token ids may also contain the address.
+                if not ca and "_" in base_id:
+                    maybe = base_id.split("_", 1)[-1].strip()
+                    if SOL_CA.fullmatch(maybe):
+                        ca = maybe
+
+                if ca and SOL_CA.fullmatch(ca) and ca not in seen:
+                    seen.add(ca)
+                    found.append(ca)
+
+        with gecko_lock:
+            merged = []
+            merged_seen = set()
+            for ca in found + list(gecko_cache):
+                if ca not in merged_seen:
+                    merged_seen.add(ca)
+                    merged.append(ca)
+
+            gecko_cache = merged[:80]
+            gecko_last_fetch = now
+            gecko_last_error = ""
+
+        print(
+            f"GECKO FRESH OK: api={len(found)} cache={len(gecko_cache)}",
+            flush=True,
+        )
+        return list(gecko_cache)
+
+    except Exception as e:
+        err = repr(e)
+        with gecko_lock:
+            gecko_last_error = err
+            gecko_last_fetch = now
+            cached = list(gecko_cache)
+        print("GECKO FRESH ERROR:", err, flush=True)
+        return cached
+
+
 def discovery_candidates():
     endpoints = [
         "https://api.dexscreener.com/token-profiles/latest/v1",
@@ -434,6 +543,15 @@ def discovery_candidates():
             birdeye_found.append(ca)
             candidate_sources[ca] = "BIRDEYE"
 
+    # Keyless fresh-pool fallback, especially important while Birdeye is in cooldown.
+    gecko_found, gecko_seen = [], set()
+    for ca in gecko_new_candidates():
+        if not ca or ca in birdeye_seen or ca in gecko_seen:
+            continue
+        gecko_seen.add(ca)
+        gecko_found.append(ca)
+        candidate_sources[ca] = "GECKO"
+
     dex_found, dex_seen = [], set()
     for url in endpoints:
         try:
@@ -444,9 +562,9 @@ def discovery_candidates():
                 if str(item.get("chainId", "")).lower() != "solana":
                     continue
                 ca = str(item.get("tokenAddress", "")).strip()
-                if not (ca and SOL_CA.match(ca)):
+                if not (ca and SOL_CA.fullmatch(ca)):
                     continue
-                if ca in birdeye_seen or ca in dex_seen:
+                if ca in birdeye_seen or ca in gecko_seen or ca in dex_seen:
                     continue
                 dex_seen.add(ca)
                 dex_found.append(ca)
@@ -454,10 +572,27 @@ def discovery_candidates():
         except Exception as e:
             print("DISCOVERY ERROR:", repr(e), flush=True)
 
-    birdeye_selected = birdeye_found[:BIRDEYE_TARGET]
-    remaining = max(0, RADAR_TARGET - len(birdeye_selected))
-    dex_selected = dex_found[:min(DEX_TARGET, remaining)]
-    return (birdeye_selected + dex_selected)[:RADAR_TARGET]
+    selected = []
+
+    # Birdeye has first priority when healthy.
+    for ca in birdeye_found:
+        if len(selected) >= RADAR_TARGET:
+            break
+        selected.append(ca)
+
+    # Gecko fills the fresh-token gap without an API key.
+    for ca in gecko_found:
+        if len(selected) >= RADAR_TARGET:
+            break
+        selected.append(ca)
+
+    # DEX profile/boost feeds only fill any remaining capacity.
+    for ca in dex_found:
+        if len(selected) >= RADAR_TARGET:
+            break
+        selected.append(ca)
+
+    return selected[:RADAR_TARGET]
 
 def birdeye_market_data(ca):
     """Disabled as a hard dependency: fresh listings use listing liquidity + DEX + cache."""
@@ -1257,9 +1392,9 @@ def auto_scanner():
                 "volume_fail": 0,
                 "trend_fail": 0,
                 "momentum_fail": 0,
-                "src_birdeye": 0, "src_dex": 0,
-                "src_birdeye_stale": 0, "src_dex_stale": 0,
-                "src_birdeye_safe": 0, "src_dex_safe": 0,
+                "src_birdeye": 0, "src_gecko": 0, "src_dex": 0,
+                "src_birdeye_stale": 0, "src_gecko_stale": 0, "src_dex_stale": 0,
+                "src_birdeye_safe": 0, "src_gecko_safe": 0, "src_dex_safe": 0,
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
     "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
@@ -1272,11 +1407,13 @@ def auto_scanner():
             for ca in candidates:
                 try:
                     source_name = candidate_sources.get(ca)
-                    if source_name not in ("BIRDEYE", "DEX"):
+                    if source_name not in ("BIRDEYE", "GECKO", "DEX"):
                         source_name = "DEX"
 
                     if source_name == "BIRDEYE":
                         stats["src_birdeye"] += 1
+                    elif source_name == "GECKO":
+                        stats["src_gecko"] += 1
                     else:
                         stats["src_dex"] += 1
 
@@ -1291,8 +1428,12 @@ def auto_scanner():
                     pre_age = pre_metrics.get("age_hours")
                     if pre_age is not None and pre_age > FRESH_PAIR_MAX_HOURS:
                         stats["stale_pair"] += 1
-                        if source_name == "BIRDEYE": stats["src_birdeye_stale"] += 1
-                        else: stats["src_dex_stale"] += 1
+                        if source_name == "BIRDEYE":
+                            stats["src_birdeye_stale"] += 1
+                        elif source_name == "GECKO":
+                            stats["src_gecko_stale"] += 1
+                        else:
+                            stats["src_dex_stale"] += 1
                         continue
 
                     report = rugcheck(ca)
@@ -1609,14 +1750,16 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.42 | total={stats.get('radar',0)} "
+                    f"RADAR V11.43 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
+                    f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
-                    f"SOURCE_ACCOUNTED={stats.get('src_birdeye',0)+stats.get('src_dex',0)}\n"
+                    f"SOURCE_ACCOUNTED={stats.get('src_birdeye',0)+stats.get('src_gecko',0)+stats.get('src_dex',0)}\n"
                     f"BIRDEYE_FEED={'COOLDOWN' if time.time() < birdeye_cooldown_until else ('OK' if not birdeye_last_error else 'ERR')} "
                     f"cache={len(birdeye_cache)} "
                     f"cooldown={max(0, int(birdeye_cooldown_until-time.time()))}s\n"
+                    f"GECKO_FEED={'OK' if not gecko_last_error else 'ERR'} cache={len(gecko_cache)}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
                     f"> LIQ={stats.get('liq_pass',0)} "
@@ -1840,7 +1983,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE COOLDOWN + DEX CONTINUITY + DATA GUARD + ONE-TAP AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nMULTI-FEED: BIRDEYE + GECKO FRESH + DEX + ONE-TAP AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
