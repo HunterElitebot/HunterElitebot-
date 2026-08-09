@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.34 STATE DECISION LOCK"
+VERSION = "V11.35 RURU BREAKOUT GIR"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -92,7 +92,7 @@ radar_stats = {
     "basic_fail": 0,
     "crash_fail": 0,
     "watch": 0,
-    "signal": 0,
+    "signal": 0, "breakout": 0,
     "mc_fail": 0,
     "liq_fail": 0,
     "holder_fail": 0,
@@ -781,7 +781,13 @@ def simple_action(result, momentum=0, previous=None):
     if sells > buys * 1.35 and buys + sells >= 8:
         return "ğŸ”´ SAT / GÄ°RME"
 
-    if strong_signal(result, momentum, previous):
+    is_breakout = breakout_signal(result)
+
+    if is_breakout:
+
+        stats["breakout"] = stats.get("breakout", 0) + 1
+
+    if is_breakout or strong_signal(result, momentum, previous):
         return "ğŸŸ¢ GÄ°R"
 
     if watch_candidate(result):
@@ -906,6 +912,44 @@ def watch_candidate(result):
     if result["price5"] is not None and result["price5"] < MAX_WATCH_DROP_5M:
         return False
     return True
+
+def breakout_signal(result):
+    """RURU-style low-cap breakout path. Hard safety is still mandatory upstream."""
+    mc = result.get("mc") or 0
+    liq = result.get("liq")
+    top10 = result.get("top10")
+    buys = result.get("buys5", 0) or 0
+    sells = result.get("sells5", 0) or 0
+    vol5 = result.get("vol5") or 0
+    price5 = result.get("price5")
+
+    if liq is None or top10 is None or price5 is None:
+        return False
+
+    # Keep the core safety/early-entry envelope.
+    if not (1000 <= mc <= 15000):
+        return False
+    if liq < MIN_LIQUIDITY:
+        return False
+    if top10 > 82:
+        return False
+
+    # RURU-style breakout: already moving hard, but backed by real activity.
+    if not (35 <= price5 <= 300):
+        return False
+    if buys < 35:
+        return False
+    if sells > 0 and buys / sells < 1.10:
+        return False
+    if vol5 < 2500:
+        return False
+
+    # Avoid ultra-thin liquidity relative to market cap.
+    if mc > 0 and liq / mc < 0.12:
+        return False
+
+    return True
+
 
 def strong_signal(result, momentum, previous=None):
     if not basic_signal_safe(result):
@@ -1315,6 +1359,7 @@ def auto_scanner():
                         final_score = min(100, result["score"] + momentum)
                         age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
 
+                        signal_title = "HUNTERELITE BREAKOUT SIGNAL" if is_breakout else "{signal_title}"
                         message = f"""HUNTERELITE EARLY SIGNAL
 
 {name} ({symbol})
@@ -1439,7 +1484,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.34 | total={stats.get('radar',0)} "
+                    f"RADAR V11.35 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
@@ -1472,7 +1517,7 @@ Yeni giris icin uygun degil."""
                     f"> ACTIVITY={stats.get('activity_pass',0)} "
                     f"> TREND={stats.get('trend_pass',0)} "
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
-                    f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} "
+                    f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} BREAKOUT={stats.get('breakout',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
                     f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"
                     f"H1 SMART: limit={MAX_SIGNAL_DROP_1H:.0f}% fails={stats.get('h1_fail_values',[])}"
@@ -1667,7 +1712,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nSTATE DECISION LOCK + CENTRAL OUTPUT + LIQ FALLBACK: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nSTATE LOCK + RURU BREAKOUT GIR + CENTRAL OUTPUT: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
