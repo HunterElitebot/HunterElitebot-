@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.58 CONFIRMED MOMENTUM QUALITY MODE"
+VERSION = "V12.0 CLEAN HARD-RUG GATE"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -31,7 +31,7 @@ MIN_LIQUIDITY = 800
 
 # V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
 WATCH_SCORE = 60
-SIGNAL_SCORE = 70
+SIGNAL_SCORE = 75
 HOLDER_HARD_MAX = 82.0
 SCAN_INTERVAL = 30
 
@@ -41,12 +41,12 @@ SCAN_INTERVAL = 30
 QUALITY_SEND_WATCH = False
 QUALITY_DAILY_SIGNAL_CAP = 20
 QUALITY_SIGNAL_MIN_GAP_SEC = 2700   # 45 minutes
-QUALITY_MIN_SCORE = 65
-QUALITY_MAX_TOP10 = 65.0
-QUALITY_MIN_LIQ = 1500.0
-QUALITY_MIN_BUYS_5M = 20
-QUALITY_MIN_VOL_5M = 2000.0
-QUALITY_MIN_BUY_SELL_RATIO = 1.25
+QUALITY_MIN_SCORE = 70
+QUALITY_MAX_TOP10 = 55.0
+QUALITY_MIN_LIQ = 2000.0
+QUALITY_MIN_BUYS_5M = 30
+QUALITY_MIN_VOL_5M = 3000.0
+QUALITY_MIN_BUY_SELL_RATIO = 1.35
 QUALITY_MIN_PRICE5 = -5.0
 QUALITY_MAX_PRICE5 = 120.0
 
@@ -67,6 +67,42 @@ def quality_signal_slot_available(now):
     if _quality_last_signal_at and now - _quality_last_signal_at < QUALITY_SIGNAL_MIN_GAP_SEC:
         return False
     return True
+
+
+def hard_rug_gate(result):
+    """V12 fail-closed gate: critical security uncertainty can never be outscored."""
+    report = result.get("report")
+    if not isinstance(report, dict):
+        return False, "RUGCHECK_MISSING"
+    top10 = num(result.get("top10"))
+    if top10 is None or bool(result.get("holder_unreliable")):
+        return False, "HOLDER_UNVERIFIED"
+    if top10 < 1.0:
+        return False, "HOLDER_IMPLAUSIBLE"
+    if top10 > QUALITY_MAX_TOP10:
+        return False, "HOLDER_CONCENTRATION"
+    if result.get("mint") is not False:
+        return False, "MINT_UNVERIFIED"
+    if result.get("freeze") is not False:
+        return False, "FREEZE_UNVERIFIED"
+
+    critical_terms = ("honeypot","rug pull","rugpull","bundler","bundle","insider",
+                      "sniper","blacklist","cannot sell","sell blocked")
+    for risk in report.get("risks") or []:
+        if not isinstance(risk, dict):
+            continue
+        combined = f"{risk.get('name','')} {risk.get('description','')} {risk.get('value','')}".lower()
+        level = str(risk.get("level") or risk.get("severity") or "").lower()
+        if level in ("critical","danger","high","error"):
+            return False, "RUG_HIGH_RISK"
+        if any(term in combined for term in critical_terms):
+            if not any(neg in combined for neg in ("no ","not ","none","0%")):
+                return False, "RUG_CRITICAL_TERM"
+    for key in ("honeypot","isHoneypot","rugged","isRugged"):
+        if report.get(key) is True:
+            return False, key.upper()
+    return True, "OK"
+
 
 def quality_signal_gate(result):
     top10 = num(result.get("top10"))
@@ -1222,6 +1258,7 @@ def calculate_score(pair, report):
         "holder_raw_top10": holder_raw_top10,
         "holder_unreliable": holder_unreliable,
         "holder_source": holder_source,
+        "report": report,
         "mint": mint,
         "freeze": freeze,
         "signals": sig,
@@ -2156,6 +2193,11 @@ def auto_scanner():
                         signal_ok = False
 
                     # V11.57 QUALITY MODE: final quality gate + delivery pacing.
+                    # V12 CLEAN: critical rug uncertainty is an absolute block.
+                    _hard_rug_ok, _hard_rug_reason = hard_rug_gate(result)
+                    if signal_ok and not _hard_rug_ok:
+                        signal_ok = False
+
                     if signal_ok and not quality_signal_gate(result):
                         signal_ok = False
                     if signal_ok and not quality_signal_slot_available(now):
@@ -2211,6 +2253,7 @@ Likidite: {money(result["liq"])}
 
 Top-10: {percent(result["top10"])}
 Holder Verify: {result.get("holder_source", "N/A")}
+Hard Rug Gate: PASSED
 
 Risk Score: {result["score"]}/100
 Momentum: +{momentum}
@@ -2221,9 +2264,9 @@ Pair yasi: {age_text}
 Final Score: {final_score}/100
 
 KARAR: GIR
-POTANSIYEL: YUKSEK POTANSIYEL ADAYI
+POTANSIYEL: FILTRELERI GECEN ADAY
 
-UYARI: 5X-10X garanti degildir; Axiom'da son kontrol zorunludur.
+UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur.
 Axiom'da son kontrolunu yap."""
 
                     elif (
@@ -2326,7 +2369,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.58 | total={stats.get('radar',0)} "
+                    f"RADAR V12.0 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2563,7 +2606,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nCONFIRMED MOMENTUM + HOLDER FALLBACK + QUALITY MODE: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12 CLEAN HARD-RUG GATE + CONFIRMED MOMENTUM + VERIFIED HOLDER: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
