@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.17 PRE-PUMP SAFE FIX"
+VERSION = "V11.18 HOLDER BREAKDOWN"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -100,7 +100,7 @@ radar_stats = {
     "trend_fail": 0,
     "momentum_fail": 0,
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
-    "liq_pass": 0, "holder_pass": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
+    "liq_pass": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
     "momentum_pass": 0,
 }
@@ -1000,7 +1000,7 @@ def auto_scanner():
                 "trend_fail": 0,
                 "momentum_fail": 0,
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
-    "liq_pass": 0, "holder_pass": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
+    "liq_pass": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
     "momentum_pass": 0,
             }
@@ -1061,6 +1061,19 @@ def auto_scanner():
                     if liq_ok: stats["liq_pass"] += 1
 
                     top10 = result.get("top10")
+
+                    if liq_ok:
+                        if top10 is None:
+                            stats["holder_missing"] += 1
+                        elif top10 >= 82:
+                            stats["holder_82_plus"] += 1
+                        elif top10 >= 70:
+                            stats["holder_70_82"] += 1
+                        elif top10 >= 60:
+                            stats["holder_60_70"] += 1
+                        elif top10 >= 50:
+                            stats["holder_50_60"] += 1
+
                     holder_ok = liq_ok and (top10 is None or top10 < 82)
                     if holder_ok: stats["holder_pass"] += 1
 
@@ -1269,12 +1282,17 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.17 | total={stats.get('radar',0)} "
+                    f"RADAR V11.18 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
                     f"> LIQ={stats.get('liq_pass',0)} "
                     f"> HOLDER={stats.get('holder_pass',0)}\n"
+                    f"HOLDER BREAKDOWN: missing={stats.get('holder_missing',0)} "
+                    f"50-60={stats.get('holder_50_60',0)} "
+                    f"60-70={stats.get('holder_60_70',0)} "
+                    f"70-82={stats.get('holder_70_82',0)} "
+                    f"82+={stats.get('holder_82_plus',0)}\n"
                     f"SAFETY: RUG_OK={stats.get('rug_ok',0)} "
                     f"> AUTH_OK={stats.get('auth_ok',0)} "
                     f"> CRASH_OK={stats.get('crash_ok',0)} "
@@ -1482,7 +1500,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nNEW-FIRST + CORRECT 5M PRE-PUMP + HARD-SAFE PREPUMP: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nNEW-FIRST + HOLDER BREAKDOWN + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
