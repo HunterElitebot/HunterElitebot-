@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.25 BIRDEYE ROLLING FRESH"
+VERSION = "V11.26 LIQUIDITY BREAKDOWN"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -104,7 +104,7 @@ radar_stats = {
     "trend_fail": 0,
     "momentum_fail": 0,
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
-    "liq_pass": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
+    "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
     "momentum_pass": 0,
 }
@@ -1048,7 +1048,7 @@ def auto_scanner():
                 "src_birdeye_stale": 0, "src_dex_stale": 0,
                 "src_birdeye_safe": 0, "src_dex_safe": 0,
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
-    "liq_pass": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
+    "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
     "momentum_pass": 0,
             }
@@ -1116,7 +1116,20 @@ def auto_scanner():
                     mc_ok = result.get("mc") is not None and MC_MIN <= result["mc"] <= MC_MAX
                     if mc_ok: stats["mc_pass"] += 1
 
-                    liq_ok = mc_ok and result.get("liq") is not None and result["liq"] >= MIN_LIQUIDITY
+                    liq = result.get("liq")
+                    if mc_ok:
+                        if liq is None:
+                            stats["liq_missing"] += 1
+                        elif liq >= 800:
+                            stats["liq_800_plus"] += 1
+                        elif liq >= 500:
+                            stats["liq_500_800"] += 1
+                        elif liq >= 200:
+                            stats["liq_200_500"] += 1
+                        else:
+                            stats["liq_0_200"] += 1
+
+                    liq_ok = mc_ok and liq is not None and liq >= MIN_LIQUIDITY
                     if liq_ok: stats["liq_pass"] += 1
 
                     top10 = result.get("top10")
@@ -1343,7 +1356,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.25 | total={stats.get('radar',0)} "
+                    f"RADAR V11.26 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
@@ -1352,6 +1365,11 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
                     f"> MC={stats.get('mc_pass',0)} "
                     f"> LIQ={stats.get('liq_pass',0)} "
                     f"> HOLDER={stats.get('holder_pass',0)}\n"
+                    f"LIQ BREAKDOWN: missing={stats.get('liq_missing',0)} "
+                    f"$0-200={stats.get('liq_0_200',0)} "
+                    f"$200-500={stats.get('liq_200_500',0)} "
+                    f"$500-800={stats.get('liq_500_800',0)} "
+                    f"$800+={stats.get('liq_800_plus',0)}\n"
                     f"HOLDER BREAKDOWN: missing={stats.get('holder_missing',0)} "
                     f"50-60={stats.get('holder_50_60',0)} "
                     f"60-70={stats.get('holder_60_70',0)} "
@@ -1564,7 +1582,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE ROLLING FRESH + DEX FALLBACK + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE ROLLING FRESH + LIQUIDITY BREAKDOWN + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
