@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.30 TELEGRAM CLEAN FINAL"
+VERSION = "V11.31 ASCII MESSAGE FIX"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -1286,42 +1286,7 @@ def auto_scanner():
                         final_score = min(100, result["score"] + momentum)
                         age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
 
-                        message = f"""ğŸš¨ HUNTERELITE EARLY SIGNAL
-
-{name} ({symbol})
-CA: {ca}
-
-ğŸ’ Market Cap: {money(result["mc"])}
-ğŸ’§ Likidite: {money(result["liq"])}
-
-âš¡ 5dk: {result["buys5"]} buy / {result["sells5"]} sell
-ğŸ’µ 5dk hacim: {money(result["vol5"])}
-ğŸ“ˆ 5dk fiyat: {percent(result["price5"])}
-
-ğŸ‘¥ Top-10: {percent(result["top10"])}
-
-ğŸ›¡ Risk Score: {result["score"]}/100
-ğŸš€ Momentum: +{momentum}
-ğŸ“ˆ 1s fiyat: {percent(result["price1h"])}
-ğŸ“Š 6s fiyat: {percent(result["price6h"])}
-â± Pair yaÅŸÄ±: {age_text}
-ğŸ¯ Final Score: {final_score}/100
-
-ğŸŸ¢ KARAR: GÄ°R
-ğŸ’ POTANSÄ°YEL: {potential_label(result, momentum)}
-
-âš ï¸ "100X / 5Xâ€“10X" etiketi yalnÄ±zca potansiyel sÄ±nÄ±flamasÄ±dÄ±r; garanti deÄŸildir.
-Axiom'da son kontrolÃ¼nÃ¼ yap."""
-
-                    elif (
-                        watch_ok
-                        and stage == "NEW"
-                        and now - last_sent > WATCH_REPEAT_COOLDOWN
-                    ):
-                        new_stage = "WATCH"
-                        stats["watch"] += 1
-
-                        message = f"""ğŸ‘€ HUNTERELITE Ä°ZLE
+                        message = f"""HUNTERELITE EARLY SIGNAL
 
 {name} ({symbol})
 CA: {ca}
@@ -1335,11 +1300,46 @@ Likidite: {money(result["liq"])}
 
 Top-10: {percent(result["top10"])}
 
-Score: {result["score"]}/100
-ğŸ’ Potansiyel: IZLE
+Risk Score: {result["score"]}/100
+Momentum: +{momentum}
+1s fiyat: {percent(result["price1h"])}
+6s fiyat: {percent(result["price6h"])}
+Pair yasi: {age_text}
+Final Score: {final_score}/100
 
-ğŸŸ¡ KARAR: Ä°ZLE / ERKEN ADAY
-â³ Momentum teyidi bekleniyor."""
+KARAR: GIR
+POTANSIYEL: 5X-10X POTANSIYEL ADAYI
+
+UYARI: Potansiyel etiketi garanti degildir.
+Axiom'da son kontrolunu yap."""
+
+                    elif (
+                        watch_ok
+                        and stage == "NEW"
+                        and now - last_sent > WATCH_REPEAT_COOLDOWN
+                    ):
+                        new_stage = "WATCH"
+                        stats["watch"] += 1
+
+                        message = f"""HUNTERELITE IZLE
+
+{name} ({symbol})
+CA: {ca}
+
+Market Cap: {money(result["mc"])}
+Likidite: {money(result["liq"])}
+
+5dk: {result["buys5"]} buy / {result["sells5"]} sell
+5dk hacim: {money(result["vol5"])}
+5dk fiyat: {percent(result["price5"])}
+
+Top-10: {percent(result["top10"])}
+Score: {result["score"]}/100
+
+Potansiyel: IZLE
+KARAR: IZLE / ERKEN ADAY
+
+Momentum teyidi bekleniyor."""
 
                     if stage == "SIGNAL" and not basic_signal_safe(result):
                         new_stage = "CANCELLED"
@@ -1407,7 +1407,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.30 | total={stats.get('radar',0)} "
+                    f"RADAR V11.31 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
@@ -1635,7 +1635,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nTELEGRAM CLEAN + DECISION + TREND/MOMENTUM + LIQ FALLBACK: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nASCII MESSAGE FIX + DECISION + TREND/MOMENTUM + LIQ FALLBACK: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
