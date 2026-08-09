@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.15 H1 SMART CRASH FIX"
+VERSION = "V11.16 NEW-FIRST PRE-PUMP"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -72,8 +72,9 @@ last_diag_send = 0.0
 discovery_seen = {}
 discovery_seen_lock = threading.Lock()
 DISCOVERY_MEMORY_SECONDS = 21600
-RADAR_RAW_LIMIT = 160
+RADAR_RAW_LIMIT = 240
 RADAR_TARGET = 80
+MAX_REPEAT_PER_SCAN = 20
 FRESH_PAIR_MAX_HOURS = 6.0
 
 VIRAL_RADAR_ENABLED = True
@@ -83,7 +84,7 @@ radar_stats = {
     "updated": 0,
     "radar": 0,
     "processed": 0,
-    "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [],
+    "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [], "prepump": 0,
     "basic_fail": 0,
     "crash_fail": 0,
     "watch": 0,
@@ -964,7 +965,10 @@ def auto_scanner():
             with discovery_seen_lock:
                 fresh_cas = [ca for ca in raw_candidates if ca not in discovery_seen]
                 repeat_cas = [ca for ca in raw_candidates if ca in discovery_seen]
-            candidates = (fresh_cas + repeat_cas)[:RADAR_TARGET]
+            # V11.16: reserve most radar capacity for never-seen tokens.
+            # Repeats are capped so they cannot crowd out fresh discovery.
+            repeat_slots = min(MAX_REPEAT_PER_SCAN, max(0, RADAR_TARGET - len(fresh_cas)))
+            candidates = (fresh_cas[:RADAR_TARGET] + repeat_cas[:repeat_slots])[:RADAR_TARGET]
 
             unique_new, repeat = 0, 0
             with discovery_seen_lock:
@@ -980,7 +984,7 @@ def auto_scanner():
             stats = {
                 "radar": len(candidates),
                 "processed": 0,
-                "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [],
+                "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [], "prepump": 0,
                 "basic_fail": 0,
                 "crash_fail": 0,
                 "watch": 0,
@@ -1026,6 +1030,20 @@ def auto_scanner():
                     viral_score, viral_label = market_viral_score(result)
                     result["viral_score"] = viral_score
                     result["viral_label"] = viral_label
+
+                    # PRE-PUMP candidate: rising activity without an already-vertical 5m move.
+                    p5 = float(result.get("price5m") or 0)
+                    buys5 = float(result.get("buys5") or 0)
+                    sells5 = float(result.get("sells5") or 0)
+                    vol5 = float(result.get("vol5") or 0)
+                    if (viral_label in ("RISING", "HOT")
+                            and buys5 > sells5
+                            and vol5 >= 500
+                            and -8 <= p5 <= 25):
+                        stats["prepump"] += 1
+                        result["prepump"] = True
+                    else:
+                        result["prepump"] = False
                     if viral_label == "HOT":
                         stats["viral_hot"] += 1
                     elif viral_label == "RISING":
@@ -1248,7 +1266,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.15 | total={stats.get('radar',0)} "
+                    f"RADAR V11.16 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
@@ -1268,7 +1286,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
-                    f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)}\n"
+                    f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)}\n"
                     f"H1 SMART: limit={MAX_SIGNAL_DROP_1H:.0f}% fails={stats.get('h1_fail_values',[])}"
                 )
                 for chat_id in list(signal_chats):
@@ -1461,7 +1479,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nFRESH RADAR + SMART H1 CRASH + MARKET VIRAL AI SCORE: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nNEW-FIRST DISCOVERY + PRE-PUMP MOMENTUM + SMART CRASH: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
