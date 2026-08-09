@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.6 EARLY ENTRY"
+VERSION = "V11.7 PASS PIPELINE"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -69,6 +69,9 @@ birdeye_last_error = ""
 
 radar_stats_lock = threading.Lock()
 last_diag_send = 0.0
+discovery_seen = {}
+discovery_seen_lock = threading.Lock()
+DISCOVERY_MEMORY_SECONDS = 21600
 
 radar_stats = {
     "updated": 0,
@@ -89,6 +92,10 @@ radar_stats = {
     "volume_fail": 0,
     "trend_fail": 0,
     "momentum_fail": 0,
+    "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
+    "liq_pass": 0, "holder_pass": 0, "safety_pass": 0,
+    "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
+    "momentum_pass": 0,
 }
 
 def load_state():
@@ -899,6 +906,18 @@ def auto_scanner():
                 continue
 
             candidates = discovery_candidates()
+            scan_now = time.time()
+            unique_new, repeat = 0, 0
+            with discovery_seen_lock:
+                for k in [k for k, ts in discovery_seen.items()
+                          if scan_now - ts > DISCOVERY_MEMORY_SECONDS]:
+                    discovery_seen.pop(k, None)
+                for candidate_ca in candidates:
+                    if candidate_ca in discovery_seen:
+                        repeat += 1
+                    else:
+                        unique_new += 1
+                    discovery_seen[candidate_ca] = scan_now
             stats = {
                 "radar": len(candidates),
                 "processed": 0,
@@ -917,7 +936,14 @@ def auto_scanner():
                 "volume_fail": 0,
                 "trend_fail": 0,
                 "momentum_fail": 0,
+    "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
+    "liq_pass": 0, "holder_pass": 0, "safety_pass": 0,
+    "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
+    "momentum_pass": 0,
             }
+
+            stats["unique_new"] = unique_new
+            stats["repeat"] = repeat
 
             for ca in candidates:
                 try:
@@ -929,6 +955,33 @@ def auto_scanner():
                     report = rugcheck(ca)
                     result = calculate_score(pair, report)
                     stats["processed"] += 1
+                    stats["pair_pass"] += 1
+
+                    mc_ok = result.get("mc") is not None and MC_MIN <= result["mc"] <= MC_MAX
+                    if mc_ok: stats["mc_pass"] += 1
+
+                    liq_ok = mc_ok and result.get("liq") is not None and result["liq"] >= MIN_LIQUIDITY
+                    if liq_ok: stats["liq_pass"] += 1
+
+                    top10 = result.get("top10")
+                    holder_ok = liq_ok and (top10 is None or top10 < 82)
+                    if holder_ok: stats["holder_pass"] += 1
+
+                    sig = result.get("signals") or {}
+                    safety_ok = (holder_ok and not sig.get("rug") and not sig.get("honeypot")
+                                 and result.get("mint") is not True
+                                 and result.get("freeze") is not True
+                                 and crash_guard(result))
+                    if safety_ok: stats["safety_pass"] += 1
+
+                    score_ok = safety_ok and result.get("score", 0) >= WATCH_SCORE
+                    if score_ok: stats["score_pass"] += 1
+
+                    vol5 = result.get("vol5")
+                    activity_ok = (score_ok
+                                   and result.get("buys5", 0) >= WATCH_MIN_BUYS_5M
+                                   and (vol5 is None or vol5 >= WATCH_MIN_VOL_5M))
+                    if activity_ok: stats["activity_pass"] += 1
 
                     now = time.time()
                     with state_lock:
@@ -936,6 +989,10 @@ def auto_scanner():
 
                     old_metrics = previous.get("metrics") if previous else None
                     momentum = momentum_score(old_metrics, result)
+                    trend_ok = activity_ok and old_metrics is not None and trend_confirmed(old_metrics, result)
+                    if trend_ok: stats["trend_pass"] += 1
+                    momentum_ok = trend_ok and momentum >= MIN_MOMENTUM_SIGNAL
+                    if momentum_ok: stats["momentum_pass"] += 1
                     seen_count = (previous.get("seen_count", 0) + 1) if previous else 1
                     stage = previous.get("stage", "NEW") if previous else "NEW"
                     last_sent = previous.get("last_sent", 0) if previous else 0
@@ -1088,13 +1145,19 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR ALIVE | candidates={stats.get('radar',0)} "
-                    f"processed={stats.get('processed',0)} pair_missing={stats.get('pair_yok',0)} "
-                    f"mc={stats.get('mc_fail',0)} liq={stats.get('liq_fail',0)} "
-                    f"holder={stats.get('holder_fail',0)} auth={stats.get('authority_fail',0)} "
-                    f"rug={stats.get('rug_fail',0)} score={stats.get('score_fail',0)} "
-                    f"buy={stats.get('buy_fail',0)} vol={stats.get('volume_fail',0)} "
-                    f"trend={stats.get('trend_fail',0)} momentum={stats.get('momentum_fail',0)}"
+                    f"RADAR V11.7 | total={stats.get('radar',0)} "
+                    f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
+                    f"PIPELINE: pair={stats.get('pair_pass',0)} "
+                    f"> MC={stats.get('mc_pass',0)} "
+                    f"> LIQ={stats.get('liq_pass',0)} "
+                    f"> HOLDER={stats.get('holder_pass',0)} "
+                    f"> SAFE={stats.get('safety_pass',0)} "
+                    f"> SCORE={stats.get('score_pass',0)} "
+                    f"> ACTIVITY={stats.get('activity_pass',0)} "
+                    f"> TREND={stats.get('trend_pass',0)} "
+                    f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
+                    f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} "
+                    f"pair_missing={stats.get('pair_yok',0)}"
                 )
                 for chat_id in list(signal_chats):
                     send(chat_id, diag)
@@ -1286,7 +1349,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nPASS PIPELINE + NEW/REPEAT RADAR: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
