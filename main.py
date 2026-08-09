@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.9 CRASH FIX DIAGNOSTIC"
+VERSION = "V11.10 FINAL PIPELINE FIX"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -744,6 +744,7 @@ def basic_signal_safe(result):
     return True
 
 def crash_guard(result):
+    """Age-aware crash guard for early-entry tokens."""
     if not result:
         return False
 
@@ -752,16 +753,30 @@ def crash_guard(result):
     p24 = result.get("price24h")
     age = result.get("age_hours")
 
+    if age is not None and age > MAX_PAIR_AGE_HOURS:
+        return False
+
+    # Very young pairs: do not reject them using 6h/24h windows.
+    if age is None or age < 1.0:
+        return not (p1 is not None and p1 < MAX_SIGNAL_DROP_1H)
+
+    # 1-6h pairs: use 1h + 6h only.
+    if age < 6.0:
+        if p1 is not None and p1 < MAX_SIGNAL_DROP_1H:
+            return False
+        if p6 is not None and p6 < MAX_CRASH_DROP_6H:
+            return False
+        return True
+
+    # 6-12h pairs: all available windows are meaningful.
     if p1 is not None and p1 < MAX_SIGNAL_DROP_1H:
         return False
     if p6 is not None and p6 < MAX_CRASH_DROP_6H:
         return False
     if p24 is not None and p24 < MAX_CRASH_DROP_24H:
         return False
-    if age is not None and age > MAX_PAIR_AGE_HOURS:
-        return False
-
     return True
+
 
 def trend_confirmed(previous, current):
     if not previous or not current:
@@ -891,7 +906,7 @@ def filter_fail_reason(result, previous=None, momentum=0, for_signal=False):
 
 
 def crash_guard_detail(result):
-    """Return (ok, reason) without changing the existing hard-safety policy."""
+    """Age-aware crash diagnostics matching crash_guard()."""
     if not result:
         return False, "unknown"
 
@@ -900,15 +915,27 @@ def crash_guard_detail(result):
     p24 = result.get("price24h")
     age = result.get("age_hours")
 
-    if p1 is not None and p1 < MAX_SIGNAL_DROP_1H:
-        return False, "h1"
-    if p6 is not None and p6 < MAX_CRASH_DROP_6H:
-        return False, "h6"
-    if p24 is not None and p24 < MAX_CRASH_DROP_24H:
-        return False, "h24"
     if age is not None and age > MAX_PAIR_AGE_HOURS:
-        return False, "age"
+        return False, "age_fail"
 
+    if age is None or age < 1.0:
+        if p1 is not None and p1 < MAX_SIGNAL_DROP_1H:
+            return False, "h1_fail"
+        return True, "ok"
+
+    if age < 6.0:
+        if p1 is not None and p1 < MAX_SIGNAL_DROP_1H:
+            return False, "h1_fail"
+        if p6 is not None and p6 < MAX_CRASH_DROP_6H:
+            return False, "h6_fail"
+        return True, "ok"
+
+    if p1 is not None and p1 < MAX_SIGNAL_DROP_1H:
+        return False, "h1_fail"
+    if p6 is not None and p6 < MAX_CRASH_DROP_6H:
+        return False, "h6_fail"
+    if p24 is not None and p24 < MAX_CRASH_DROP_24H:
+        return False, "h24_fail"
     return True, "ok"
 
 
@@ -1189,7 +1216,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.9 | total={stats.get('radar',0)} "
+                    f"RADAR V11.10 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
@@ -1400,7 +1427,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nPASS PIPELINE + SAFETY BREAKDOWN + CRASH BREAKDOWN: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nFINAL PIPELINE + AGE-AWARE CRASH GUARD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
