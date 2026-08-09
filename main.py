@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.18 HOLDER BREAKDOWN"
+VERSION = "V11.19 REAL FRESH DISCOVERY"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -29,8 +29,9 @@ WATCH_SCORE = 47
 SIGNAL_SCORE = 60
 SCAN_INTERVAL = 30
 
-BIRDEYE_POLL_INTERVAL = 300
+BIRDEYE_POLL_INTERVAL = 180
 BIRDEYE_LIMIT = 20
+BIRDEYE_PAGES = 3
 BIRDEYE_NEW_LISTING = "https://public-api.birdeye.so/defi/v2/tokens/new_listing"
 
 WATCH_REPEAT_COOLDOWN = 21600
@@ -232,6 +233,31 @@ def extract_birdeye_items(payload):
             return value
     return []
 
+def birdeye_item_time(item):
+    """Best-effort listing timestamp for Birdeye pagination."""
+    if not isinstance(item, dict):
+        return None
+    for key in (
+        "liquidityAddedAt",
+        "liquidity_added_at",
+        "listedAt",
+        "listed_at",
+        "createdAt",
+        "created_at",
+        "timestamp",
+        "time",
+    ):
+        value = num(item.get(key))
+        if value is None:
+            continue
+        # Normalize millisecond timestamps when encountered.
+        if value > 10_000_000_000:
+            value = value / 1000.0
+        if value > 0:
+            return int(value)
+    return None
+
+
 def birdeye_new_candidates(force=False):
     global birdeye_cache, birdeye_last_fetch, birdeye_last_error
 
@@ -243,40 +269,75 @@ def birdeye_new_candidates(force=False):
         if not force and birdeye_cache and now - birdeye_last_fetch < BIRDEYE_POLL_INTERVAL:
             return list(birdeye_cache)
 
-    params = urllib.parse.urlencode({
-        "limit": BIRDEYE_LIMIT,
-        "meme_platform_enabled": "true",
-    })
-    url = f"{BIRDEYE_NEW_LISTING}?{params}"
-
     try:
-        payload = get_json(
-            url,
-            timeout=15,
-            headers={"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"},
-        )
-
         found, seen = [], set()
-        for item in extract_birdeye_items(payload):
-            if not isinstance(item, dict):
-                continue
-            ca = ""
-            for key in ("address", "token_address", "tokenAddress", "mint", "mintAddress"):
-                raw = item.get(key)
-                if raw:
-                    ca = str(raw).strip()
-                    break
-            if ca and SOL_CA.match(ca) and ca not in seen:
-                seen.add(ca)
-                found.append(ca)
+        time_to = None
+        pages_fetched = 0
 
+        for page in range(BIRDEYE_PAGES):
+            params_obj = {
+                "limit": BIRDEYE_LIMIT,
+                "meme_platform_enabled": "true",
+            }
+            if time_to is not None:
+                params_obj["time_to"] = int(time_to)
+
+            url = f"{BIRDEYE_NEW_LISTING}?{urllib.parse.urlencode(params_obj)}"
+            payload = get_json(
+                url,
+                timeout=15,
+                headers={"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"},
+            )
+
+            items = extract_birdeye_items(payload)
+            if not items:
+                break
+
+            pages_fetched += 1
+            page_times = []
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+
+                ts = birdeye_item_time(item)
+                if ts:
+                    page_times.append(ts)
+
+                ca = ""
+                for key in ("address", "token_address", "tokenAddress", "mint", "mintAddress"):
+                    raw = item.get(key)
+                    if raw:
+                        ca = str(raw).strip()
+                        break
+
+                if ca and SOL_CA.match(ca) and ca not in seen:
+                    seen.add(ca)
+                    found.append(ca)
+
+            # Move the next page boundary just before the oldest item in this page.
+            # If the API response doesn't expose a timestamp, stop safely instead of
+            # re-requesting the same page.
+            if page < BIRDEYE_PAGES - 1:
+                if not page_times:
+                    break
+                next_time_to = min(page_times) - 1
+                if time_to is not None and next_time_to >= time_to:
+                    break
+                time_to = next_time_to
+
+        cache_limit = BIRDEYE_LIMIT * BIRDEYE_PAGES
         with birdeye_lock:
-            birdeye_cache = found[:BIRDEYE_LIMIT]
+            birdeye_cache = found[:cache_limit]
             birdeye_last_fetch = now
             birdeye_last_error = ""
 
-        print(f"BIRDEYE RADAR: {len(found)} new Solana candidates", flush=True)
-        return found[:BIRDEYE_LIMIT]
+        print(
+            f"BIRDEYE REAL FRESH: {len(found[:cache_limit])} candidates "
+            f"from {pages_fetched} page(s)",
+            flush=True,
+        )
+        return found[:cache_limit]
 
     except urllib.error.HTTPError as e:
         try:
@@ -298,6 +359,7 @@ def birdeye_new_candidates(force=False):
 
     with birdeye_lock:
         return list(birdeye_cache)
+
 
 def discovery_candidates():
     endpoints = [
@@ -1282,7 +1344,7 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.18 | total={stats.get('radar',0)} "
+                    f"RADAR V11.19 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
@@ -1494,13 +1556,13 @@ def startup_notify():
 Early Hunter: ACTIVE
 Scan: {SCAN_INTERVAL} sec
 Radar: {"BIRDEYE + DEX" if BIRDEYE_API_KEY else "DEX ONLY"}
-Birdeye: {"CONNECTED" if BIRDEYE_API_KEY else "KEY MISSING"}
+Birdeye: {"CONNECTED" if BIRDEYE_API_KEY else "KEY MISSING"}\nBirdeye Fresh: up to 60 listings / 180 sec
 Watch Score: {WATCH_SCORE}
 Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nNEW-FIRST + HOLDER BREAKDOWN + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nREAL FRESH BIRDEYE + HOLDER BREAKDOWN + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
