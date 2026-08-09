@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.19 REAL FRESH DISCOVERY"
+VERSION = "V11.20 SOURCE SPLIT"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -71,6 +71,7 @@ birdeye_last_error = ""
 radar_stats_lock = threading.Lock()
 last_diag_send = 0.0
 discovery_seen = {}
+candidate_sources = {}
 discovery_seen_lock = threading.Lock()
 DISCOVERY_MEMORY_SECONDS = 21600
 RADAR_RAW_LIMIT = 240
@@ -85,7 +86,7 @@ radar_stats = {
     "updated": 0,
     "radar": 0,
     "processed": 0,
-    "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [], "prepump": 0, "prepump_safe": 0,
+    "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [], "prepump": 0, "prepump_safe": 0, "src_birdeye": 0, "src_dex": 0, "src_birdeye_stale": 0, "src_dex_stale": 0, "src_birdeye_safe": 0, "src_dex_safe": 0,
     "basic_fail": 0,
     "crash_fail": 0,
     "watch": 0,
@@ -368,29 +369,22 @@ def discovery_candidates():
         "https://api.dexscreener.com/token-boosts/top/v1",
         "https://api.dexscreener.com/community-takeovers/latest/v1",
     ]
-
     found, seen = [], set()
-
+    candidate_sources.clear()
     for ca in birdeye_new_candidates():
-        if ca not in seen:
-            seen.add(ca)
-            found.append(ca)
-
+        if ca: candidate_sources[ca] = "BIRDEYE"
+        if ca not in seen: seen.add(ca); found.append(ca)
     for url in endpoints:
         try:
             data = get_json(url)
-            if not isinstance(data, list):
-                continue
+            if not isinstance(data, list): continue
             for item in data:
-                if str(item.get("chainId", "")).lower() != "solana":
-                    continue
+                if str(item.get("chainId", "")).lower() != "solana": continue
                 ca = str(item.get("tokenAddress", "")).strip()
-                if ca and SOL_CA.match(ca) and ca not in seen:
-                    seen.add(ca)
-                    found.append(ca)
-        except Exception as e:
-            print("DISCOVERY ERROR:", repr(e), flush=True)
-
+                if ca and SOL_CA.match(ca):
+                    candidate_sources.setdefault(ca, "DEX")
+                    if ca not in seen: seen.add(ca); found.append(ca)
+        except Exception as e: print("DISCOVERY ERROR:", repr(e), flush=True)
     return found[:RADAR_RAW_LIMIT]
 
 def rugcheck(ca):
@@ -1072,6 +1066,9 @@ def auto_scanner():
 
             for ca in candidates:
                 try:
+                    source_name = candidate_sources.get(ca, "DEX")
+                    if source_name == "BIRDEYE": stats["src_birdeye"] += 1
+                    else: stats["src_dex"] += 1
                     pair = best_pair(ca)
                     if pair is None:
                         stats["pair_yok"] += 1
@@ -1083,6 +1080,8 @@ def auto_scanner():
                     pre_age = pre_metrics.get("age_hours")
                     if pre_age is not None and pre_age > FRESH_PAIR_MAX_HOURS:
                         stats["stale_pair"] += 1
+                        if source_name == "BIRDEYE": stats["src_birdeye_stale"] += 1
+                        else: stats["src_dex_stale"] += 1
                         continue
 
                     report = rugcheck(ca)
@@ -1170,6 +1169,8 @@ def auto_scanner():
                     safety_ok = crash_ok
                     if safety_ok:
                         stats["safety_pass"] += 1
+                        if source_name == "BIRDEYE": stats["src_birdeye_safe"] += 1
+                        else: stats["src_dex_safe"] += 1
                         if result.get("prepump"):
                             stats["prepump_safe"] += 1
 
@@ -1344,8 +1345,10 @@ Yeni giriÅŸ iÃ§in uygun deÄŸil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.19 | total={stats.get('radar',0)} "
+                    f"RADAR V11.20 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
+                    f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
+                    f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
                     f"> LIQ={stats.get('liq_pass',0)} "
@@ -1562,7 +1565,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nREAL FRESH BIRDEYE + HOLDER BREAKDOWN + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nSOURCE SPLIT + REAL FRESH + SAFE PRE-PUMP: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
