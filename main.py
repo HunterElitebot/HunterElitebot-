@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.46 HOLDER SOURCE DIAGNOSTIC"
+VERSION = "V11.49 EARLY BREAKOUT CALIBRATION"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -635,28 +635,51 @@ def rugcheck(ca):
         return None
 
 def holder_pct(holder):
+    """
+    RugCheck topHolders[].pct is already expressed in percentage points.
+    Example: pct=0.867 means 0.867%, NOT 86.7%.
+    """
     if not isinstance(holder, dict):
         return None
-    for key in ("pct", "percentage", "percent", "ownershipPercentage"):
-        value = holder.get(key)
-        if value is None:
-            continue
-        value = num(value)
-        if value is None:
-            continue
+
+    # RugCheck's canonical field: already percent units.
+    value = num(holder.get("pct"))
+    if value is not None:
+        return value if 0 <= value <= 100 else None
+
+    # Defensive fallbacks for alternate schemas.
+    for key in ("percentage", "percent"):
+        value = num(holder.get(key))
+        if value is not None:
+            return value if 0 <= value <= 100 else None
+
+    # Only this explicitly named ownership field may be fractional in some APIs.
+    value = num(holder.get("ownershipPercentage"))
+    if value is not None:
         if 0 <= value <= 1:
             value *= 100
-        return value
+        return value if 0 <= value <= 100 else None
+
     return None
 
 def holders(report):
     if not report:
         return None, None, None
+
     items = report.get("topHolders") or report.get("top_holders") or []
     values = [v for v in (holder_pct(i) for i in items) if v is not None]
     if not values:
         return None, None, None
-    return values[0], sum(values[:5]), sum(values[:10])
+
+    top1 = values[0]
+    top5 = sum(values[:5])
+    top10 = sum(values[:10])
+
+    # Percentages above 100 are invalid data, not a reason to invent a safe value.
+    if top1 > 100 or top5 > 100.5 or top10 > 100.5:
+        return None, None, None
+
+    return top1, top5, top10
 
 def authority(report, key):
     if not report:
@@ -1140,6 +1163,18 @@ def gir_block_reason(result, score):
     if price5 < -8:
         return "PRICE5_WEAK"
     if price5 > 180:
+        ratio = buys5 / max(sells5, 1)
+        if (
+            score >= 70
+            and buys5 >= 100
+            and ratio >= 1.20
+            and vol5 >= 10000
+            and top10 <= 70
+            and liq / max((num(result.get("mc")) or 1), 1) >= 0.20
+        ):
+            return "EXTREME_BREAKOUT_READY"
+        if score < 70:
+            return "EXTENDED_MOVE_SCORE_LT70"
         return "PRICE5_TOO_HIGH"
     if sells5 > buys5 * 1.15:
         return "SELL_PRESSURE"
@@ -1177,6 +1212,33 @@ def unified_gir_decision(result, momentum=0, final_score=0):
         return "IZLE"
 
     ratio = buys / max(sells, 1)
+
+    # Extreme breakout: very fast move is not auto-rejected if quality is exceptional.
+    if (
+        180 < price5 <= 600
+        and score >= 70
+        and buys >= 100
+        and ratio >= 1.20
+        and vol5 >= 10000
+        and top10 <= 70
+        and liq / max(mc, 1) >= 0.20
+    ):
+        return "BREAKOUT_GIR"
+
+    # V11.49 early breakout calibration:
+    # Score 60-69 may GIR only while the move is still early (<=180%).
+    # This avoids promoting already-extended +180% moves on score alone.
+    if (
+        25 <= price5 <= 180
+        and 60 <= score < 70
+        and buys >= 20
+        and ratio >= 1.20
+        and vol5 >= 1500
+        and top10 <= 70
+        and liq >= 800
+        and liq / max(mc, 1) >= 0.15
+    ):
+        return "BREAKOUT_GIR"
 
     # RURU/MUMU style breakout.
     if (
@@ -1616,7 +1678,7 @@ def auto_scanner():
                         elif top10 >= 50:
                             stats["holder_50_60"] += 1
 
-                    holder_ok = liq_ok and (top10 is None or top10 < 82)
+                    holder_ok = liq_ok and top10 is not None and top10 < 82
                     if holder_ok: stats["holder_pass"] += 1
 
                     sig = result.get("signals") or {}
@@ -1832,7 +1894,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.46 | total={stats.get('radar',0)} "
+                    f"RADAR V11.49 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2067,7 +2129,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nMULTI-FEED + GECKO LIQ + HOLDER SOURCE DIAGNOSTIC + GIR BLOCK: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nEARLY BREAKOUT 60-69 + EXTREME >=70 + HOLDER FIX + MULTI-FEED: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
