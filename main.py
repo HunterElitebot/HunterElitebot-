@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.41 BIRDEYE RESTORE"
+VERSION = "V11.42 BIRDEYE COOLDOWN STABLE"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -31,7 +31,7 @@ WATCH_SCORE = 47
 SIGNAL_SCORE = 60
 SCAN_INTERVAL = 30
 
-BIRDEYE_POLL_INTERVAL = 60
+BIRDEYE_POLL_INTERVAL = 180
 BIRDEYE_LIMIT = 20
 BIRDEYE_PAGES = 1
 BIRDEYE_NEW_LISTING = "https://public-api.birdeye.so/defi/v2/tokens/new_listing"
@@ -69,6 +69,8 @@ birdeye_lock = threading.Lock()
 birdeye_cache = []
 birdeye_last_fetch = 0.0
 birdeye_last_error = ""
+birdeye_cooldown_until = 0
+BIRDEYE_COOLDOWN_SECONDS = 900
 birdeye_listing_liq = {}
 
 radar_stats_lock = threading.Lock()
@@ -303,19 +305,24 @@ def birdeye_item_time(item):
 
 
 def birdeye_new_candidates(force=False):
-    global birdeye_cache, birdeye_last_fetch, birdeye_last_error, birdeye_listing_liq
+    global birdeye_cache, birdeye_last_fetch, birdeye_last_error
+    global birdeye_listing_liq, birdeye_cooldown_until
 
     if not BIRDEYE_API_KEY:
         return []
 
     now = time.time()
+
+    # If Birdeye quota/rate limit was exceeded, do not hammer the API.
+    if now < birdeye_cooldown_until:
+        with birdeye_lock:
+            return list(birdeye_cache)
+
     with birdeye_lock:
         if not force and birdeye_cache and now - birdeye_last_fetch < BIRDEYE_POLL_INTERVAL:
             return list(birdeye_cache)
 
     try:
-        # Keep the official request minimal. time_to is optional and is deliberately
-        # omitted because this exact form previously worked reliably for this bot.
         url = (
             f"{BIRDEYE_NEW_LISTING}?"
             + urllib.parse.urlencode({
@@ -323,6 +330,7 @@ def birdeye_new_candidates(force=False):
                 "meme_platform_enabled": "true",
             })
         )
+
         payload = get_json(
             url,
             timeout=15,
@@ -332,8 +340,8 @@ def birdeye_new_candidates(force=False):
                 "accept": "application/json",
             },
         )
-        items = extract_birdeye_items(payload)
 
+        items = extract_birdeye_items(payload)
         newest = []
         listing_liq = {}
 
@@ -341,15 +349,12 @@ def birdeye_new_candidates(force=False):
             if not isinstance(item, dict):
                 continue
 
-            # Birdeye new-listing token address.
             ca = str(item.get("address") or "").strip()
             if not (ca and SOL_CA.fullmatch(ca)):
                 continue
 
             newest.append(ca)
 
-            # New-listing response includes liquidity. Use it directly instead of
-            # hammering token market-data endpoints for newly indexed pump tokens.
             liq = num(item.get("liquidity"))
             if liq is not None and liq > 0:
                 listing_liq[ca] = liq
@@ -367,9 +372,10 @@ def birdeye_new_candidates(force=False):
             birdeye_listing_liq.update(listing_liq)
             birdeye_last_fetch = now
             birdeye_last_error = ""
+            birdeye_cooldown_until = 0
 
         print(
-            f"BIRDEYE RESTORED: api={len(newest)} cache={len(birdeye_cache)} "
+            f"BIRDEYE COOLDOWN FEED OK: api={len(newest)} cache={len(birdeye_cache)} "
             f"listing_liq={len(listing_liq)}",
             flush=True,
         )
@@ -380,12 +386,25 @@ def birdeye_new_candidates(force=False):
             body = e.read().decode("utf-8", errors="replace")
         except Exception:
             body = ""
+
         err = f"HTTP {e.code}: {body[:300]}"
+        err_lower = err.lower()
+
+        # Birdeye returns "exceeded" when quota/rate allowance is exhausted.
+        if "exceeded" in err_lower or e.code == 429:
+            birdeye_cooldown_until = now + BIRDEYE_COOLDOWN_SECONDS
+            print(
+                f"BIRDEYE COOLDOWN ACTIVE: {BIRDEYE_COOLDOWN_SECONDS}s | {err}",
+                flush=True,
+            )
+        else:
+            print("BIRDEYE FEED ERROR:", err, flush=True)
+
         with birdeye_lock:
             birdeye_last_error = err
             birdeye_last_fetch = now
             cached = list(birdeye_cache)
-        print("BIRDEYE RESTORE ERROR:", err, flush=True)
+
         return cached
 
     except Exception as e:
@@ -394,7 +413,8 @@ def birdeye_new_candidates(force=False):
             birdeye_last_error = err
             birdeye_last_fetch = now
             cached = list(birdeye_cache)
-        print("BIRDEYE RESTORE ERROR:", err, flush=True)
+
+        print("BIRDEYE FEED ERROR:", err, flush=True)
         return cached
 
 def discovery_candidates():
@@ -1589,12 +1609,14 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.41 | total={stats.get('radar',0)} "
+                    f"RADAR V11.42 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
                     f"SOURCE_ACCOUNTED={stats.get('src_birdeye',0)+stats.get('src_dex',0)}\n"
-                    f"BIRDEYE_FEED={'OK' if not birdeye_last_error else 'ERR'} cache={len(birdeye_cache)}\n"
+                    f"BIRDEYE_FEED={'COOLDOWN' if time.time() < birdeye_cooldown_until else ('OK' if not birdeye_last_error else 'ERR')} "
+                    f"cache={len(birdeye_cache)} "
+                    f"cooldown={max(0, int(birdeye_cooldown_until-time.time()))}s\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
                     f"> LIQ={stats.get('liq_pass',0)} "
@@ -1818,7 +1840,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE RESTORED + LISTING LIQ + DATA GUARD + ONE-TAP AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nBIRDEYE COOLDOWN + DEX CONTINUITY + DATA GUARD + ONE-TAP AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
