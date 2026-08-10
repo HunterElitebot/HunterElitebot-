@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.7 FAST PROPOSAL BRIDGE"
+VERSION = "V13.7.1 FAST GATE FIX"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -208,7 +208,7 @@ def fast_launch_hard_gate(result, old_metrics, seen_count, momentum, now):
         return False, "ALREADY_SIGNALLED"
 
     liq = num(result.get("liq"))
-    if liq is None or liq < MIN_LIQ:
+    if liq is None or liq < MIN_LIQUIDITY:
         return False, "FAST_LIQ_LOW"
 
     p5 = num(result.get("price5"))
@@ -2810,7 +2810,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.7 | total={stats.get('radar',0)} "
+                    f"RADAR V13.7.1 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -3055,7 +3055,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.7 FAST PROPOSAL BRIDGE + DUAL LANE + FRESH RADAR + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.7.1 FAST GATE FIX + DUAL LANE + FRESH RADAR + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
