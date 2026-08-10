@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE FINAL 3K-12K ALL-IN-ONE"
+VERSION = "HUNTERELITE FINAL FAST GIR 3K-12K"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -53,6 +53,21 @@ WATCH_MIN_BUYS_5M = 5
 WATCH_MIN_VOL_5M = 500
 WATCH_MIN_BUY_SELL_RATIO = 1.10
 AUTO_MAX_PRICE5 = 180.0
+
+# FAST GIR lane: bypass 2-scan trend wait only when the first scan is already strong.
+FAST_GIR_MIN_SCORE = 60
+FAST_GIR_MIN_BUYS_5M = 15
+FAST_GIR_MIN_BUY_SELL_RATIO = 1.20
+FAST_GIR_MIN_VOL_5M = 2000
+FAST_GIR_MIN_LIQ_MC_RATIO = 0.18
+FAST_GIR_MIN_PRICE5 = -5.0
+FAST_GIR_MAX_PRICE5 = 160.0
+
+FAST_GUCLU_MIN_SCORE = 70
+FAST_GUCLU_MIN_BUYS_5M = 30
+FAST_GUCLU_MIN_BUY_SELL_RATIO = 1.30
+FAST_GUCLU_MIN_VOL_5M = 4000
+FAST_GUCLU_MIN_LIQ_MC_RATIO = 0.22
 
 SIGNAL_MIN_BUYS_5M = 8
 SIGNAL_MIN_BUY_SELL_RATIO = 1.10
@@ -1360,6 +1375,59 @@ def liquidity_drain_detail(previous, current):
     return True, drop_pct, "OK"
 
 
+def fast_gir_decision(result):
+    """Single-scan runner lane. Returns None / GIR / GUCLU GIR."""
+    if not result:
+        return None
+    if not basic_signal_safe(result):
+        return None
+    if not crash_guard(result):
+        return None
+
+    sig = result.get("signals") or {}
+    if sig.get("rug") or sig.get("honeypot"):
+        return None
+    if result.get("mint") is True or result.get("freeze") is True:
+        return None
+
+    mc = num(result.get("mc"))
+    liq = num(result.get("liq"))
+    price5 = num(result.get("price5"))
+    vol5 = num(result.get("vol5"), 0) or 0
+    buys = safe_int(result.get("buys5"))
+    sells = safe_int(result.get("sells5"))
+    score = safe_int(result.get("score"))
+
+    if mc is None or liq is None or mc <= 0:
+        return None
+
+    ratio = buys / max(sells, 1)
+    liq_mc = liq / mc
+
+    if price5 is not None and not (FAST_GIR_MIN_PRICE5 <= price5 <= FAST_GIR_MAX_PRICE5):
+        return None
+
+    if (
+        score >= FAST_GUCLU_MIN_SCORE
+        and buys >= FAST_GUCLU_MIN_BUYS_5M
+        and ratio >= FAST_GUCLU_MIN_BUY_SELL_RATIO
+        and vol5 >= FAST_GUCLU_MIN_VOL_5M
+        and liq_mc >= FAST_GUCLU_MIN_LIQ_MC_RATIO
+    ):
+        return "GUCLU GIR"
+
+    if (
+        score >= FAST_GIR_MIN_SCORE
+        and buys >= FAST_GIR_MIN_BUYS_5M
+        and ratio >= FAST_GIR_MIN_BUY_SELL_RATIO
+        and vol5 >= FAST_GIR_MIN_VOL_5M
+        and liq_mc >= FAST_GIR_MIN_LIQ_MC_RATIO
+    ):
+        return "GIR"
+
+    return None
+
+
 def strong_signal(result, momentum, previous=None):
     if not basic_signal_safe(result):
         return False
@@ -1781,9 +1849,13 @@ def auto_scanner():
                     new_stage, message = stage, None
 
                     watch_ok = watch_candidate(result)
+                    fast_decision = fast_gir_decision(result)
                     signal_ok = (
-                        seen_count >= TREND_CONFIRM_SCANS
-                        and strong_signal(result, momentum, old_metrics)
+                        fast_decision is not None
+                        or (
+                            seen_count >= TREND_CONFIRM_SCANS
+                            and strong_signal(result, momentum, old_metrics)
+                        )
                     )
 
                     if ca not in cancelled_this_scan and (not watch_ok):
@@ -1803,6 +1875,8 @@ def auto_scanner():
                     ):
                         new_stage = "SIGNAL"
                         stats["signal"] += 1
+                        if fast_decision is not None:
+                            stats["fast_signal"] = stats.get("fast_signal", 0) + 1
                         final_score = min(100, result["score"] + momentum)
                         age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
 
@@ -1824,7 +1898,12 @@ def auto_scanner():
                             and (price5_now is None or -5 <= price5_now <= 160)
                         )
 
-                        karar_label = "GUCLU GIR" if guclu_gir else "GIR"
+                        if fast_decision == "GUCLU GIR":
+                            karar_label = "GUCLU GIR"
+                        elif fast_decision == "GIR":
+                            karar_label = "GIR"
+                        else:
+                            karar_label = "GUCLU GIR" if guclu_gir else "GIR"
 
                         message = f"""HUNTERELITE {karar_label}
 
@@ -1847,6 +1926,7 @@ Momentum: +{momentum}
 Final Score: {final_score}/100
 
 KARAR: {karar_label}
+SINYAL YOLU: {"FAST / TEK TARAMA" if fast_decision else "RURU / TREND TEYITLI"}
 
 UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur."""
 
@@ -1986,7 +2066,7 @@ Yeni giris icin uygun degil."""
                     f"> ACTIVITY={stats.get('activity_pass',0)} "
                     f"> TREND={stats.get('trend_pass',0)} "
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
-                    f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} "
+                    f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} FAST={stats.get('fast_signal',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
                     f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"
                     f"H1 SMART: limit={MAX_SIGNAL_DROP_1H:.0f}% fails={stats.get('h1_fail_values',[])}"
@@ -2183,7 +2263,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL DIRECT GIR: CLICKABLE CA + AXIOM BUTTON + NO IZLE + GIR/GUCLU GIR + MANUAL: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL FAST GIR: RURU TREND + FAST TEK-TARAMA GIR/GUCLU GIR + NO IZLE + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
