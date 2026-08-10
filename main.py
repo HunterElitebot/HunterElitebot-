@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.12.1 FRESH COUNTER FIX"
+VERSION = "V13.12.2 TRUE 2TICK CONFIRM"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -2622,7 +2622,10 @@ def auto_scanner():
                     signal_ok = False
                     _fast_launch_ok = False
 
-                    if _raw_signal_ok:
+                    # V13.12.2: a previously armed FAST candidate MUST be
+                    # evaluated on the next scan even if it no longer re-satisfies
+                    # every first-tick acceleration threshold.
+                    if _raw_signal_ok or isinstance(_fast_pending, dict):
                         _mc_now = num(result.get("mc")) or 0
                         _vol_now = num(result.get("vol5")) or 0
                         _price_now = num(result.get("price5"))
@@ -2673,37 +2676,66 @@ def auto_scanner():
                                 _far = "FAST_ACCEL_OTHER"
                             FINAL_GATE_REJECTS[_far] = FINAL_GATE_REJECTS.get(_far, 0) + 1
 
-                        if _fast_launch_ok:
-                            # V13.10 FAST 2-TICK: do not trade a one-scan spike.
-                            # Arm on first FAST scan, signal only if the next scan still
-                            # shows healthy continuation.
-                            if isinstance(_fast_pending, dict):
-                                _fp_mc = num(_fast_pending.get("mc")) or 0
-                                _fp_time = num(_fast_pending.get("time")) or 0
-                                _fp_age = max(0.0, now - _fp_time)
-                                _fast_continue_ok = bool(
-                                    20.0 <= _fp_age <= 120.0
-                                    and _fp_mc > 0
-                                    and _mc_now >= _fp_mc * 1.01
-                                    and _bs_now >= 1.30
-                                    and _rvol_now is not None and _rvol_now >= 5.0
-                                    and _price_now is not None and _price_now >= 2.0
-                                )
-                                if _fast_continue_ok:
-                                    signal_ok = True
-                                    FINAL_GATE_REJECTS["FAST_LAUNCH_CONFIRMED"] = FINAL_GATE_REJECTS.get("FAST_LAUNCH_CONFIRMED", 0) + 1
-                                else:
-                                    FINAL_GATE_REJECTS["FAST_2TICK_FAIL"] = FINAL_GATE_REJECTS.get("FAST_2TICK_FAIL", 0) + 1
-                                    _next_fast_pending = {
-                                        "mc": _mc_now, "time": now,
-                                        "bs": _bs_now, "vol5": _vol_now,
-                                    }
+                        # TRUE 2-TICK confirmation:
+                        # First tick requires the strict FAST acceleration signature.
+                        # Second tick requires continuation + hard safety, not a second
+                        # copy of every first-tick acceleration threshold.
+                        if isinstance(_fast_pending, dict):
+                            _fp_mc = num(_fast_pending.get("mc")) or 0
+                            _fp_time = num(_fast_pending.get("time")) or 0
+                            _fp_age = max(0.0, now - _fp_time)
+
+                            _pending_rug_ok, _pending_rug_reason = hard_rug_gate(result)
+                            _pending_top10 = num(result.get("top10"))
+                            _pending_liq = num(result.get("liq"))
+                            _pending_hard_ok = bool(
+                                safety_ok
+                                and _pending_rug_ok
+                                and _pending_top10 is not None
+                                and 1.0 <= _pending_top10 <= QUALITY_MAX_TOP10
+                                and _pending_liq is not None and _pending_liq >= MIN_LIQUIDITY
+                                and result.get("ca") not in SIGNALLED_CAS
+                                and (_rmc_now is None or _rmc_now > -3.0)
+                                and (_price_now is None or _price_now <= 50.0)
+                                and _bs_now >= 1.20
+                            )
+
+                            _fast_continue_ok = bool(
+                                _pending_hard_ok
+                                and 20.0 <= _fp_age <= 120.0
+                                and _fp_mc > 0
+                                and _mc_now >= _fp_mc * 1.01
+                                and _bs_now >= 1.30
+                                and _rvol_now is not None and _rvol_now >= 5.0
+                                and _price_now is not None and _price_now >= 2.0
+                            )
+
+                            if _fast_continue_ok:
+                                signal_ok = True
+                                FINAL_GATE_REJECTS["FAST_LAUNCH_CONFIRMED"] = FINAL_GATE_REJECTS.get("FAST_LAUNCH_CONFIRMED", 0) + 1
                             else:
-                                FINAL_GATE_REJECTS["FAST_2TICK_WAIT"] = FINAL_GATE_REJECTS.get("FAST_2TICK_WAIT", 0) + 1
-                                _next_fast_pending = {
-                                    "mc": _mc_now, "time": now,
-                                    "bs": _bs_now, "vol5": _vol_now,
-                                }
+                                if not _pending_hard_ok:
+                                    _f2 = "FAST_2TICK_HARD_FAIL"
+                                elif not (20.0 <= _fp_age <= 120.0):
+                                    _f2 = "FAST_2TICK_TIME_FAIL"
+                                elif _fp_mc <= 0 or _mc_now < _fp_mc * 1.01:
+                                    _f2 = "FAST_2TICK_MC_FAIL"
+                                elif _bs_now < 1.30:
+                                    _f2 = "FAST_2TICK_BUYSELL_FAIL"
+                                elif _rvol_now is None or _rvol_now < 5.0:
+                                    _f2 = "FAST_2TICK_VOLUME_FAIL"
+                                else:
+                                    _f2 = "FAST_2TICK_PRICE_FAIL"
+                                FINAL_GATE_REJECTS[_f2] = FINAL_GATE_REJECTS.get(_f2, 0) + 1
+                                # Do not endlessly re-arm a failed second tick.
+                                _next_fast_pending = None
+
+                        elif _fast_launch_ok:
+                            FINAL_GATE_REJECTS["FAST_2TICK_WAIT"] = FINAL_GATE_REJECTS.get("FAST_2TICK_WAIT", 0) + 1
+                            _next_fast_pending = {
+                                "mc": _mc_now, "time": now,
+                                "bs": _bs_now, "vol5": _vol_now,
+                            }
 
                         elif _normal_lane_ok and isinstance(_launch_pending, dict):
                             _mc_arm = num(_launch_pending.get("mc")) or 0
@@ -2935,7 +2967,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.12.1 | total={stats.get('radar',0)} "
+                    f"RADAR V13.12.2 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -3181,7 +3213,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.12.1 FRESH COUNTER FIX + BATCH PAIR DATA + FAST 2-TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.12.2 TRUE 2TICK CONFIRM + FRESH DISCOVERY + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
