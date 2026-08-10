@@ -52,7 +52,7 @@ SCAN_INTERVAL = 30
 # V11.57 QUALITY MODE
 # Target: roughly 10-20 high-quality alerts/day when the market provides them.
 # Never force a quota by lowering safety/quality.
-QUALITY_SEND_WATCH = False
+QUALITY_SEND_WATCH = True
 QUALITY_DAILY_SIGNAL_CAP = 20
 QUALITY_SIGNAL_MIN_GAP_SEC = 2700   # 45 minutes
 QUALITY_MIN_SCORE = 70
@@ -2782,7 +2782,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.10 DIAGNOSTIC + HARD SAFETY: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.10 DIAGNOSTIC + WATCH ON + HARD SAFETY: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
