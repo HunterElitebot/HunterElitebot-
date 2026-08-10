@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.10 TRADE READY"
+VERSION = "V13.11 BALANCED FAST ENTRY"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -2620,7 +2620,7 @@ def auto_scanner():
                         # while keeping all hard safety/no-repeat/dump protections.
                         _fast_launch_ok = bool(
                             _fast_hard_ok
-                            and _score_now >= 74
+                            and _score_now >= 72
                             and _rmc_now is not None and _rmc_now >= 5.0
                             and _rvol_now is not None and _rvol_now >= 10.0
                             and _bs_now >= 1.35
@@ -2632,7 +2632,7 @@ def auto_scanner():
                         # V13.8 diagnostics: show exactly why a hard-safe FAST
                         # candidate failed the acceleration signature.
                         if _fast_candidate and _fast_hard_ok and not _fast_launch_ok:
-                            if _score_now < 74:
+                            if _score_now < 72:
                                 _far = "FAST_ACCEL_SCORE"
                             elif _rmc_now is None or _rmc_now < 5.0:
                                 _far = "FAST_ACCEL_MC"
@@ -2912,7 +2912,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.10 | total={stats.get('radar',0)} "
+                    f"RADAR V13.11 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2961,6 +2961,7 @@ Yeni giris icin uygun degil."""
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
                     f"FINAL GATE REJECTS: {dict(sorted(FINAL_GATE_REJECTS.items(), key=lambda x: -x[1])[:6])}\n"
                     f"QUALITY DETAILS: {dict(sorted(QUALITY_GATE_DETAILS.items(), key=lambda x: -x[1]))}\n"
+                    f"FAST DETAILS: {dict(sorted({k:v for k,v in FINAL_GATE_REJECTS.items() if k.startswith('FAST_')}.items(), key=lambda x: -x[1])[:10])}\n"
                     f"WATCH DIAG: {dict(sorted(WATCH_DIAG.items(), key=lambda x: -x[1]))}\n"
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} BREAKOUT={stats.get('breakout',0)} STRONG_GIR={stats.get('strong_gir',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)} batch_pairs={len(DEX_BATCH_PAIR_CACHE)}\n"
@@ -3157,7 +3158,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.10 TRADE READY + BATCH PAIR DATA + FAST 2-TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.11 BALANCED FAST ENTRY + BATCH PAIR DATA + FAST 2-TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
