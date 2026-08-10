@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE RURU STORY HUNTER V3 + NEGATIVE PRICE GUARD"
+VERSION = "HUNTERELITE RURU STORY HUNTER V3 + RURU DIAG"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -1772,6 +1772,59 @@ def continuation_confirm(result, previous, elapsed_seconds=30):
     return True, f"VOL+{vol_delta:.0f} BUY+{buy_delta} SELL+{sell_delta} FLOW={fresh_flow:.2f} MC={mc_pct:+.1f}%"
 
 
+def ruru_signal_diagnostic(result, momentum, previous=None, seen_count=0):
+    """
+    Explain the last RURU gate without changing any thresholds.
+    Returns (would_pass, reason).
+    """
+    if previous is None:
+        return False, "NO_PREVIOUS"
+
+    if seen_count < TREND_CONFIRM_SCANS:
+        return False, f"TREND {seen_count}/{TREND_CONFIRM_SCANS}"
+
+    liq_safe, liq_drop_pct, liq_level = liquidity_drain_detail(previous, result)
+    if not liq_safe:
+        return False, f"LIQ_DRAIN {liq_drop_pct:.1f}%"
+
+    if not basic_signal_safe(result):
+        return False, "BASIC_SAFE_FAIL"
+
+    if not crash_guard(result):
+        return False, "CRASH_GUARD"
+
+    if momentum < MIN_MOMENTUM_SIGNAL:
+        return False, f"MOMENTUM {momentum}<{MIN_MOMENTUM_SIGNAL}"
+
+    score = safe_int(result.get("score"))
+    if score + momentum < SIGNAL_SCORE:
+        return False, f"FINAL_SCORE {score + momentum}<{SIGNAL_SCORE}"
+
+    buys = safe_int(result.get("buys5"))
+    sells = safe_int(result.get("sells5"))
+    ratio = buys / max(sells, 1)
+    vol5 = num(result.get("vol5"), 0) or 0
+    price5 = num(result.get("price5"))
+
+    if buys < SIGNAL_MIN_BUYS_5M:
+        return False, f"BUY {buys}<{SIGNAL_MIN_BUYS_5M}"
+
+    if ratio < SIGNAL_MIN_BUY_SELL_RATIO:
+        return False, f"RATIO {ratio:.2f}<{SIGNAL_MIN_BUY_SELL_RATIO:.2f}"
+
+    if vol5 < SIGNAL_MIN_VOL_5M:
+        return False, f"VOL {vol5:.0f}<{SIGNAL_MIN_VOL_5M:.0f}"
+
+    if price5 is not None and price5 > AUTO_MAX_PRICE5:
+        return False, f"LATE_PUMP {price5:+.1f}%"
+
+    price_allow_gir, price_allow_guclu, price_detail = negative_price_guard(result, previous)
+    if not price_allow_gir:
+        return False, f"PRICE_GUARD {price_detail}"
+
+    return True, f"PASS mom={momentum} final={score + momentum} ratio={ratio:.2f} vol={vol5:.0f}"
+
+
 def strong_signal(result, momentum, previous=None):
     if not basic_signal_safe(result):
         return False
@@ -2219,6 +2272,19 @@ def auto_scanner():
                         and strong_signal(result, momentum, old_metrics)
                     )
 
+                    # RURU diagnostic only; does not alter decisions.
+                    if seen_count >= TREND_CONFIRM_SCANS or momentum >= MIN_MOMENTUM_SIGNAL:
+                        ruru_pass_dbg, ruru_reason_dbg = ruru_signal_diagnostic(
+                            result, momentum, old_metrics, seen_count
+                        )
+                        stats["ruru_candidate"] = stats.get("ruru_candidate", 0) + 1
+                        if not ruru_pass_dbg:
+                            samples = stats.setdefault("ruru_block_samples", [])
+                            if len(samples) < 6:
+                                base_dbg = pair.get("baseToken") or {}
+                                sym_dbg = base_dbg.get("symbol") or base_dbg.get("name") or ca[:6]
+                                samples.append(f"{sym_dbg}:{ruru_reason_dbg}")
+
                     # High-pump FAST candidates must never bypass continuation through
                     # the RURU lane on the same scan.
                     high_pump = (num(result.get("price5")) or 0) >= CONT_HIGH_PUMP_PRICE5
@@ -2464,9 +2530,10 @@ Yeni giris icin uygun degil."""
                     f"> TREND={stats.get('trend_pass',0)} "
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} FAST={stats.get('fast_signal',0)} "
-                    f"FAST_CAND={stats.get('fast_candidate',0)} "
+                    f"FAST_CAND={stats.get('fast_candidate',0)} RURU_CAND={stats.get('ruru_candidate',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
                     f"FAST BLOCK: {stats.get('fast_block_samples',[])}\n"
+                    f"RURU BLOCK: {stats.get('ruru_block_samples',[])}\n"
                     f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"
                     f"H1 SMART: limit={MAX_SIGNAL_DROP_1H:.0f}% fails={stats.get('h1_fail_values',[])}"
                 )
@@ -2662,7 +2729,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nRURU STORY HUNTER V3 + NEGATIVE PRICE GUARD: Story cannot override active downside. RURU/CONTINUATION + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nRURU STORY HUNTER V3 + RURU DIAG: Story + Negative Price Guard + FAST Continuation + RURU block diagnostics + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
