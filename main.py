@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE FINAL RURU STORY RUNNER FIXED"
+VERSION = "HUNTERELITE FINAL DELIVERY"
 
 # FINAL PRODUCTION POLICY
 # - Story/narrative is a catalyst, never a safety bypass.
@@ -2189,12 +2189,34 @@ def auto_scanner():
                         previous = token_states.get(ca)
 
                     old_metrics = previous.get("metrics") if previous else None
+                    history = list(previous.get("history", [])) if previous else []
+
+                    # Use the strongest recent comparable observation for trend/momentum.
+                    # Radar membership can rotate between scans, so relying on only one
+                    # immediately previous sample can leave TREND permanently at zero.
+                    trend_refs = [x for x in history[-4:] if isinstance(x, dict)]
+                    if old_metrics:
+                        trend_refs.append(old_metrics)
+
+                    trend_reference = old_metrics
+                    if trend_refs:
+                        # Prefer a recent lower/equal MC baseline; otherwise latest sample.
+                        comparable = [
+                            x for x in trend_refs
+                            if (x.get("mc") or 0) > 0 and (result.get("mc") or 0) >= (x.get("mc") or 0)
+                        ]
+                        trend_reference = comparable[-1] if comparable else trend_refs[-1]
+
                     liq_drain_safe, liq_drop_pct, liq_drain_level = liquidity_drain_detail(old_metrics, result)
                     result["liq_drop_pct"] = liq_drop_pct
                     result["liq_drain_level"] = liq_drain_level
 
-                    momentum = momentum_score(old_metrics, result)
-                    trend_ok = activity_passed and old_metrics is not None and trend_confirmed(old_metrics, result)
+                    momentum = momentum_score(trend_reference, result)
+                    trend_ok = (
+                        activity_passed
+                        and trend_reference is not None
+                        and trend_confirmed(trend_reference, result)
+                    )
                     if trend_ok: stats["trend_pass"] += 1
                     momentum_ok = trend_ok and momentum >= MIN_MOMENTUM_SIGNAL
                     if momentum_ok: stats["momentum_pass"] += 1
@@ -2224,7 +2246,7 @@ def auto_scanner():
                     # RURU confirmed path remains intact.
                     ruru_signal = (
                         seen_count >= TREND_CONFIRM_SCANS
-                        and strong_signal(result, momentum, old_metrics)
+                        and strong_signal(result, momentum, trend_reference)
                     )
 
                     # High-pump FAST candidates must never bypass continuation through
@@ -2240,10 +2262,10 @@ def auto_scanner():
                     signal_ok = (fast_decision is not None) or ruru_signal
 
                     if ca not in cancelled_this_scan and (not watch_ok):
-                        reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
+                        reason = filter_fail_reason(result, trend_reference, momentum, for_signal=False)
                         stats[reason] = stats.get(reason, 0) + 1
                     elif seen_count >= TREND_CONFIRM_SCANS and not signal_ok:
-                        reason = filter_fail_reason(result, old_metrics, momentum, for_signal=True)
+                        reason = filter_fail_reason(result, trend_reference, momentum, for_signal=True)
                         stats[reason] = stats.get(reason, 0) + 1
 
                     base = pair.get("baseToken") or {}
@@ -2391,8 +2413,12 @@ Yeni giris icin uygun degil."""
                         last_sent = now
 
                     with state_lock:
+                        new_history = list(history[-3:])
+                        if old_metrics:
+                            new_history.append(old_metrics)
                         token_states[ca] = {
                             "metrics": result,
+                            "history": new_history[-4:],
                             "stage": new_stage,
                             "last_sent": last_sent,
                             "seen": now,
@@ -2668,7 +2694,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE FIXED: RURU TREND STATE + STORY HUNTER + VOLUME CONTINUATION + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL DELIVERY: MULTI-SCAN RURU TREND + STORY HUNTER + VOLUME CONTINUATION + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
