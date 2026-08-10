@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.2 SMART MC TOLERANCE"
+VERSION = "V13.4 FAST LAUNCH ACCELERATION"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -852,6 +852,22 @@ def birdeye_new_candidates(force=False):
 
     except Exception as e:
         err = repr(e)
+        err_lower = err.lower()
+
+        # V13.3: some quota failures can arrive wrapped instead of as HTTPError.
+        # Treat any explicit quota/rate-limit signature as a real cooldown event.
+        if (
+            "compute units usage limit exceeded" in err_lower
+            or "usage limit exceeded" in err_lower
+            or "rate limit" in err_lower
+            or "http error 429" in err_lower
+        ):
+            birdeye_cooldown_until = now + BIRDEYE_COOLDOWN_SECONDS
+            print(
+                f"BIRDEYE COOLDOWN ACTIVE (WRAPPED): {BIRDEYE_COOLDOWN_SECONDS}s | {err}",
+                flush=True,
+            )
+
         with birdeye_lock:
             birdeye_last_error = err
             birdeye_last_fetch = now
@@ -2414,7 +2430,104 @@ def auto_scanner():
                     if _candidate_signal and not _final_gate_ok:
                         FINAL_GATE_REJECTS[_final_gate_reason] = FINAL_GATE_REJECTS.get(_final_gate_reason, 0) + 1
 
-                    signal_ok = bool(_candidate_signal and _final_gate_ok)
+                    # V13.3 CONFIRMED LAUNCH
+                    # A token that passes all normal gates is only ARMED on the first
+                    # qualifying scan. GÄ°R is sent on a later scan only if the move
+                    # is still continuing instead of immediately fading.
+                    _raw_signal_ok = bool(_candidate_signal and _final_gate_ok)
+                    _launch_pending = previous.get("launch_pending") if previous else None
+                    _next_launch_pending = None
+                    signal_ok = False
+                    _fast_launch_ok = False
+
+                    if _raw_signal_ok:
+                        _mc_now = num(result.get("mc")) or 0
+                        _vol_now = num(result.get("vol5")) or 0
+                        _price_now = num(result.get("price5"))
+                        _buys_now = num(result.get("buys5")) or 0
+                        _sells_now = num(result.get("sells5")) or 0
+                        _bs_now = _buys_now / max(_sells_now, 1)
+                        _age_now = num(result.get("age_hours"))
+                        _score_now = num(result.get("score")) or 0
+                        _rmc_now = num(result.get("runner_mc_accel"))
+                        _rvol_now = num(result.get("runner_vol_accel"))
+
+                        # V13.4 FAST LAUNCH lane:
+                        # Catch the successful-pump pattern early, before waiting
+                        # another full confirmation scan, but only under unusually
+                        # strong simultaneous capital + volume + buy-pressure expansion.
+                        _fast_launch_ok = bool(
+                            _score_now >= 75
+                            and _rmc_now is not None and _rmc_now >= 12.0
+                            and _rvol_now is not None and _rvol_now >= 25.0
+                            and _bs_now >= 1.60
+                            and _vol_now >= 4000.0
+                            and _price_now is not None and 5.0 <= _price_now <= 35.0
+                            and (_age_now is None or _age_now <= 0.25)
+                        )
+
+                        if _fast_launch_ok:
+                            signal_ok = True
+                            FINAL_GATE_REJECTS["FAST_LAUNCH_CONFIRMED"] = FINAL_GATE_REJECTS.get("FAST_LAUNCH_CONFIRMED", 0) + 1
+
+                        elif isinstance(_launch_pending, dict):
+                            _mc_arm = num(_launch_pending.get("mc")) or 0
+                            _vol_arm = num(_launch_pending.get("vol5")) or 0
+                            _price_arm = num(_launch_pending.get("price5"))
+                            _arm_time = num(_launch_pending.get("time")) or 0
+                            _arm_age = max(0.0, now - _arm_time)
+
+                            _launch_mc_ok = bool(
+                                _mc_arm > 0 and _mc_now >= _mc_arm * 1.015
+                            )
+                            _launch_buy_ok = bool(_bs_now >= 1.45)
+                            _launch_vol_ok = bool(
+                                _vol_arm <= 0 or _vol_now >= _vol_arm * 0.95
+                            )
+                            _launch_price_ok = bool(
+                                _price_now is not None
+                                and _price_now >= 3.0
+                                and (_price_arm is None or _price_now >= _price_arm - 2.0)
+                            )
+                            _launch_time_ok = bool(20.0 <= _arm_age <= 180.0)
+
+                            if (
+                                _launch_mc_ok
+                                and _launch_buy_ok
+                                and _launch_vol_ok
+                                and _launch_price_ok
+                                and _launch_time_ok
+                            ):
+                                signal_ok = True
+                                FINAL_GATE_REJECTS["LAUNCH_CONFIRMED"] = FINAL_GATE_REJECTS.get("LAUNCH_CONFIRMED", 0) + 1
+                            else:
+                                if not _launch_time_ok:
+                                    _launch_reason = "LAUNCH_TIME"
+                                elif not _launch_mc_ok:
+                                    _launch_reason = "LAUNCH_MC_WEAK"
+                                elif not _launch_buy_ok:
+                                    _launch_reason = "LAUNCH_BUY_WEAK"
+                                elif not _launch_vol_ok:
+                                    _launch_reason = "LAUNCH_VOLUME_FADE"
+                                else:
+                                    _launch_reason = "LAUNCH_PRICE_WEAK"
+                                FINAL_GATE_REJECTS[_launch_reason] = FINAL_GATE_REJECTS.get(_launch_reason, 0) + 1
+
+                                # Re-arm from the latest healthy qualifying scan.
+                                _next_launch_pending = {
+                                    "mc": _mc_now,
+                                    "vol5": _vol_now,
+                                    "price5": _price_now,
+                                    "time": now,
+                                }
+                        else:
+                            FINAL_GATE_REJECTS["LAUNCH_CONFIRM_WAIT"] = FINAL_GATE_REJECTS.get("LAUNCH_CONFIRM_WAIT", 0) + 1
+                            _next_launch_pending = {
+                                "mc": _mc_now,
+                                "vol5": _vol_now,
+                                "price5": _price_now,
+                                "time": now,
+                            }
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -2440,12 +2553,11 @@ def auto_scanner():
                         final_score = min(100, result["score"] + momentum)
                         age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
 
-                        if _runner_signal:
-                            signal_title = "HUNTERELITE RUNNER SIGNAL"
-                        elif is_breakout:
-                            signal_title = "HUNTERELITE BREAKOUT SIGNAL"
-                        else:
-                            signal_title = "HUNTERELITE EARLY SIGNAL"
+                        signal_title = (
+                            "HUNTERELITE FAST LAUNCH GIR"
+                            if _fast_launch_ok
+                            else "HUNTERELITE CONFIRMED LAUNCH GIR"
+                        )
                         message = f"""{signal_title}
 
 {name} ({symbol})
@@ -2466,6 +2578,7 @@ Final Gate: PASSED
 Risk Score: {result["score"]}/100
 Momentum: +{momentum}
 Trend Teyidi: {seen_count} tarama / ONAYLI
+Launch Teyidi: {"FAST ACCELERATION / ONAYLI" if _fast_launch_ok else "2 asama / DEVAM HAREKETI ONAYLI"}
 Runner MC Ivme: {_runner_mc_accel:+.1f}%
 Runner Hacim Ivme: {_runner_vol_accel:+.1f}%
 1sa fiyat: {percent(result["price1h"])}
@@ -2545,6 +2658,7 @@ Yeni giris icin uygun degil."""
                             "seen": now,
                             "seen_count": seen_count,
                             "ever_signalled": bool(ca in SIGNALLED_CAS or (previous and previous.get("ever_signalled"))),
+                            "launch_pending": None if signal_ok else _next_launch_pending,
                         }
 
                     save_state()
@@ -2583,7 +2697,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.2 | total={stats.get('radar',0)} "
+                    f"RADAR V13.4 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2828,7 +2942,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.2 SMART MC TOLERANCE + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.4 FAST LAUNCH ACCELERATION + CONFIRMED LAUNCH + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
