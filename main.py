@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.34 RURU CORE + GECKO + HOLDER FIX + LIQ GUARD + AXIOM"
+VERSION = "V11.34 QUALITY 5K-10K + MANUAL + AXIOM"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -17,10 +17,12 @@ BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 # Telegram getUpdates polling is OFF by default so another stale/duplicate
 # poller cannot interfere with automatic signal delivery. Automatic alerts
 # still work via sendMessage using SIGNAL_CHAT_ID.
-POLLING_ENABLED = os.getenv("POLLING_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+POLLING_ENABLED = os.getenv("POLLING_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
 
-MC_MIN = 1000
-MC_MAX = 15000
+# AUTO QUALITY MODE: only 5K-10K market-cap candidates are promoted.
+# Manual CA analysis is independent from this band.
+MC_MIN = 5000
+MC_MAX = 10000
 EARLY_MC_MAX = 10000
 MIN_LIQUIDITY = 800
 
@@ -45,11 +47,15 @@ MIN_MC_GROWTH = 1.005
 MAX_PAIR_AGE_HOURS = 12.0
 TREND_CONFIRM_SCANS = 2
 
-WATCH_MIN_BUYS_5M = 2
-WATCH_MIN_VOL_5M = 60
-SIGNAL_MIN_BUYS_5M = 4
+# QUALITY MODE: cut low-activity Telegram noise while preserving RURU-like flow.
+WATCH_MIN_BUYS_5M = 5
+WATCH_MIN_VOL_5M = 500
+WATCH_MIN_BUY_SELL_RATIO = 1.10
+AUTO_MAX_PRICE5 = 180.0
+
+SIGNAL_MIN_BUYS_5M = 8
 SIGNAL_MIN_BUY_SELL_RATIO = 1.10
-SIGNAL_MIN_VOL_5M = 180
+SIGNAL_MIN_VOL_5M = 1000
 MIN_VOL_GROWTH = 1.00
 
 # Liquidity Drain Guard
@@ -212,6 +218,7 @@ def send(chat_id, text):
         token_alert = (
             "HUNTERELITE IZLE" in text
             or "HUNTERELITE EARLY SIGNAL" in text
+            or "HUNTERELITE MANUEL ANALIZ" in text
             or "KARAR: GIR" in text
         )
         if ca_match and token_alert:
@@ -1109,10 +1116,86 @@ def simple_action(result, momentum=0, previous=None):
 
     return "ğŸ”´ GÄ°RME"
 
+def manual_decision(result, report):
+    """One-shot manual CA decision engine; independent from AUTO 5K-10K band."""
+    if not result:
+        return "BEKLE", "Piyasa verisi eksik.", "Veri yenilenince tekrar test et."
+
+    sig = result.get("signals") or {}
+    liq = num(result.get("liq"))
+    top10 = num(result.get("top10"))
+    price5 = num(result.get("price5"))
+    vol5 = num(result.get("vol5"), 0) or 0
+    buys = safe_int(result.get("buys5"))
+    sells = safe_int(result.get("sells5"))
+    ratio = buys / max(sells, 1)
+    score = safe_int(result.get("score"))
+
+    if sig.get("rug") or sig.get("honeypot"):
+        return "RUG RISKI / GIRME", "RugCheck rug/honeypot sinyali verdi.", "Yeni giris yapma."
+    if result.get("mint") is True or result.get("freeze") is True:
+        return "RUG RISKI / GIRME", "Mint veya freeze authority aktif.", "Authority kapanmadan girme."
+
+    if report is None:
+        return "BEKLE", "RugCheck verisi alinamadi; guvenlik teyidi eksik.", "RugCheck verisi geldiginde tekrar test et."
+    if liq is None:
+        return "BEKLE", "Likidite verisi eksik.", "Likidite dogrulaninca tekrar test et."
+    if liq < 800:
+        return "UZAK DUR", f"Likidite dusuk ({money(liq)}).", "Likidite $800 ustune cikmadan girme."
+    if top10 is None:
+        return "BEKLE", "Top-10 holder verisi eksik.", "Holder verisi dogrulaninca tekrar test et."
+    if top10 >= 75:
+        return "UZAK DUR", f"Top-10 holder yogunlugu yuksek ({top10:.1f}%).", "Holder dagilimi iyilesmeden girme."
+
+    if price5 is not None and price5 > 200:
+        return "UZAK DUR", f"5dk fiyat +%{price5:.1f}; hareket fazla ilerlemis.", "Yeni taban ve devam hacmi olusmadan girme."
+    if price5 is not None and price5 < -15:
+        return "UZAK DUR", f"5dk fiyat %{price5:.1f}; aktif dump var.", "Fiyat ve hacim yeniden toparlanmadan girme."
+    if sells > buys * 1.15:
+        return "UZAK DUR", f"Satis baskisi yuksek ({buys} buy / {sells} sell).", "Buy/sell dengesi pozitife donmeden girme."
+
+    if (
+        score >= 60
+        and buys >= 8
+        and ratio >= 1.10
+        and vol5 >= 1000
+        and (price5 is None or -8 <= price5 <= 180)
+    ):
+        return (
+            "GIR",
+            f"Guvenlik temiz; aktivite guclu: {buys}/{sells}, oran {ratio:.2f}x, hacim {money(vol5)}.",
+            "Tek olcum karari; Axiom'da son kontrol ve likidite takibi yap."
+        )
+
+    missing = []
+    if score < 60:
+        missing.append(f"score {score}<60")
+    if buys < 8:
+        missing.append(f"buy {buys}<8")
+    if ratio < 1.10:
+        missing.append(f"buy/sell {ratio:.2f}<1.10")
+    if vol5 < 1000:
+        missing.append(f"hacim {money(vol5)}<$1K")
+    if price5 is not None and price5 < -8:
+        missing.append(f"5dk fiyat {price5:.1f}%")
+
+    return (
+        "BEKLE",
+        "Guvenlikte sert engel yok fakat GIR teyidi eksik: " + ", ".join(missing[:4]) + ".",
+        "Buy>=8, buy/sell>=1.10, 5dk hacim>=$1K, score>=60 ve fiyat -8%..+180% olunca tekrar test et."
+    )
+
+
 def analyse(ca):
     pair = best_pair(ca)
     if pair is None:
-        return None, f"ğŸ¦… HUNTERELITE {VERSION}\n\nCA: {ca}\n\nâŒ DEX pair verisi bulunamadÄ±.\n\nğŸ”´ GÄ°RME / VERÄ° BEKLE"
+        return None, f"""HUNTERELITE MANUEL ANALIZ
+
+CA: {ca}
+
+KARAR: BEKLE
+NEDEN: DEX pair verisi bulunamadi.
+GIR TETIGI: Pair/veri olusunca tekrar test et."""
 
     report = rugcheck(ca)
     result = calculate_score(pair, report)
@@ -1120,42 +1203,42 @@ def analyse(ca):
     name = base.get("name") or "Unknown"
     symbol = base.get("symbol") or "N/A"
 
-    text = f"""ğŸ¦… HUNTERELITE {VERSION}
+    decision, reason, trigger = manual_decision(result, report)
+    mc = num(result.get("mc"))
+    auto_band = "ICINDE" if mc is not None and 5000 <= mc <= 10000 else "DISINDA"
+
+    text = f"""HUNTERELITE MANUEL ANALIZ
 
 {name} ({symbol})
 CA: {ca}
 
-ğŸ¯ Market GiriÅŸ BÃ¶lgesi: $2Kâ€“$10K
+AUTO QUALITY BAND ($5K-$10K): {auto_band}
 
 Market Cap: {money(result["mc"])}
 Likidite: {money(result["liq"])}
 
-âš¡ 5dk: {result["buys5"]} buy / {result["sells5"]} sell
-ğŸ“Š 1s: {result["buys1h"]} buy / {result["sells1h"]} sell
+5dk: {result["buys5"]} buy / {result["sells5"]} sell
+1sa: {result["buys1h"]} buy / {result["sells1h"]} sell
+5dk hacim: {money(result["vol5"])}
+5dk fiyat: {percent(result["price5"])}
 
-ğŸ’µ 5dk hacim: {money(result["vol5"])}
-ğŸ“ˆ 5dk fiyat: {percent(result["price5"])}
-
-ğŸ§ª RugCheck Derin Kontrol
-
-RugCheck: {"âœ… ALINDI" if report else "âš ï¸ VERÄ° ALINAMADI"}
-
-Top-1 holder: {percent(result["top1"])}
-Top-5 holder: {percent(result["top5"])}
-Top-10 holder: {percent(result["top10"])}
-
+RugCheck: {"ALINDI" if report else "VERI ALINAMADI"}
+Top-1: {percent(result["top1"])}
+Top-5: {percent(result["top5"])}
+Top-10: {percent(result["top10"])}
 Mint authority: {authority_text(result["mint"])}
 Freeze authority: {authority_text(result["freeze"])}
 
-ğŸ›¡ Hunter Elite Score: {result["score"]}/100
-ğŸ’ Potansiyel: IZLE
+Risk Score: {result["score"]}/100
 
-ğŸ¯ Karar: {result["decision"]}"""
+KARAR: {decision}
+NEDEN: {reason}
+GIR TETIGI: {trigger}"""
 
-    if result["risks"]:
-        text += "\n\nâš ï¸ Riskler:\n" + "".join(f"â€¢ {r}\n" for r in result["risks"][:7])
+    if result.get("risks"):
+        text += "\n\nRiskler:\n" + "".join(f"- {r}\n" for r in result["risks"][:6])
 
-    text += "\nEksik veri gÃ¼venli kabul edilmez.\nBu sistem risk filtresidir, yatÄ±rÄ±m garantisi deÄŸildir."
+    text += "\nManuel karar tek anlik olcumdur; kazanc garantisi degildir."
     return result, text
 
 def basic_signal_safe(result):
@@ -1219,12 +1302,24 @@ def watch_candidate(result):
         return False
     if result["score"] < WATCH_SCORE:
         return False
-    if result["buys5"] < WATCH_MIN_BUYS_5M:
+
+    buys = result.get("buys5", 0) or 0
+    sells = result.get("sells5", 0) or 0
+    ratio = buys / max(sells, 1)
+
+    if buys < WATCH_MIN_BUYS_5M:
+        return False
+    if ratio < WATCH_MIN_BUY_SELL_RATIO:
         return False
     if result["vol5"] is not None and result["vol5"] < WATCH_MIN_VOL_5M:
         return False
-    if result["price5"] is not None and result["price5"] < MAX_WATCH_DROP_5M:
+
+    price5 = result.get("price5")
+    if price5 is not None and price5 < MAX_WATCH_DROP_5M:
         return False
+    if price5 is not None and price5 > AUTO_MAX_PRICE5:
+        return False
+
     return True
 
 def liquidity_drain_detail(previous, current):
@@ -1281,6 +1376,8 @@ def strong_signal(result, momentum, previous=None):
         return False
     if result["vol5"] is not None and result["vol5"] < SIGNAL_MIN_VOL_5M:
         return False
+    if result.get("price5") is not None and result["price5"] > AUTO_MAX_PRICE5:
+        return False
 
     return True
 
@@ -1315,11 +1412,17 @@ def filter_fail_reason(result, previous=None, momentum=0, for_signal=False):
     if not for_signal:
         if result.get("score", 0) < WATCH_SCORE:
             return "score_fail"
-        if result.get("buys5", 0) < WATCH_MIN_BUYS_5M:
+        buys = result.get("buys5", 0) or 0
+        sells = result.get("sells5", 0) or 0
+        if buys < WATCH_MIN_BUYS_5M:
+            return "buy_fail"
+        if buys / max(sells, 1) < WATCH_MIN_BUY_SELL_RATIO:
             return "buy_fail"
         vol5 = result.get("vol5")
         if vol5 is not None and vol5 < WATCH_MIN_VOL_5M:
             return "volume_fail"
+        if result.get("price5") is not None and result.get("price5") > AUTO_MAX_PRICE5:
+            return "crash_fail"
         return "basic_fail"
 
     if previous is None:
@@ -1908,7 +2011,7 @@ def process_message(message):
         send(chat_id, f"""âœ… HunterElite {VERSION} ONLINE
 
 ğŸ¯ Early Hunter: AKTÄ°F
-ğŸ¯ Market bÃ¶lgesi: $2Kâ€“$10K
+ğŸ¯ AUTO QUALITY BAND: $5Kâ€“$10K
 ğŸ§ª RugCheck: AKTÄ°F
 ğŸ“¡ Eksik veri korumasÄ±: AKTÄ°F
 ğŸš¨ Otomatik sinyal: AKTÄ°F
@@ -1944,8 +2047,8 @@ Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸŸ¢ Birdeye API: {"BAÄLI" if BIRDEYE_API_KEY else "KEY YOK"}
 â± Birdeye yenileme: {BIRDEYE_POLL_INTERVAL} sn
 ğŸ’§ Min Likidite: {money(MIN_LIQUIDITY)}
-ğŸ“Š Market: $2Kâ€“$10K Ã¶ncelikli
-ğŸ’ 100X potansiyel filtresi: AKTÄ°F\nğŸ“¡ /radar teÅŸhisi: AKTÄ°F\nğŸ§© Single Engine: AKTÄ°F""")
+ğŸ“Š AUTO Market: $5Kâ€“$10K
+âœ… Quality Gate: buy>=5, hacim>=$500, buy/sell>=1.10, late-pump<=+180%\nğŸ“¡ /radar teÅŸhisi: AKTÄ°F\nğŸ§© Single Engine: AKTÄ°F""")
         return
 
     if command == "/signal_on":
@@ -2010,8 +2113,8 @@ Bu ekran teÅŸhis iÃ§indir; sinyal garantisi deÄŸildir.""")
     if command == "/help":
         send(
             chat_id,
-            "HunterElite V11.3 EARLY 100X RADAR\n\n"
-            "CA gÃ¶nder â†’ manuel analiz\n\n"
+            "HunterElite QUALITY 5K-10K + MANUAL\n\n"
+            "CA gonder -> MANUEL: GIR / BEKLE / UZAK DUR / RUG RISKI\n\n"
             "/ping\n/status\n/signal_on\n/signal_off\n/signal_test\n/radar\n/start"
         )
         return
@@ -2071,7 +2174,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nSTATE DECISION LOCK + GECKO RADAR + RUGCHECK HOLDER FIX + CENTRAL OUTPUT + LIQ GUARD + AXIOM BUTTON: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $5K-$10K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nQUALITY 5K-10K + MANUAL DECISION + GECKO + HOLDER FIX + LIQ GUARD + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
