@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE FINAL RURU STORY RUNNER"
+VERSION = "HUNTERELITE FINAL RURU STORY RUNNER FIXED"
 
 # FINAL PRODUCTION POLICY
 # - Story/narrative is a catalyst, never a safety bypass.
@@ -1779,103 +1779,6 @@ def continuation_confirm(result, previous, elapsed_seconds=30):
     return True, f"VOL+{vol_delta:.0f} BUY+{buy_delta} SELL+{sell_delta} FLOW={fresh_flow:.2f} MC={mc_pct:+.1f}%"
 
 
-def basic_signal_safe_reason(result):
-    """
-    Diagnostic mirror for basic_signal_safe().
-    It does NOT change filtering; it only explains the first failing sub-condition.
-    """
-    mc = num(result.get("mc"))
-    liq = num(result.get("liq"))
-    top10 = num(result.get("top10"))
-    age = num(result.get("age_minutes"))
-    price5 = num(result.get("price5"))
-    rug_ok = result.get("rug_ok")
-    auth_ok = result.get("auth_ok")
-
-    if mc is None:
-        return "MC_MISSING"
-    if mc < MC_MIN:
-        return f"MC_LOW {mc:.0f}<{MC_MIN:.0f}"
-    if mc > MC_MAX:
-        return f"MC_HIGH {mc:.0f}>{MC_MAX:.0f}"
-
-    if liq is None:
-        return "LIQ_MISSING"
-    if liq < MIN_LIQUIDITY:
-        return f"LIQ_LOW {liq:.0f}<{MIN_LIQUIDITY:.0f}"
-
-    if top10 is None:
-        return "HOLDER_MISSING"
-    if top10 > TOP10_MAX:
-        return f"TOP10 {top10:.1f}>{TOP10_MAX:.1f}"
-
-    if rug_ok is False:
-        return "RUG_FAIL"
-    if auth_ok is False:
-        return "AUTH_FAIL"
-
-    if age is not None and age < MIN_AGE_MINUTES:
-        return f"AGE_LOW {age:.1f}<{MIN_AGE_MINUTES:.1f}"
-
-    if price5 is not None and price5 > AUTO_MAX_PRICE5:
-        return f"PRICE5_HIGH {price5:+.1f}%>{AUTO_MAX_PRICE5:+.1f}%"
-
-    return "BASIC_SAFE_OTHER"
-
-
-def ruru_signal_diagnostic(result, momentum, previous=None, seen_count=0):
-    """
-    Explain the last RURU gate without changing any thresholds.
-    Returns (would_pass, reason).
-    """
-    if previous is None:
-        return False, "NO_PREVIOUS"
-
-    if seen_count < TREND_CONFIRM_SCANS:
-        return False, f"TREND {seen_count}/{TREND_CONFIRM_SCANS}"
-
-    liq_safe, liq_drop_pct, liq_level = liquidity_drain_detail(previous, result)
-    if not liq_safe:
-        return False, f"LIQ_DRAIN {liq_drop_pct:.1f}%"
-
-    if not basic_signal_safe(result):
-        return False, basic_signal_safe_reason(result)
-
-    if not crash_guard(result):
-        return False, "CRASH_GUARD"
-
-    if momentum < MIN_MOMENTUM_SIGNAL:
-        return False, f"MOMENTUM {momentum}<{MIN_MOMENTUM_SIGNAL}"
-
-    score = safe_int(result.get("score"))
-    if score + momentum < SIGNAL_SCORE:
-        return False, f"FINAL_SCORE {score + momentum}<{SIGNAL_SCORE}"
-
-    buys = safe_int(result.get("buys5"))
-    sells = safe_int(result.get("sells5"))
-    ratio = buys / max(sells, 1)
-    vol5 = num(result.get("vol5"), 0) or 0
-    price5 = num(result.get("price5"))
-
-    if buys < SIGNAL_MIN_BUYS_5M:
-        return False, f"BUY {buys}<{SIGNAL_MIN_BUYS_5M}"
-
-    if ratio < SIGNAL_MIN_BUY_SELL_RATIO:
-        return False, f"RATIO {ratio:.2f}<{SIGNAL_MIN_BUY_SELL_RATIO:.2f}"
-
-    if vol5 < SIGNAL_MIN_VOL_5M:
-        return False, f"VOL {vol5:.0f}<{SIGNAL_MIN_VOL_5M:.0f}"
-
-    if price5 is not None and price5 > AUTO_MAX_PRICE5:
-        return False, f"LATE_PUMP {price5:+.1f}%"
-
-    price_allow_gir, price_allow_guclu, price_detail = negative_price_guard(result, previous)
-    if not price_allow_gir:
-        return False, f"PRICE_GUARD {price_detail}"
-
-    return True, f"PASS mom={momentum} final={score + momentum} ratio={ratio:.2f} vol={vol5:.0f}"
-
-
 def strong_signal(result, momentum, previous=None):
     if not basic_signal_safe(result):
         return False
@@ -2275,10 +2178,11 @@ def auto_scanner():
                     if score_ok: stats["score_pass"] += 1
 
                     vol5 = result.get("vol5")
-                    activity_ok = (score_ok
-                                   and result.get("buys5", 0) >= WATCH_MIN_BUYS_5M
-                                   and (vol5 is None or vol5 >= WATCH_MIN_VOL_5M))
-                    if activity_ok: stats["activity_pass"] += 1
+                    activity_passed = (score_ok
+                                          and result.get("buys5", 0) >= WATCH_MIN_BUYS_5M
+                                          and (vol5 is None or vol5 >= WATCH_MIN_VOL_5M))
+                    if activity_passed:
+                        stats["activity_pass"] += 1
 
                     now = time.time()
                     with state_lock:
@@ -2290,7 +2194,7 @@ def auto_scanner():
                     result["liq_drain_level"] = liq_drain_level
 
                     momentum = momentum_score(old_metrics, result)
-                    trend_ok = activity_ok and old_metrics is not None and trend_confirmed(old_metrics, result)
+                    trend_ok = activity_passed and old_metrics is not None and trend_confirmed(old_metrics, result)
                     if trend_ok: stats["trend_pass"] += 1
                     momentum_ok = trend_ok and momentum >= MIN_MOMENTUM_SIGNAL
                     if momentum_ok: stats["momentum_pass"] += 1
@@ -2322,26 +2226,6 @@ def auto_scanner():
                         seen_count >= TREND_CONFIRM_SCANS
                         and strong_signal(result, momentum, old_metrics)
                     )
-
-                    # PRECISE RURU diagnostic:
-                    # Count only candidates that are already SAFE + ACTIVITY,
-                    # so RURU_CAND corresponds to the visible final pipeline.
-                    diag_safe = basic_signal_safe(result) and crash_guard(result)
-                    diag_activity = activity_ok(result)
-
-                    if diag_safe and diag_activity and (
-                        seen_count >= TREND_CONFIRM_SCANS or momentum >= MIN_MOMENTUM_SIGNAL
-                    ):
-                        ruru_pass_dbg, ruru_reason_dbg = ruru_signal_diagnostic(
-                            result, momentum, old_metrics, seen_count
-                        )
-                        stats["ruru_candidate"] = stats.get("ruru_candidate", 0) + 1
-                        if not ruru_pass_dbg:
-                            samples = stats.setdefault("ruru_block_samples", [])
-                            if len(samples) < 6:
-                                base_dbg = pair.get("baseToken") or {}
-                                sym_dbg = base_dbg.get("symbol") or base_dbg.get("name") or ca[:6]
-                                samples.append(f"{sym_dbg}:{ruru_reason_dbg}")
 
                     # High-pump FAST candidates must never bypass continuation through
                     # the RURU lane on the same scan.
@@ -2784,7 +2668,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE: RURU TREND + STORY HUNTER + VOLUME CONTINUATION + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE FIXED: RURU TREND STATE + STORY HUNTER + VOLUME CONTINUATION + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
