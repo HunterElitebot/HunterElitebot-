@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE RURU STORY HUNTER V3 + RURU DIAG"
+VERSION = "HUNTERELITE RURU STORY HUNTER V3 + PRECISE DIAG"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -1772,6 +1772,50 @@ def continuation_confirm(result, previous, elapsed_seconds=30):
     return True, f"VOL+{vol_delta:.0f} BUY+{buy_delta} SELL+{sell_delta} FLOW={fresh_flow:.2f} MC={mc_pct:+.1f}%"
 
 
+def basic_signal_safe_reason(result):
+    """
+    Diagnostic mirror for basic_signal_safe().
+    It does NOT change filtering; it only explains the first failing sub-condition.
+    """
+    mc = num(result.get("mc"))
+    liq = num(result.get("liq"))
+    top10 = num(result.get("top10"))
+    age = num(result.get("age_minutes"))
+    price5 = num(result.get("price5"))
+    rug_ok = result.get("rug_ok")
+    auth_ok = result.get("auth_ok")
+
+    if mc is None:
+        return "MC_MISSING"
+    if mc < MC_MIN:
+        return f"MC_LOW {mc:.0f}<{MC_MIN:.0f}"
+    if mc > MC_MAX:
+        return f"MC_HIGH {mc:.0f}>{MC_MAX:.0f}"
+
+    if liq is None:
+        return "LIQ_MISSING"
+    if liq < MIN_LIQUIDITY:
+        return f"LIQ_LOW {liq:.0f}<{MIN_LIQUIDITY:.0f}"
+
+    if top10 is None:
+        return "HOLDER_MISSING"
+    if top10 > TOP10_MAX:
+        return f"TOP10 {top10:.1f}>{TOP10_MAX:.1f}"
+
+    if rug_ok is False:
+        return "RUG_FAIL"
+    if auth_ok is False:
+        return "AUTH_FAIL"
+
+    if age is not None and age < MIN_AGE_MINUTES:
+        return f"AGE_LOW {age:.1f}<{MIN_AGE_MINUTES:.1f}"
+
+    if price5 is not None and price5 > AUTO_MAX_PRICE5:
+        return f"PRICE5_HIGH {price5:+.1f}%>{AUTO_MAX_PRICE5:+.1f}%"
+
+    return "BASIC_SAFE_OTHER"
+
+
 def ruru_signal_diagnostic(result, momentum, previous=None, seen_count=0):
     """
     Explain the last RURU gate without changing any thresholds.
@@ -1788,7 +1832,7 @@ def ruru_signal_diagnostic(result, momentum, previous=None, seen_count=0):
         return False, f"LIQ_DRAIN {liq_drop_pct:.1f}%"
 
     if not basic_signal_safe(result):
-        return False, "BASIC_SAFE_FAIL"
+        return False, basic_signal_safe_reason(result)
 
     if not crash_guard(result):
         return False, "CRASH_GUARD"
@@ -2272,8 +2316,15 @@ def auto_scanner():
                         and strong_signal(result, momentum, old_metrics)
                     )
 
-                    # RURU diagnostic only; does not alter decisions.
-                    if seen_count >= TREND_CONFIRM_SCANS or momentum >= MIN_MOMENTUM_SIGNAL:
+                    # PRECISE RURU diagnostic:
+                    # Count only candidates that are already SAFE + ACTIVITY,
+                    # so RURU_CAND corresponds to the visible final pipeline.
+                    diag_safe = basic_signal_safe(result) and crash_guard(result)
+                    diag_activity = activity_ok(result)
+
+                    if diag_safe and diag_activity and (
+                        seen_count >= TREND_CONFIRM_SCANS or momentum >= MIN_MOMENTUM_SIGNAL
+                    ):
                         ruru_pass_dbg, ruru_reason_dbg = ruru_signal_diagnostic(
                             result, momentum, old_metrics, seen_count
                         )
@@ -2729,7 +2780,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nRURU STORY HUNTER V3 + RURU DIAG: Story + Negative Price Guard + FAST Continuation + RURU block diagnostics + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nRURU STORY HUNTER V3 + PRECISE DIAG: SAFE+ACTIVITY-only RURU diagnostics + exact block reasons + Story + Price Guard + FAST Continuation + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
