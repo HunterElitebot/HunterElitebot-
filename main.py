@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.11 BALANCED FAST ENTRY"
+VERSION = "V13.12 FRESH DISCOVERY"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -395,8 +395,8 @@ birdeye_last_error_body = ""
 birdeye_cooldown_until = 0
 BIRDEYE_COOLDOWN_SECONDS = 3600
 
-GECKO_POLL_INTERVAL = 60
-GECKO_PAGES = 3
+GECKO_POLL_INTERVAL = 30
+GECKO_PAGES = 5
 GECKO_TARGET = 60
 gecko_cache = []
 gecko_last_fetch = 0
@@ -422,9 +422,9 @@ RADAR_RAW_LIMIT = 240
 RADAR_TARGET = 80
 BIRDEYE_TARGET = 80
 DEX_TARGET = 20
-DEX_RESERVED_SLOTS = 20
-GECKO_MAX_SELECTED = 60
-MAX_REPEAT_PER_SCAN = 20
+DEX_RESERVED_SLOTS = 30
+GECKO_MAX_SELECTED = 50
+MAX_REPEAT_PER_SCAN = 12
 FRESH_PAIR_MAX_HOURS = 6.0
 
 VIRAL_RADAR_ENABLED = True
@@ -1090,7 +1090,7 @@ def gecko_new_candidates(force=False):
                 if ca not in merged_seen:
                     merged_seen.add(ca)
                     merged.append(ca)
-            gecko_cache = merged[:80]
+            gecko_cache = merged[:160]
             gecko_liq_cache.update(liq_updates)
 
             expired = [
@@ -1221,7 +1221,28 @@ def discovery_candidates():
             break
         _add(ca)
 
-    return selected[:RADAR_TARGET]
+    # V13.12: prioritize contracts not seen recently, then fill with repeats.
+    # This increases the chance of catching launch-stage runners without weakening GÄ°R gates.
+    now_seen = time.time()
+    with discovery_seen_lock:
+        expired = [ca for ca, ts in discovery_seen.items()
+                   if now_seen - ts > DISCOVERY_MEMORY_SECONDS]
+        for ca in expired:
+            discovery_seen.pop(ca, None)
+
+        fresh = [ca for ca in selected if ca not in discovery_seen]
+        repeats = [ca for ca in selected if ca in discovery_seen]
+        ordered = fresh + repeats[:MAX_REPEAT_PER_SCAN]
+
+        # If the fresh+repeat cap leaves room, preserve radar coverage rather than shrinking scan.
+        if len(ordered) < RADAR_TARGET:
+            used = set(ordered)
+            ordered.extend(ca for ca in selected if ca not in used)
+
+        for ca in ordered[:RADAR_TARGET]:
+            discovery_seen[ca] = now_seen
+
+    return ordered[:RADAR_TARGET]
 
 def birdeye_market_data(ca):
     """Disabled as a hard dependency: fresh listings use listing liquidity + DEX + cache."""
@@ -2912,7 +2933,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.11 | total={stats.get('radar',0)} "
+                    f"RADAR V13.12 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -3152,13 +3173,13 @@ def startup_notify():
 Early Hunter: ACTIVE
 Scan: {SCAN_INTERVAL} sec
 Radar: {"BIRDEYE + DEX" if BIRDEYE_API_KEY else "DEX ONLY"}
-Birdeye: {"CONNECTED" if BIRDEYE_API_KEY else "KEY MISSING"}\nBirdeye Fresh: official 20/request + rolling unique cache / 60 sec\nRadar Mix: rolling Birdeye fills first + DEX max 20 fallback
+Birdeye: {"CONNECTED" if BIRDEYE_API_KEY else "KEY MISSING"}\nBirdeye Fresh: official 20/request + rolling unique cache / 60 sec\nRadar Mix: fresh-first Gecko + DEX 30 reserved + batch pair cache
 Watch Score: {WATCH_SCORE}
 Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.11 BALANCED FAST ENTRY + BATCH PAIR DATA + FAST 2-TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.12 FRESH DISCOVERY + BATCH PAIR DATA + FAST 2-TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
