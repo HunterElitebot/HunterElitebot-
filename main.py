@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V12.10 DIAGNOSTIC"
+VERSION = "V13 QUALITY GIR NO REPEAT DUMP SHIELD"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -52,9 +52,9 @@ SCAN_INTERVAL = 30
 # V11.57 QUALITY MODE
 # Target: roughly 10-20 high-quality alerts/day when the market provides them.
 # Never force a quota by lowering safety/quality.
-QUALITY_SEND_WATCH = True
-QUALITY_DAILY_SIGNAL_CAP = 20
-QUALITY_SIGNAL_MIN_GAP_SEC = 2700   # 45 minutes
+QUALITY_SEND_WATCH = False
+QUALITY_DAILY_SIGNAL_CAP = 50
+QUALITY_SIGNAL_MIN_GAP_SEC = 300    # 5 minutes; quality gates still mandatory
 QUALITY_MIN_SCORE = 70
 QUALITY_MAX_TOP10 = 55.0
 QUALITY_MIN_LIQ = 2000.0
@@ -62,7 +62,7 @@ QUALITY_MIN_BUYS_5M = 30
 QUALITY_MIN_VOL_5M = 3000.0
 QUALITY_MIN_BUY_SELL_RATIO = 1.35
 QUALITY_MIN_PRICE5 = -5.0
-QUALITY_MAX_PRICE5 = 120.0
+QUALITY_MAX_PRICE5 = 50.0
 
 _quality_day = None
 _quality_signal_count = 0
@@ -203,6 +203,21 @@ def final_gir_gate(result, old_metrics, seen_count, momentum, now):
     if not rug_ok:
         return False, rug_reason
 
+    # V13 NO REPEAT: once a CA produced a real GÄ°R, never send it again.
+    if result.get("ca") in SIGNALLED_CAS:
+        return False, "ALREADY_SIGNALLED"
+
+    # V13 DUMP / TOP-CHASE SHIELD
+    _p5 = num(result.get("price5"))
+    _rmc = num(result.get("runner_mc_accel"))
+    _rvol = num(result.get("runner_vol_accel"))
+    if _rmc is not None and _rmc < 0:
+        return False, "MC_ACCEL_NOT_POSITIVE"
+    if _p5 is not None and _p5 >= 40.0 and (_rmc is None or _rmc < 8.0):
+        return False, "TOP_CHASE"
+    if _p5 is not None and _p5 >= 30.0 and _rvol is not None and _rvol <= 0:
+        return False, "VOLUME_FADE"
+
     if not quality_signal_gate(result):
         return False, "QUALITY_GATE"
 
@@ -257,7 +272,7 @@ def quality_signal_gate(result):
         return False
     # Avoid chasing a candle that has already expanded too far in a single 5m window.
     # A later confirmed scan can still qualify if activity remains healthy.
-    if price5 > 80:
+    if price5 > QUALITY_MAX_PRICE5:
         QUALITY_GATE_DETAILS["Q9"] = QUALITY_GATE_DETAILS.get("Q9", 0) + 1
         return False
     return True
@@ -295,6 +310,7 @@ SOL_CA = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 signal_chats = set()
 token_states = {}
+SIGNALLED_CAS = set()
 state_lock = threading.Lock()
 birdeye_lock = threading.Lock()
 birdeye_cache = []
@@ -369,6 +385,9 @@ def load_state():
         if isinstance(data, dict):
             with state_lock:
                 token_states.update(data)
+                for _ca, _st in data.items():
+                    if isinstance(_st, dict) and (_st.get("ever_signalled") or _st.get("stage") == "SIGNAL"):
+                        SIGNALLED_CAS.add(_ca)
     except Exception as e:
         print("STATE LOAD WARNING:", repr(e), flush=True)
 
@@ -2364,6 +2383,9 @@ def auto_scanner():
                         or _runner_signal
                     )
 
+                    result["ca"] = ca
+                    result["runner_mc_accel"] = _runner_mc_accel
+                    result["runner_vol_accel"] = _runner_vol_accel
                     _final_gate_ok, _final_gate_reason = final_gir_gate(
                         result, old_metrics, seen_count, momentum, now
                     )
@@ -2388,6 +2410,7 @@ def auto_scanner():
                         and stage != "SIGNAL"
                     ):
                         new_stage = "SIGNAL"
+                        SIGNALLED_CAS.add(ca)
                         stats["signal"] += 1
                         global _quality_signal_count, _quality_last_signal_at
                         _quality_signal_count += 1
@@ -2499,6 +2522,7 @@ Yeni giris icin uygun degil."""
                             "last_sent": last_sent,
                             "seen": now,
                             "seen_count": seen_count,
+                            "ever_signalled": bool(ca in SIGNALLED_CAS or (previous and previous.get("ever_signalled"))),
                         }
 
                     save_state()
@@ -2537,7 +2561,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V12.10 | total={stats.get('radar',0)} "
+                    f"RADAR V13 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2782,7 +2806,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.10 WATCH DECISION FIX + HARD SAFETY: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13 QUALITY GIR + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
