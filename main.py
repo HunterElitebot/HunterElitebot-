@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.12.2 TRUE 2TICK CONFIRM"
+VERSION = "V13.12.3 ADAPTIVE GECKO"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -397,7 +397,12 @@ BIRDEYE_COOLDOWN_SECONDS = 3600
 
 GECKO_POLL_INTERVAL = 30
 GECKO_PAGES = 5
+GECKO_BASE_PAGES = 3
+GECKO_DEEP_SCAN_INTERVAL = 180
+GECKO_429_COOLDOWN = 180
 GECKO_TARGET = 60
+gecko_last_deep_scan = 0.0
+gecko_429_until = 0.0
 gecko_cache = []
 gecko_last_fetch = 0
 gecko_last_error = ""
@@ -984,6 +989,7 @@ def gecko_new_candidates(force=False):
     """
     global gecko_cache, gecko_last_fetch, gecko_last_error, gecko_liq_cache
     global gecko_fail_count, gecko_next_retry, gecko_last_status
+    global gecko_last_deep_scan, gecko_429_until
 
     now = time.time()
     with gecko_lock:
@@ -1003,9 +1009,23 @@ def gecko_new_candidates(force=False):
         "https://api.geckoterminal.com/api/v2/networks/solana/pools",
     ]
 
+    # V13.12.3 adaptive paging:
+    # Pages 1-3 stay fresh every 30s. Pages 4-5 are deep-scan only every 3 min,
+    # and are suspended for 3 min after any 429.
+    deep_allowed = (
+        now >= gecko_429_until
+        and (now - gecko_last_deep_scan) >= GECKO_DEEP_SCAN_INTERVAL
+    )
+    page_limit = GECKO_PAGES if deep_allowed else GECKO_BASE_PAGES
+    if deep_allowed:
+        gecko_last_deep_scan = now
+
+    stop_deep = False
     for endpoint in endpoint_templates:
         endpoint_found_before = len(found)
-        for page in range(1, GECKO_PAGES + 1):
+        for page in range(1, page_limit + 1):
+            if stop_deep and page > GECKO_BASE_PAGES:
+                break
             url = endpoint + "?" + urllib.parse.urlencode({
                 "include": "base_token",
                 "page": page,
@@ -1076,7 +1096,12 @@ def gecko_new_candidates(force=False):
                         found.append(ca)
 
             except Exception as e:
-                errors.append(f"page{page}:{type(e).__name__}:{str(e)[:90]}")
+                err_text = f"page{page}:{type(e).__name__}:{str(e)[:90]}"
+                errors.append(err_text)
+                if "429" in str(e) or "Too Many Requests" in str(e):
+                    gecko_429_until = now + GECKO_429_COOLDOWN
+                    if page > GECKO_BASE_PAGES:
+                        stop_deep = True
                 continue
 
         # Prefer new_pools; only use broad pools endpoint if new_pools gave nothing.
@@ -1118,7 +1143,9 @@ def gecko_new_candidates(force=False):
 
     print(
         f"GECKO FEED {gecko_last_status}: api={len(found)} cache={len(cached)} "
-        f"liq={len(liq_updates)} pages_ok={pages_ok} "
+        f"liq={len(liq_updates)} pages_ok={pages_ok}/{page_limit} "
+        f"deep={'ON' if deep_allowed else 'OFF'} "
+        f"429cd={max(0,int(gecko_429_until-time.time()))}s "
         f"retry={max(0,int(gecko_next_retry-time.time()))}s "
         f"err={gecko_last_error[:180]}",
         flush=True,
@@ -2967,7 +2994,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.12.2 | total={stats.get('radar',0)} "
+                    f"RADAR V13.12.3 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -3213,7 +3240,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.12.2 TRUE 2TICK CONFIRM + FRESH DISCOVERY + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.12.3 ADAPTIVE GECKO + TRUE 2TICK + FRESH DISCOVERY + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
