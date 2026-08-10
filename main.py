@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.14 ACTIVE POOL FIX"
+VERSION = "V13.15 POOL DIAGNOSTIC"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -57,6 +57,7 @@ CANDIDATE_POOL_SIGNAL_SCORE = 72.0
 CANDIDATE_POOL_MIN_MARGIN = 2.0
 CANDIDATE_POOL = {}
 CANDIDATE_POOL_LOCK = threading.Lock()
+POOL_DIAG = {}
 
 # V11.57 QUALITY MODE
 # Target: roughly 10-20 high-quality alerts/day when the market provides them.
@@ -2237,12 +2238,19 @@ def market_viral_score(result):
     return score, label
 
 
+def _pool_diag(reason):
+    POOL_DIAG[reason] = POOL_DIAG.get(reason, 0) + 1
+
 def candidate_pool_update(ca, result, safety_ok, fast_hard_ok, now):
     """Rank hard-safe early movers across scans. Returns (confirmed, rank_score, obs)."""
-    if not safety_ok or not fast_hard_ok or ca in SIGNALLED_CAS:
-        with CANDIDATE_POOL_LOCK:
-            CANDIDATE_POOL.pop(ca, None)
+    if not safety_ok:
+        _pool_diag("BLOCK_SAFETY"); return False, 0.0, 0
+    if not fast_hard_ok:
+        _pool_diag("BLOCK_FAST_HARD")
+        with CANDIDATE_POOL_LOCK: CANDIDATE_POOL.pop(ca, None)
         return False, 0.0, 0
+    if ca in SIGNALLED_CAS:
+        _pool_diag("BLOCK_SIGNALLED"); return False, 0.0, 0
 
     mc = num(result.get("mc")) or 0.0
     liq = num(result.get("liq")) or 0.0
@@ -2258,14 +2266,17 @@ def candidate_pool_update(ca, result, safety_ok, fast_hard_ok, now):
 
     # Pool admission is deliberately softer than FAST first-tick, but still requires
     # positive live behavior. Hard rug/dump/authority/holder gates remain upstream.
-    if mc < MC_MIN or liq < MIN_LIQUIDITY or score < 60 or bs < 1.05 or vol5 < 250:
-        return False, 0.0, 0
-    if price5 is None or price5 < -5.0 or price5 > 55.0:
-        return False, 0.0, 0
-    if rmc is not None and rmc < -0.35:
-        return False, 0.0, 0
-    if age is not None and age > 0.50:
-        return False, 0.0, 0
+    if mc < MC_MIN: _pool_diag("BLOCK_MC"); return False, 0.0, 0
+    if liq < MIN_LIQUIDITY: _pool_diag("BLOCK_LIQ"); return False, 0.0, 0
+    if score < 60: _pool_diag("BLOCK_SCORE"); return False, 0.0, 0
+    if bs < 1.05: _pool_diag("BLOCK_BUYSELL"); return False, 0.0, 0
+    if vol5 < 250: _pool_diag("BLOCK_VOL5"); return False, 0.0, 0
+    if price5 is None: _pool_diag("BLOCK_PRICE_MISSING"); return False, 0.0, 0
+    if price5 < -5.0: _pool_diag("BLOCK_PRICE_NEG"); return False, 0.0, 0
+    if price5 > 55.0: _pool_diag("BLOCK_PRICE_CHASE"); return False, 0.0, 0
+    if rmc is not None and rmc < -0.35: _pool_diag("BLOCK_RMC"); return False, 0.0, 0
+    if age is not None and age > 0.50: _pool_diag("BLOCK_AGE"); return False, 0.0, 0
+    _pool_diag("ADMITTED")
 
     with CANDIDATE_POOL_LOCK:
         for k, v in list(CANDIDATE_POOL.items()):
@@ -2310,6 +2321,7 @@ def candidate_pool_update(ca, result, safety_ok, fast_hard_ok, now):
             and bs >= 1.15
             and (rvol is None or rvol >= -0.10)
         )
+        if confirmed: _pool_diag("CONFIRMED")
         return confirmed, rank, obs
 
 
@@ -3096,7 +3108,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.14 | total={stats.get('radar',0)} "
+                    f"RADAR V13.15 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -3146,6 +3158,7 @@ Yeni giris icin uygun degil."""
                     f"FINAL GATE REJECTS: {dict(sorted(FINAL_GATE_REJECTS.items(), key=lambda x: -x[1])[:6])}\n"
                     f"QUALITY DETAILS: {dict(sorted(QUALITY_GATE_DETAILS.items(), key=lambda x: -x[1]))}\n"
                     f"FAST DETAILS: {dict(sorted({k:v for k,v in FINAL_GATE_REJECTS.items() if k.startswith('FAST_')}.items(), key=lambda x: -x[1])[:10])}\n"
+                    f"POOL DIAG: {dict(sorted(POOL_DIAG.items(), key=lambda x: -x[1]))} | pool_size={len(CANDIDATE_POOL)}\\n"
                     f"WATCH DIAG: {dict(sorted(WATCH_DIAG.items(), key=lambda x: -x[1]))}\n"
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} BREAKOUT={stats.get('breakout',0)} STRONG_GIR={stats.get('strong_gir',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)} batch_pairs={len(DEX_BATCH_PAIR_CACHE)}\n"
@@ -3342,7 +3355,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.14 ACTIVE POOL FIX + ROLLING RANK + TRUE 2TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.15 POOL DIAGNOSTIC + ROLLING RANK + TRUE 2TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
