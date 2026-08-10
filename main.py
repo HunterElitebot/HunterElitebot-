@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.7.1 FAST GATE FIX"
+VERSION = "V13.8 FAST ACCEL DIAGNOSTIC"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -2577,6 +2577,27 @@ def auto_scanner():
                             and (_age_now is None or _age_now <= 0.25)
                         )
 
+                        # V13.8 diagnostics: show exactly why a hard-safe FAST
+                        # candidate failed the acceleration signature.
+                        if _fast_candidate and _fast_hard_ok and not _fast_launch_ok:
+                            if _score_now < 75:
+                                _far = "FAST_ACCEL_SCORE"
+                            elif _rmc_now is None or _rmc_now < 12.0:
+                                _far = "FAST_ACCEL_MC"
+                            elif _rvol_now is None or _rvol_now < 25.0:
+                                _far = "FAST_ACCEL_VOLUME"
+                            elif _bs_now < 1.60:
+                                _far = "FAST_ACCEL_BUYSELL"
+                            elif _vol_now < 4000.0:
+                                _far = "FAST_ACCEL_VOL5"
+                            elif _price_now is None or not (5.0 <= _price_now <= 35.0):
+                                _far = "FAST_ACCEL_PRICE5"
+                            elif _age_now is not None and _age_now > 0.25:
+                                _far = "FAST_ACCEL_AGE"
+                            else:
+                                _far = "FAST_ACCEL_OTHER"
+                            FINAL_GATE_REJECTS[_far] = FINAL_GATE_REJECTS.get(_far, 0) + 1
+
                         if _fast_launch_ok:
                             signal_ok = True
                             FINAL_GATE_REJECTS["FAST_LAUNCH_CONFIRMED"] = FINAL_GATE_REJECTS.get("FAST_LAUNCH_CONFIRMED", 0) + 1
@@ -2810,7 +2831,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.7.1 | total={stats.get('radar',0)} "
+                    f"RADAR V13.8 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -3055,7 +3076,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.7.1 FAST GATE FIX + DUAL LANE + FRESH RADAR + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.8 FAST ACCEL DIAGNOSTIC + DUAL LANE + FRESH RADAR + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
