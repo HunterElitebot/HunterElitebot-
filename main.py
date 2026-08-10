@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE FINAL FAST GIR 3K-12K"
+VERSION = "HUNTERELITE RURU FAST + CONTINUATION FINAL"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -68,6 +68,19 @@ FAST_GUCLU_MIN_BUYS_5M = 30
 FAST_GUCLU_MIN_BUY_SELL_RATIO = 1.30
 FAST_GUCLU_MIN_VOL_5M = 4000
 FAST_GUCLU_MIN_LIQ_MC_RATIO = 0.22
+
+# CONTINUATION GUARD
+# FAST candidates are remembered first; signal is released only after a later scan
+# confirms that new buying is still pushing the market forward.
+CONT_MIN_SECONDS = 20
+CONT_MAX_SECONDS = 120
+CONT_MIN_VOL_DELTA = 250
+CONT_MIN_BUY_DELTA = 2
+CONT_MIN_MC_PCT = 1.0
+CONT_MAX_MC_DROP_PCT = -4.0
+CONT_MIN_FLOW_RATIO = 1.10
+CONT_HIGH_PUMP_PRICE5 = 80.0
+CONT_HIGH_PUMP_MIN_MC_PCT = 2.0
 
 SIGNAL_MIN_BUYS_5M = 8
 SIGNAL_MIN_BUY_SELL_RATIO = 1.10
@@ -1225,6 +1238,7 @@ GIR TETIGI: Pair/veri olusunca tekrar test et."""
 
     report = rugcheck(ca)
     result = calculate_score(pair, report)
+    result["social"] = social_presence(pair)
     base = pair.get("baseToken") or {}
     name = base.get("name") or "Unknown"
     symbol = base.get("symbol") or "N/A"
@@ -1257,6 +1271,8 @@ Mint authority: {authority_text(result["mint"])}
 Freeze authority: {authority_text(result["freeze"])}
 
 Risk Score: {result["score"]}/100
+Social Presence: {result.get("social", {}).get("score", 0)}/100 - {result.get("social", {}).get("label", "SOCIAL WEAK")}
+X: {"VAR" if result.get("social", {}).get("x") else "YOK"} | Telegram: {"VAR" if result.get("social", {}).get("telegram") else "YOK"} | Reddit: {"VAR" if result.get("social", {}).get("reddit") else "YOK"}
 
 KARAR: {decision}
 NEDEN: {reason}
@@ -1375,6 +1391,68 @@ def liquidity_drain_detail(previous, current):
     return True, drop_pct, "OK"
 
 
+def social_presence(pair):
+    """
+    Free/keyless social layer from DEX pair metadata.
+    Measures published social footprint only; it does NOT pretend to measure
+    X/Reddit/Telegram interaction counts.
+    """
+    info = (pair or {}).get("info") or {}
+    socials = info.get("socials") or []
+    websites = info.get("websites") or []
+
+    kinds = set()
+    links = []
+
+    for item in socials:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("type") or item.get("platform") or "").lower()
+        url = str(item.get("url") or "")
+        blob = (kind + " " + url).lower()
+        if "twitter" in blob or "x.com" in blob:
+            kinds.add("X")
+        if "telegram" in blob or "t.me" in blob:
+            kinds.add("TELEGRAM")
+        if "reddit" in blob:
+            kinds.add("REDDIT")
+        if url:
+            links.append(url)
+
+    website_count = sum(1 for w in websites if isinstance(w, dict) and w.get("url"))
+
+    score = 0
+    if "X" in kinds:
+        score += 25
+    if "TELEGRAM" in kinds:
+        score += 25
+    if "REDDIT" in kinds:
+        score += 15
+    if website_count:
+        score += 10
+    if len(kinds) >= 2:
+        score += 10
+    if len(kinds) >= 3:
+        score += 10
+
+    score = min(score, 100)
+    if score >= 70:
+        label = "SOCIAL READY"
+    elif score >= 35:
+        label = "SOCIAL PRESENT"
+    else:
+        label = "SOCIAL WEAK"
+
+    return {
+        "score": score,
+        "label": label,
+        "x": "X" in kinds,
+        "telegram": "TELEGRAM" in kinds,
+        "reddit": "REDDIT" in kinds,
+        "websites": website_count,
+    }
+
+
 def fast_gir_decision(result):
     """Single-scan runner lane. Returns None / GIR / GUCLU GIR."""
     if not result:
@@ -1426,6 +1504,53 @@ def fast_gir_decision(result):
         return "GIR"
 
     return None
+
+
+def continuation_confirm(result, previous, elapsed_seconds=30):
+    """
+    Confirm that volume is translating into fresh buy flow AND price/MC progress.
+    Prevents 'volume rises but token stalls/dumps' FAST signals.
+    """
+    if not previous:
+        return False, "FIRST_TICK"
+
+    mc = num(result.get("mc"))
+    old_mc = num(previous.get("mc"))
+    vol = num(result.get("vol5"), 0) or 0
+    old_vol = num(previous.get("vol5"), 0) or 0
+    buys = safe_int(result.get("buys5"))
+    old_buys = safe_int(previous.get("buys5"))
+    sells = safe_int(result.get("sells5"))
+    old_sells = safe_int(previous.get("sells5"))
+    price5 = num(result.get("price5"))
+
+    if mc is None or old_mc is None or old_mc <= 0:
+        return False, "MC_MISSING"
+
+    mc_pct = ((mc - old_mc) / old_mc) * 100.0
+    vol_delta = max(0.0, vol - old_vol)
+    buy_delta = max(0, buys - old_buys)
+    sell_delta = max(0, sells - old_sells)
+    fresh_flow = buy_delta / max(sell_delta, 1)
+
+    # Immediate rejection: market cap is slipping while fresh flow is weak.
+    if mc_pct <= CONT_MAX_MC_DROP_PCT:
+        return False, f"MC_DROP {mc_pct:+.1f}%"
+
+    # Require actual fresh activity, not an old 5m volume print.
+    if vol_delta < CONT_MIN_VOL_DELTA:
+        return False, f"VOL_D {vol_delta:.0f}"
+    if buy_delta < CONT_MIN_BUY_DELTA:
+        return False, f"BUY_D {buy_delta}"
+    if fresh_flow < CONT_MIN_FLOW_RATIO:
+        return False, f"FLOW {fresh_flow:.2f}"
+
+    # Volume must produce price/MC progress.
+    required_mc = CONT_HIGH_PUMP_MIN_MC_PCT if (price5 is not None and price5 >= CONT_HIGH_PUMP_PRICE5) else CONT_MIN_MC_PCT
+    if mc_pct < required_mc:
+        return False, f"NO_PROGRESS {mc_pct:+.1f}%"
+
+    return True, f"VOL+{vol_delta:.0f} BUY+{buy_delta} SELL+{sell_delta} FLOW={fresh_flow:.2f} MC={mc_pct:+.1f}%"
 
 
 def strong_signal(result, momentum, previous=None):
@@ -1690,6 +1815,8 @@ def auto_scanner():
 
                     report = rugcheck(ca)
                     result = calculate_score(pair, report)
+                    social = social_presence(pair)
+                    result["social"] = social
                     stats["processed"] += 1
 
                     viral_score, viral_label = market_viral_score(result)
@@ -1849,14 +1976,23 @@ def auto_scanner():
                     new_stage, message = stage, None
 
                     watch_ok = watch_candidate(result)
-                    fast_decision = fast_gir_decision(result)
-                    signal_ok = (
-                        fast_decision is not None
-                        or (
-                            seen_count >= TREND_CONFIRM_SCANS
-                            and strong_signal(result, momentum, old_metrics)
-                        )
+                    fast_candidate = fast_gir_decision(result)
+                    cont_ok, cont_detail = continuation_confirm(result, old_metrics, SCAN_INTERVAL)
+                    fast_decision = fast_candidate if (fast_candidate is not None and cont_ok) else None
+
+                    # RURU confirmed path remains intact.
+                    ruru_signal = (
+                        seen_count >= TREND_CONFIRM_SCANS
+                        and strong_signal(result, momentum, old_metrics)
                     )
+
+                    # High-pump FAST candidates must never bypass continuation through
+                    # the RURU lane on the same scan.
+                    high_pump = (num(result.get("price5")) or 0) >= CONT_HIGH_PUMP_PRICE5
+                    if high_pump and fast_candidate is not None and not cont_ok:
+                        ruru_signal = False
+
+                    signal_ok = (fast_decision is not None) or ruru_signal
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -1921,12 +2057,16 @@ Likidite: {money(result["liq"])}
 Top-10: {percent(result["top10"])}
 Likidite Guard: {"PASSED" if liq_drain_safe else "BLOCKED"}
 
+Social Presence: {result.get("social", {}).get("score", 0)}/100 - {result.get("social", {}).get("label", "SOCIAL WEAK")}
+X: {"VAR" if result.get("social", {}).get("x") else "YOK"} | Telegram: {"VAR" if result.get("social", {}).get("telegram") else "YOK"} | Reddit: {"VAR" if result.get("social", {}).get("reddit") else "YOK"}
+
 Risk Score: {result["score"]}/100
 Momentum: +{momentum}
 Final Score: {final_score}/100
 
 KARAR: {karar_label}
-SINYAL YOLU: {"FAST / TEK TARAMA" if fast_decision else "RURU / TREND TEYITLI"}
+SINYAL YOLU: {"FAST / CONTINUATION TEYITLI" if fast_decision else "RURU / TREND TEYITLI"}
+DEVAMLILIK: {cont_detail if fast_decision else "RURU TREND"}
 
 UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur."""
 
@@ -2263,7 +2403,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL FAST GIR: RURU TREND + FAST TEK-TARAMA GIR/GUCLU GIR + NO IZLE + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nRURU FAST + CONTINUATION: FAST GIR artÄ±k hacim + yeni alÄ±cÄ± akÄ±ÅŸÄ± + MC ilerlemesi teyidiyle Ã§Ä±kar. NO IZLE + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
