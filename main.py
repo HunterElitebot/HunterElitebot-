@@ -9,14 +9,9 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V15.1 FINAL TRIGGER FIX"
-LIQ_CACHE = {}
-LIQ_CACHE_TTL = 300
+VERSION = "V11.34 RURU CORE + LIQ GUARD"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
-SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com").strip()
-HOLDER_RPC_CACHE = {}
-HOLDER_RPC_CACHE_TTL = 900
 
 # V11.5: single-engine mode.
 # Telegram getUpdates polling is OFF by default so another stale/duplicate
@@ -30,339 +25,11 @@ EARLY_MC_MAX = 10000
 MIN_LIQUIDITY = 800
 
 # V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
-WATCH_SCORE = 60
-SIGNAL_SCORE = 75
-
-# V12.6: runner continuation / acceleration (does NOT bypass hard safety gates)
-RUNNER_MAX_MC = 750000.0
-RUNNER_TTL_SEC = 3600
-RUNNER_MIN_SCORE = 72
-RUNNER_MIN_LIQ = 1500.0
-RUNNER_MIN_VOL_LIQ = 0.75
-RUNNER_MIN_BUY_SELL = 1.20
-RUNNER_MIN_PRICE5 = 2.0
-RUNNER_MAX_PRICE5 = 80.0
-RUNNER_STATE = {}
-FINAL_GATE_REJECTS = {}
-QUALITY_GATE_DETAILS = {}
-WATCH_DIAG = {}
-HOLDER_HARD_MAX = 82.0
+WATCH_SCORE = 47
+SIGNAL_SCORE = 60
 SCAN_INTERVAL = 30
 
-# V13.13: rolling candidate pool.
-# This is an additional ranking lane; it NEVER bypasses hard rug/safety gates.
-CANDIDATE_POOL_TTL = 600.0
-CANDIDATE_POOL_MIN_OBS = 2
-CANDIDATE_POOL_SIGNAL_SCORE = 72.0
-CANDIDATE_POOL_MIN_MARGIN = 2.0
-CANDIDATE_POOL = {}
-CANDIDATE_POOL_LOCK = threading.Lock()
-POOL_DIAG = {}
-
-# V11.57 QUALITY MODE
-# Target: roughly 10-20 high-quality alerts/day when the market provides them.
-# Never force a quota by lowering safety/quality.
-QUALITY_SEND_WATCH = False
-QUALITY_DAILY_SIGNAL_CAP = 50
-QUALITY_SIGNAL_MIN_GAP_SEC = 300    # 5 minutes; quality gates still mandatory
-QUALITY_MIN_SCORE = 70
-QUALITY_MAX_TOP10 = 55.0
-QUALITY_MIN_LIQ = 2000.0
-QUALITY_MIN_BUYS_5M = 30
-QUALITY_MIN_VOL_5M = 3000.0
-QUALITY_MIN_BUY_SELL_RATIO = 1.35
-QUALITY_MIN_PRICE5 = -5.0
-QUALITY_MAX_PRICE5 = 80.0
-
-_quality_day = None
-_quality_signal_count = 0
-_quality_last_signal_at = 0.0
-
-def quality_signal_slot_available(now):
-    global _quality_day, _quality_signal_count, _quality_last_signal_at
-    # Turkey local day (UTC+3); only a delivery cap, not a market-data assumption.
-    day = time.strftime("%Y-%m-%d", time.gmtime(now + 3 * 3600))
-    if _quality_day != day:
-        _quality_day = day
-        _quality_signal_count = 0
-        _quality_last_signal_at = 0.0
-    if _quality_signal_count >= QUALITY_DAILY_SIGNAL_CAP:
-        return False
-    if _quality_last_signal_at and now - _quality_last_signal_at < QUALITY_SIGNAL_MIN_GAP_SEC:
-        return False
-    return True
-
-
-def hard_rug_gate(result):
-    """V12 fail-closed gate: critical security uncertainty can never be outscored."""
-    report = result.get("report")
-    if not isinstance(report, dict):
-        return False, "RUGCHECK_MISSING"
-    top10 = num(result.get("top10"))
-    if top10 is None or bool(result.get("holder_unreliable")):
-        return False, "HOLDER_UNVERIFIED"
-    if top10 < 1.0:
-        return False, "HOLDER_IMPLAUSIBLE"
-    if top10 > QUALITY_MAX_TOP10:
-        return False, "HOLDER_CONCENTRATION"
-    # V12.8: "unknown" authority data is uncertainty, not proof of danger.
-    # Explicitly active mint/freeze authority remains a HARD reject.
-    if result.get("mint") is True:
-        return False, "MINT_ACTIVE"
-    if result.get("freeze") is True:
-        return False, "FREEZE_ACTIVE"
-
-    critical_terms = ("honeypot","rug pull","rugpull","bundler","bundle","insider",
-                      "sniper","blacklist","cannot sell","sell blocked")
-    for risk in report.get("risks") or []:
-        if not isinstance(risk, dict):
-            continue
-        combined = f"{risk.get('name','')} {risk.get('description','')} {risk.get('value','')}".lower()
-        level = str(risk.get("level") or risk.get("severity") or "").lower()
-        if level in ("critical","danger","high","error"):
-            return False, "RUG_HIGH_RISK"
-        if any(term in combined for term in critical_terms):
-            if not any(neg in combined for neg in ("no ","not ","none","0%")):
-                return False, "RUG_CRITICAL_TERM"
-    for key in ("honeypot","isHoneypot","rugged","isRugged"):
-        if report.get(key) is True:
-            return False, key.upper()
-    return True, "OK"
-
-
-
-
-def _v126_num(v, default=0.0):
-    try:
-        return float(v if v is not None else default)
-    except Exception:
-        return float(default)
-
-def _v126_metric(m, *names, default=0.0):
-    for name in names:
-        if isinstance(m, dict) and m.get(name) is not None:
-            return _v126_num(m.get(name), default)
-    return float(default)
-
-def v126_runner_metrics(metrics):
-    """Continuation score only. Never overrides rug/auth/holder/crash gates."""
-    mc = _v126_metric(metrics, "market_cap", "mc")
-    liq = _v126_metric(metrics, "liquidity", "liq")
-    vol5 = _v126_metric(metrics, "volume_m5", "vol5", "volume5")
-    buys = _v126_metric(metrics, "buys_m5", "buy5", "buys5")
-    sells = _v126_metric(metrics, "sells_m5", "sell5", "sells5")
-    p5 = _v126_metric(metrics, "price_change_m5", "price5", "price_m5")
-    vl = (vol5 / liq) if liq > 0 else 0.0
-    bs = buys / max(1.0, sells)
-    return mc, liq, vol5, buys, sells, p5, vl, bs
-
-def v126_runner_candidate(metrics, score):
-    mc, liq, vol5, buys, sells, p5, vl, bs = v126_runner_metrics(metrics)
-    return (
-        10000.0 <= mc <= RUNNER_MAX_MC
-        and liq >= RUNNER_MIN_LIQ
-        and score >= RUNNER_MIN_SCORE
-        and vl >= RUNNER_MIN_VOL_LIQ
-        and bs >= RUNNER_MIN_BUY_SELL
-        and RUNNER_MIN_PRICE5 <= p5 <= RUNNER_MAX_PRICE5
-    )
-
-def v126_track_runner(ca, metrics, score):
-    """Tracks multi-scan expansion so one-candle pumps do not become signals."""
-    now = time.time()
-    mc, liq, vol5, buys, sells, p5, vl, bs = v126_runner_metrics(metrics)
-    prev = RUNNER_STATE.get(ca)
-    RUNNER_STATE[ca] = {"ts": now, "mc": mc, "vol5": vol5, "liq": liq}
-    # prune
-    for k, v in list(RUNNER_STATE.items()):
-        if now - _v126_num(v.get("ts")) > RUNNER_TTL_SEC:
-            RUNNER_STATE.pop(k, None)
-    if not prev:
-        return False, 0.0, 0.0
-    mc_accel = ((mc / max(1.0, _v126_num(prev.get("mc")))) - 1.0) * 100.0
-    vol_accel = ((vol5 / max(1.0, _v126_num(prev.get("vol5")))) - 1.0) * 100.0
-    confirmed = v126_runner_candidate(metrics, score) and mc_accel >= 8.0 and vol_accel >= -15.0
-    return confirmed, mc_accel, vol_accel
-
-def v126_gate_reject(reason):
-    reason = str(reason or "UNKNOWN")
-    FINAL_GATE_REJECTS[reason] = FINAL_GATE_REJECTS.get(reason, 0) + 1
-    return False
-
-def fast_launch_hard_gate(result, old_metrics, seen_count, momentum, now):
-    """
-    V13.6 FAST lane.
-    Keeps hard safety, holder verification, trend/momentum, no-repeat and
-    top-chase protection, but deliberately does NOT require quality_signal_gate().
-    """
-    if old_metrics is None:
-        return False, "FAST_WARMUP"
-    if seen_count < TREND_CONFIRM_SCANS:
-        return False, "FAST_TREND_SCANS"
-    if not trend_confirmed(old_metrics, result):
-        return False, "FAST_TREND_NOT_CONFIRMED"
-    if momentum < MIN_MOMENTUM_SIGNAL:
-        return False, "FAST_MOMENTUM_LOW"
-
-    top10 = num(result.get("top10"))
-    if top10 is None or bool(result.get("holder_unreliable")):
-        return False, "FAST_HOLDER_UNVERIFIED"
-    if not (1.0 <= top10 <= QUALITY_MAX_TOP10):
-        return False, "FAST_HOLDER_RANGE"
-
-    rug_ok, rug_reason = hard_rug_gate(result)
-    if not rug_ok:
-        return False, rug_reason
-
-    if result.get("ca") in SIGNALLED_CAS:
-        return False, "ALREADY_SIGNALLED"
-
-    liq = num(result.get("liq"))
-    if liq is None or liq < MIN_LIQUIDITY:
-        return False, "FAST_LIQ_LOW"
-
-    p5 = num(result.get("price5"))
-    rmc = num(result.get("runner_mc_accel"))
-    rvol = num(result.get("runner_vol_accel"))
-    buys = num(result.get("buys5")) or 0
-    sells = num(result.get("sells5")) or 0
-    bs = buys / max(sells, 1)
-
-    if rmc is not None and rmc <= -3.0:
-        return False, "MC_ACCEL_NEGATIVE_HARD"
-    if p5 is not None and p5 > 50.0:
-        return False, "FAST_TOP_CHASE"
-    if rvol is not None and rvol <= 0:
-        return False, "FAST_VOLUME_FADE"
-    if bs < 1.20:
-        return False, "FAST_SELL_PRESSURE"
-
-    if not quality_signal_slot_available(now):
-        return False, "RATE_LIMIT"
-    return True, "FAST_HARD_PASSED"
-
-
-def final_gir_gate(result, old_metrics, seen_count, momentum, now):
-    """
-    V12.1 single authoritative GIR gate.
-    No BREAKOUT/EARLY/STRONG path can bypass these checks.
-    """
-    if old_metrics is None:
-        return False, "WARMUP"
-    if seen_count < TREND_CONFIRM_SCANS:
-        return False, "TREND_SCANS"
-    if not trend_confirmed(old_metrics, result):
-        return False, "TREND_NOT_CONFIRMED"
-    if momentum < MIN_MOMENTUM_SIGNAL:
-        return False, "MOMENTUM_LOW"
-
-    top10 = num(result.get("top10"))
-    if top10 is None or bool(result.get("holder_unreliable")):
-        return False, "HOLDER_UNVERIFIED"
-    if not (1.0 <= top10 <= QUALITY_MAX_TOP10):
-        return False, "HOLDER_RANGE"
-
-    rug_ok, rug_reason = hard_rug_gate(result)
-    if not rug_ok:
-        return False, rug_reason
-
-    # V13 NO REPEAT: once a CA produced a real GÄ°R, never send it again.
-    if result.get("ca") in SIGNALLED_CAS:
-        return False, "ALREADY_SIGNALLED"
-
-    # V13 DUMP / TOP-CHASE SHIELD
-    _p5 = num(result.get("price5"))
-    _rmc = num(result.get("runner_mc_accel"))
-    _rvol = num(result.get("runner_vol_accel"))
-    # V13.2 SMART MC TOLERANCE
-    # Small temporary MC dips may pass only with strong volume + buy pressure.
-    if _rmc is not None and _rmc <= -3.0:
-        return False, "MC_ACCEL_NEGATIVE_HARD"
-    if _rmc is not None and -3.0 < _rmc < 0:
-        _buys = num(result.get("buys5")) or 0
-        _sells = num(result.get("sells5")) or 0
-        _buy_sell = _buys / max(_sells, 1)
-        if _rvol is None or _rvol < 8.0 or _buy_sell < 1.50:
-            return False, "MC_ACCEL_SOFT_FAIL"
-
-    # V13.2 DYNAMIC PRICE GATE
-    # Do not reject a strong runner only because its 5m candle is above +50%.
-    # The faster the price has already moved, the stronger MC + volume acceleration
-    # must be to avoid chasing a local top.
-    if _p5 is not None:
-        if _p5 > 80.0:
-            return False, "PRICE_EXTREME"
-        if _p5 >= 70.0 and (
-            _rmc is None or _rmc < 15.0 or _rvol is None or _rvol < 10.0
-        ):
-            return False, "TOP_CHASE_70"
-        if _p5 >= 50.0 and (
-            _rmc is None or _rmc < 10.0 or _rvol is None or _rvol < 5.0
-        ):
-            return False, "TOP_CHASE_50"
-        if _p5 >= 30.0 and _rvol is not None and _rvol <= 0:
-            return False, "VOLUME_FADE"
-
-    if not quality_signal_gate(result):
-        return False, "QUALITY_GATE"
-
-    if not quality_signal_slot_available(now):
-        return False, "RATE_LIMIT"
-
-    # V12.10 DIAGNOSTIC
-    _runner_mc = result.get("runner_mc_accel")
-    try:
-        _runner_mc = float(_runner_mc) if _runner_mc is not None else None
-    except (TypeError, ValueError):
-        _runner_mc = None
-    if _runner_mc is not None and _runner_mc <= -30.0:
-        return False, "MC_ACCEL_CRITICAL"
-    if _runner_mc is not None and _runner_mc <= -20.0:
-        return False, "MC_ACCEL_NEGATIVE"
-    return True, "PASSED"
-
-
-def quality_signal_gate(result):
-    top10 = num(result.get("top10"))
-    liq = num(result.get("liq"))
-    price5 = num(result.get("price5"))
-    buys = num(result.get("buys5")) or 0
-    sells = num(result.get("sells5")) or 0
-    vol5 = num(result.get("vol5")) or 0
-    score = num(result.get("score")) or 0
-
-    if top10 is None or bool(result.get("holder_unreliable")):
-        QUALITY_GATE_DETAILS["Q1"] = QUALITY_GATE_DETAILS.get("Q1", 0) + 1
-        return False
-    if top10 > QUALITY_MAX_TOP10:
-        QUALITY_GATE_DETAILS["Q2"] = QUALITY_GATE_DETAILS.get("Q2", 0) + 1
-        return False
-    if liq is None or liq < QUALITY_MIN_LIQ:
-        QUALITY_GATE_DETAILS["Q3"] = QUALITY_GATE_DETAILS.get("Q3", 0) + 1
-        return False
-    if score < QUALITY_MIN_SCORE:
-        QUALITY_GATE_DETAILS["Q4"] = QUALITY_GATE_DETAILS.get("Q4", 0) + 1
-        return False
-    if buys < QUALITY_MIN_BUYS_5M:
-        QUALITY_GATE_DETAILS["Q5"] = QUALITY_GATE_DETAILS.get("Q5", 0) + 1
-        return False
-    if vol5 < QUALITY_MIN_VOL_5M:
-        QUALITY_GATE_DETAILS["Q6"] = QUALITY_GATE_DETAILS.get("Q6", 0) + 1
-        return False
-    if buys / max(sells, 1) < QUALITY_MIN_BUY_SELL_RATIO:
-        QUALITY_GATE_DETAILS["Q7"] = QUALITY_GATE_DETAILS.get("Q7", 0) + 1
-        return False
-    if price5 is None or not (QUALITY_MIN_PRICE5 <= price5 <= QUALITY_MAX_PRICE5):
-        QUALITY_GATE_DETAILS["Q8"] = QUALITY_GATE_DETAILS.get("Q8", 0) + 1
-        return False
-    # Avoid chasing a candle that has already expanded too far in a single 5m window.
-    # A later confirmed scan can still qualify if activity remains healthy.
-    if price5 > QUALITY_MAX_PRICE5:
-        QUALITY_GATE_DETAILS["Q9"] = QUALITY_GATE_DETAILS.get("Q9", 0) + 1
-        return False
-    return True
-
-BIRDEYE_POLL_INTERVAL = 180
+BIRDEYE_POLL_INTERVAL = 60
 BIRDEYE_LIMIT = 20
 BIRDEYE_PAGES = 1
 BIRDEYE_NEW_LISTING = "https://public-api.birdeye.so/defi/v2/tokens/new_listing"
@@ -373,17 +40,24 @@ MAX_SIGNAL_DROP_1H = -35.0
 MAX_CRASH_DROP_6H = -35.0
 MAX_CRASH_DROP_24H = -55.0
 
-MIN_MOMENTUM_SIGNAL = 15
+MIN_MOMENTUM_SIGNAL = 10
 MIN_MC_GROWTH = 1.005
 MAX_PAIR_AGE_HOURS = 12.0
 TREND_CONFIRM_SCANS = 2
 
-WATCH_MIN_BUYS_5M = 12
-WATCH_MIN_VOL_5M = 1000
-SIGNAL_MIN_BUYS_5M = 20
-SIGNAL_MIN_BUY_SELL_RATIO = 1.25
-SIGNAL_MIN_VOL_5M = 2000
+WATCH_MIN_BUYS_5M = 2
+WATCH_MIN_VOL_5M = 60
+SIGNAL_MIN_BUYS_5M = 4
+SIGNAL_MIN_BUY_SELL_RATIO = 1.10
+SIGNAL_MIN_VOL_5M = 180
 MIN_VOL_GROWTH = 1.00
+
+# Liquidity Drain Guard
+# V11.34 signal thresholds stay unchanged.
+# This layer only blocks/cancels when liquidity collapses between scans.
+LIQ_DRAIN_GUARD_ENABLED = True
+LIQ_DRAIN_WARN_PCT = 20.0
+LIQ_DRAIN_HARD_PCT = 35.0
 
 STATE_FILE = "/tmp/hunterelite_v11_2_state.json"
 
@@ -395,51 +69,23 @@ SOL_CA = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 signal_chats = set()
 token_states = {}
-SIGNALLED_CAS = set()
 state_lock = threading.Lock()
 birdeye_lock = threading.Lock()
 birdeye_cache = []
 birdeye_last_fetch = 0.0
 birdeye_last_error = ""
-birdeye_last_error_body = ""
-birdeye_cooldown_until = 0
-BIRDEYE_COOLDOWN_SECONDS = 3600
-
-GECKO_POLL_INTERVAL = 30
-GECKO_PAGES = 5
-GECKO_BASE_PAGES = 3
-GECKO_DEEP_SCAN_INTERVAL = 180
-GECKO_429_COOLDOWN = 180
-GECKO_TARGET = 60
-gecko_last_deep_scan = 0.0
-gecko_429_until = 0.0
-gecko_cache = []
-gecko_last_fetch = 0
-gecko_last_error = ""
-gecko_fail_count = 0
-gecko_next_retry = 0
-gecko_last_status = "INIT"
-gecko_lock = threading.Lock()
-gecko_liq_cache = {}
-GECKO_LIQ_CACHE_TTL = 300
-birdeye_listing_liq = {}
 
 radar_stats_lock = threading.Lock()
 last_diag_send = 0.0
 discovery_seen = {}
 candidate_sources = {}
-DEX_BATCH_PAIR_CACHE = {}
-DEX_BATCH_PAIR_CACHE_TS = 0.0
-DEX_BATCH_PAIR_CACHE_TTL = 45
 discovery_seen_lock = threading.Lock()
 DISCOVERY_MEMORY_SECONDS = 21600
 RADAR_RAW_LIMIT = 240
 RADAR_TARGET = 80
 BIRDEYE_TARGET = 80
 DEX_TARGET = 20
-DEX_RESERVED_SLOTS = 30
-GECKO_MAX_SELECTED = 50
-MAX_REPEAT_PER_SCAN = 12
+MAX_REPEAT_PER_SCAN = 20
 FRESH_PAIR_MAX_HOURS = 6.0
 
 VIRAL_RADAR_ENABLED = True
@@ -449,12 +95,11 @@ radar_stats = {
     "updated": 0,
     "radar": 0,
     "processed": 0,
-    "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [], "prepump": 0, "prepump_safe": 0, "src_birdeye": 0, "src_gecko": 0, "src_dex": 0, "src_birdeye_stale": 0, "src_gecko_stale": 0, "src_dex_stale": 0, "src_birdeye_safe": 0, "src_gecko_safe": 0, "src_dex_safe": 0,
-                "holder_unreliable": 0, "safe_score_samples": [], "score_fail_samples": [],
+    "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [], "prepump": 0, "prepump_safe": 0, "src_birdeye": 0, "src_dex": 0, "src_birdeye_stale": 0, "src_dex_stale": 0, "src_birdeye_safe": 0, "src_dex_safe": 0,
     "basic_fail": 0,
     "crash_fail": 0,
     "watch": 0,
-    "signal": 0, "breakout": 0, "strong_gir": 0, "decision_izle": 0,
+    "signal": 0,
     "mc_fail": 0,
     "liq_fail": 0,
     "holder_fail": 0,
@@ -466,7 +111,7 @@ radar_stats = {
     "trend_fail": 0,
     "momentum_fail": 0,
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
-    "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "liq_gecko_ok": 0, "liq_gecko_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
+    "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
     "momentum_pass": 0,
 }
@@ -480,9 +125,6 @@ def load_state():
         if isinstance(data, dict):
             with state_lock:
                 token_states.update(data)
-                for _ca, _st in data.items():
-                    if isinstance(_st, dict) and (_st.get("ever_signalled") or _st.get("stage") == "SIGNAL"):
-                        SIGNALLED_CAS.add(_ca)
     except Exception as e:
         print("STATE LOAD WARNING:", repr(e), flush=True)
 
@@ -510,155 +152,6 @@ def get_json(url, timeout=15, headers=None):
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8", errors="replace"))
 
-
-def rpc_json(method, params, timeout=10):
-    """Minimal Solana JSON-RPC POST helper; read-only holder verification only."""
-    payload = json.dumps({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": method,
-        "params": params,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        SOLANA_RPC_URL,
-        data=payload,
-        method="POST",
-        headers={
-            "User-Agent": "HunterElite-V11.57",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        data = json.loads(r.read().decode("utf-8", errors="replace"))
-    if not isinstance(data, dict) or data.get("error"):
-        raise RuntimeError(f"RPC {method} error: {data.get('error') if isinstance(data, dict) else data}")
-    return data.get("result")
-
-
-def _protocol_holder_accounts(report):
-    """
-    Build a conservative exclusion set for protocol/AMM inventory accounts.
-    RugCheck reports markets + knownAccounts; those are not ordinary user wallets.
-    """
-    addresses, owners = set(), set()
-    if not isinstance(report, dict):
-        return addresses, owners
-
-    for market in report.get("markets") or []:
-        if not isinstance(market, dict):
-            continue
-        for key in ("pubkey", "liquidityA", "liquidityB"):
-            value = market.get(key)
-            if value:
-                addresses.add(str(value))
-        for key in ("liquidityAAccount", "liquidityBAccount"):
-            acct = market.get(key) or {}
-            if isinstance(acct, dict):
-                owner = acct.get("owner")
-                if owner:
-                    owners.add(str(owner))
-
-    known = report.get("knownAccounts") or {}
-    if isinstance(known, dict):
-        for address, meta in known.items():
-            meta = meta or {}
-            blob = f"{meta.get('name','')} {meta.get('type','')}".lower() if isinstance(meta, dict) else str(meta).lower()
-            if any(word in blob for word in ("amm", "pool", "dex", "market", "bonding", "liquidity")):
-                addresses.add(str(address))
-
-    return addresses, owners
-
-
-def _holder_rpc_prequal(metrics):
-    """
-    V12.3 holder recovery prequal.
-    Holder verification now runs for every plausible radar candidate that has
-    enough market/liquidity data, instead of waiting for strong activity.
-    This improves Top-10 coverage while the FINAL GIR gate remains unchanged.
-    """
-    if not isinstance(metrics, dict):
-        return False
-    mc = num(metrics.get("mc"))
-    liq = num(metrics.get("liq"))
-    if mc is None or not (1000 <= mc <= 15000):
-        return False
-    if liq is None or liq < 800:
-        return False
-    return True
-
-
-
-def rpc_holder_top10(ca: str):
-    """V12.4 robust Solana Top-10 verification with owner lookup as best-effort."""
-    now = time.time()
-    cached = HOLDER_RPC_CACHE.get(ca)
-    if cached and now - cached[0] < HOLDER_RPC_CACHE_TTL:
-        return cached[1]
-    try:
-        largest = solana_rpc_call("getTokenLargestAccounts", [ca, {"commitment": "confirmed"}])
-        supply_resp = solana_rpc_call("getTokenSupply", [ca, {"commitment": "confirmed"}])
-        vals = ((largest or {}).get("result") or {}).get("value") or []
-        supply_obj = (((supply_resp or {}).get("result") or {}).get("value") or {})
-        supply_raw = num(supply_obj.get("amount"))
-        if not vals or not supply_raw or supply_raw <= 0:
-            result = (None, None, None, False)
-            HOLDER_RPC_CACHE[ca] = (now, result)
-            return result
-
-        accounts = []
-        for row in vals:
-            if not isinstance(row, dict):
-                continue
-            amount = num(row.get("amount"))
-            address = str(row.get("address") or "").strip()
-            if amount is not None and amount >= 0:
-                accounts.append((address, float(amount)))
-        if not accounts:
-            result = (None, None, None, False)
-            HOLDER_RPC_CACHE[ca] = (now, result)
-            return result
-
-        raw_amounts = sorted((a for _, a in accounts), reverse=True)
-        raw_top10 = max(0.0, min(100.0, 100.0 * sum(raw_amounts[:10]) / float(supply_raw)))
-
-        # Owner aggregation is useful but must not make the fallback collapse.
-        owner_totals = {}
-        for address, amount in accounts[:20]:
-            if not address:
-                continue
-            try:
-                info = solana_rpc_call("getAccountInfo", [
-                    address, {"encoding": "jsonParsed", "commitment": "confirmed"}
-                ])
-                value = ((info or {}).get("result") or {}).get("value") or {}
-                data = value.get("data") or {}
-                parsed = (data.get("parsed") or {}) if isinstance(data, dict) else {}
-                info_obj = parsed.get("info") or {}
-                owner = str(info_obj.get("owner") or "").strip()
-                if owner:
-                    owner_totals[owner] = owner_totals.get(owner, 0.0) + amount
-            except Exception:
-                continue
-
-        if owner_totals:
-            amounts = sorted(owner_totals.values(), reverse=True)
-            top10 = max(0.0, min(100.0, 100.0 * sum(amounts[:10]) / float(supply_raw)))
-            source = "SOLANA_RPC_OWNER"
-        else:
-            top10 = raw_top10
-            source = "SOLANA_RPC_ACCOUNTS"
-
-        reliable = 1.0 <= top10 < 98.0
-        result = (top10 if reliable else None, raw_top10, source, not reliable)
-        HOLDER_RPC_CACHE[ca] = (now, result)
-        return result
-    except Exception as e:
-        print("HOLDER RPC FALLBACK ERROR:", ca, repr(e), flush=True)
-        result = (None, None, None, False)
-        HOLDER_RPC_CACHE[ca] = (time.time() - HOLDER_RPC_CACHE_TTL + 90, result)
-        return result
-
 def telegram(method, data=None, timeout=35):
     data = data or {}
     body = urllib.parse.urlencode(data).encode("utf-8")
@@ -668,7 +161,7 @@ def telegram(method, data=None, timeout=35):
 
 def clean_telegram_text(text):
     """One final cleanup point for every outgoing Telegram message."""
-    cleaned_text = "" if text is None else str(text)
+    s = "" if text is None else str(text)
     replacements = {
         "âš ï¸": "UYARI:", "ğŸ‘€": "", "ğŸš¨": "", "ğŸ’": "", "ğŸŸ¡": "",
         "ğŸ”´": "", "ğŸŸ¢": "", "â³": "", "ğŸ“ˆ": "", "ğŸ“Š": "", "ğŸ’§": "",
@@ -689,28 +182,17 @@ def clean_telegram_text(text):
         "VERÄ° ALINAMADI": "VERI BEKLENIYOR",
     }
     for old, new in replacements.items():
-        cleaned_text = cleaned_text.replace(old, new)
-    return cleaned_text.replace("\ufffd", "")
+        s = s.replace(old, new)
+    return s.replace("\ufffd", "")
 
-def send_clickable_ca(chat_id, ca):
-    if not ca:
-        return
-    ca = str(ca).strip()
-    url = f"https://axiom.trade/t/{ca}?chain=sol"
-    send(chat_id, f'<a href="{url}">{ca}</a>', parse_mode="HTML")
-
-
-def send(chat_id, text, parse_mode=None):
+def send(chat_id, text):
     try:
         text = clean_telegram_text(text)
-        payload = {
+        telegram("sendMessage", {
             "chat_id": str(chat_id),
             "text": text[:4000],
             "disable_web_page_preview": "true"
-        }
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
-        telegram("sendMessage", payload)
+        })
     except Exception as e:
         print("SEND ERROR:", repr(e), flush=True)
 
@@ -765,51 +247,11 @@ def dex_pairs(ca):
             print("DEX PAIR ERROR:", repr(e), flush=True)
     return []
 
-def refresh_dex_batch_pairs(addresses):
-    """V13.10: fetch pair data in batches of up to 30 token addresses."""
-    global DEX_BATCH_PAIR_CACHE, DEX_BATCH_PAIR_CACHE_TS
-    now = time.time()
-    addresses = [a for a in dict.fromkeys(addresses or []) if a and SOL_CA.fullmatch(str(a))]
-    if not addresses:
-        return
-
-    fresh = {}
-    for i in range(0, len(addresses), 30):
-        chunk = addresses[i:i+30]
-        url = "https://api.dexscreener.com/tokens/v1/solana/" + ",".join(chunk)
-        try:
-            data = get_json(url, timeout=15)
-            pairs = data if isinstance(data, list) else []
-            for p in pairs:
-                if not isinstance(p, dict):
-                    continue
-                base = (p.get("baseToken") or {}).get("address")
-                quote = (p.get("quoteToken") or {}).get("address")
-                for ca in (base, quote):
-                    if ca in addresses:
-                        prev = fresh.get(ca)
-                        liq = num((p.get("liquidity") or {}).get("usd")) or 0
-                        prev_liq = num(((prev or {}).get("liquidity") or {}).get("usd")) or 0
-                        if prev is None or liq > prev_liq:
-                            fresh[ca] = p
-        except Exception as e:
-            print("DEX BATCH ERROR:", repr(e), flush=True)
-
-    if fresh:
-        DEX_BATCH_PAIR_CACHE.update(fresh)
-    DEX_BATCH_PAIR_CACHE_TS = now
-
-
 def best_pair(ca):
-    cached = DEX_BATCH_PAIR_CACHE.get(ca)
-    if cached is not None:
-        return cached
     pairs = dex_pairs(ca)
     if not pairs:
         return None
-    best = max(pairs, key=lambda p: num((p.get("liquidity") or {}).get("usd"), 0))
-    DEX_BATCH_PAIR_CACHE[ca] = best
-    return best
+    return max(pairs, key=lambda p: num((p.get("liquidity") or {}).get("usd"), 0))
 
 def extract_birdeye_items(payload):
     if not isinstance(payload, dict):
@@ -855,18 +297,11 @@ def birdeye_item_time(item):
 
 def birdeye_new_candidates(force=False):
     global birdeye_cache, birdeye_last_fetch, birdeye_last_error
-    global birdeye_listing_liq, birdeye_cooldown_until, birdeye_last_error_body
 
     if not BIRDEYE_API_KEY:
         return []
 
     now = time.time()
-
-    # If Birdeye quota/rate limit was exceeded, do not hammer the API.
-    if now < birdeye_cooldown_until:
-        with birdeye_lock:
-            return list(birdeye_cache)
-
     with birdeye_lock:
         if not force and birdeye_cache and now - birdeye_last_fetch < BIRDEYE_POLL_INTERVAL:
             return list(birdeye_cache)
@@ -879,36 +314,28 @@ def birdeye_new_candidates(force=False):
                 "meme_platform_enabled": "true",
             })
         )
-
         payload = get_json(
             url,
             timeout=15,
-            headers={
-                "X-API-KEY": BIRDEYE_API_KEY,
-                "x-chain": "solana",
-                "accept": "application/json",
-            },
+            headers={"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"},
         )
-
         items = extract_birdeye_items(payload)
-        newest = []
-        listing_liq = {}
 
+        newest = []
         for item in items:
             if not isinstance(item, dict):
                 continue
+            ca = ""
+            for key in ("address", "token_address", "tokenAddress", "mint", "mintAddress"):
+                raw = item.get(key)
+                if raw:
+                    ca = str(raw).strip()
+                    break
+            if ca and SOL_CA.match(ca):
+                newest.append(ca)
 
-            ca = str(item.get("address") or "").strip()
-            if not (ca and SOL_CA.fullmatch(ca)):
-                continue
-
-            newest.append(ca)
-
-            liq = num(item.get("liquidity"))
-            if liq is not None and liq > 0:
-                listing_liq[ca] = liq
-                LIQ_CACHE[ca] = (liq, now)
-
+        # Rolling ingestion: each poll contributes up to 20 new addresses.
+        # Keep the newest unique 80 so repeated scans don't pretend one response is 60/120 listings.
         with birdeye_lock:
             merged = []
             seen = set()
@@ -916,17 +343,12 @@ def birdeye_new_candidates(force=False):
                 if ca not in seen:
                     seen.add(ca)
                     merged.append(ca)
-
             birdeye_cache = merged[:80]
-            birdeye_listing_liq.update(listing_liq)
             birdeye_last_fetch = now
             birdeye_last_error = ""
-            birdeye_last_error_body = ""
-            birdeye_cooldown_until = 0
 
         print(
-            f"BIRDEYE COOLDOWN FEED OK: api={len(newest)} cache={len(birdeye_cache)} "
-            f"listing_liq={len(listing_liq)}",
+            f"BIRDEYE ROLLING FRESH: api={len(newest)} cache={len(birdeye_cache)}",
             flush=True,
         )
         return list(birdeye_cache)
@@ -936,231 +358,21 @@ def birdeye_new_candidates(force=False):
             body = e.read().decode("utf-8", errors="replace")
         except Exception:
             body = ""
-
-        body_clean = " ".join(body.split())[:900]
-        err = f"HTTP {e.code}: {body_clean}"
-
-        birdeye_last_error_body = body_clean
-        err_lower = err.lower()
-
-        if "exceeded" in err_lower or e.code == 429:
-            birdeye_cooldown_until = now + BIRDEYE_COOLDOWN_SECONDS
-            print(
-                f"BIRDEYE COOLDOWN ACTIVE: {BIRDEYE_COOLDOWN_SECONDS}s | "
-                f"status={e.code} | body={body_clean}",
-                flush=True,
-            )
-        else:
-            print(
-                f"BIRDEYE FEED ERROR: status={e.code} | body={body_clean}",
-                flush=True,
-            )
-
+        err = f"HTTP {e.code}: {body[:220]}"
         with birdeye_lock:
             birdeye_last_error = err
             birdeye_last_fetch = now
-            cached = list(birdeye_cache)
-
-        return cached
+        print("BIRDEYE ERROR:", err, flush=True)
 
     except Exception as e:
         err = repr(e)
-        err_lower = err.lower()
-
-        # V13.3: some quota failures can arrive wrapped instead of as HTTPError.
-        # Treat any explicit quota/rate-limit signature as a real cooldown event.
-        if (
-            "compute units usage limit exceeded" in err_lower
-            or "usage limit exceeded" in err_lower
-            or "rate limit" in err_lower
-            or "http error 429" in err_lower
-        ):
-            birdeye_cooldown_until = now + BIRDEYE_COOLDOWN_SECONDS
-            print(
-                f"BIRDEYE COOLDOWN ACTIVE (WRAPPED): {BIRDEYE_COOLDOWN_SECONDS}s | {err}",
-                flush=True,
-            )
-
         with birdeye_lock:
             birdeye_last_error = err
             birdeye_last_fetch = now
-            cached = list(birdeye_cache)
+        print("BIRDEYE ERROR:", err, flush=True)
 
-        print("BIRDEYE FEED ERROR:", err, flush=True)
-        return cached
-
-def gecko_new_candidates(force=False):
-    """
-    V12.2 resilient GeckoTerminal feed.
-    - Per-page isolation: one failed page no longer kills the whole feed.
-    - Alternate endpoint fallback.
-    - Exponential retry backoff on 429/5xx/network errors.
-    - Keeps last good cache instead of dropping radar coverage to zero.
-    """
-    global gecko_cache, gecko_last_fetch, gecko_last_error, gecko_liq_cache
-    global gecko_fail_count, gecko_next_retry, gecko_last_status
-    global gecko_last_deep_scan, gecko_429_until
-
-    now = time.time()
-    with gecko_lock:
-        if not force and now < gecko_next_retry:
-            gecko_last_status = "BACKOFF"
-            return list(gecko_cache)
-        if not force and gecko_cache and now - gecko_last_fetch < GECKO_POLL_INTERVAL:
-            gecko_last_status = "CACHE"
-            return list(gecko_cache)
-
-    found, seen, liq_updates = [], set(), {}
-    errors = []
-    pages_ok = 0
-
-    endpoint_templates = [
-        "https://api.geckoterminal.com/api/v2/networks/solana/new_pools",
-        "https://api.geckoterminal.com/api/v2/networks/solana/pools",
-    ]
-
-    # V13.12.3 adaptive paging:
-    # Pages 1-3 stay fresh every 30s. Pages 4-5 are deep-scan only every 3 min,
-    # and are suspended for 3 min after any 429.
-    deep_allowed = (
-        now >= gecko_429_until
-        and (now - gecko_last_deep_scan) >= GECKO_DEEP_SCAN_INTERVAL
-    )
-    page_limit = GECKO_PAGES if deep_allowed else GECKO_BASE_PAGES
-    if deep_allowed:
-        gecko_last_deep_scan = now
-
-    stop_deep = False
-    for endpoint in endpoint_templates:
-        endpoint_found_before = len(found)
-        for page in range(1, page_limit + 1):
-            if stop_deep and page > GECKO_BASE_PAGES:
-                break
-            url = endpoint + "?" + urllib.parse.urlencode({
-                "include": "base_token",
-                "page": page,
-            })
-            try:
-                payload = get_json(
-                    url,
-                    timeout=15,
-                    headers={
-                        "accept": "application/json",
-                        "User-Agent": "HunterElite-V12.2",
-                    },
-                )
-                if not isinstance(payload, dict):
-                    errors.append(f"page{page}:BAD_PAYLOAD")
-                    continue
-
-                included_map = {}
-                included = payload.get("included")
-                if isinstance(included, list):
-                    for obj in included:
-                        if not isinstance(obj, dict):
-                            continue
-                        oid = str(obj.get("id") or "")
-                        attrs = obj.get("attributes")
-                        attrs = attrs if isinstance(attrs, dict) else {}
-                        address = str(attrs.get("address") or "").strip()
-                        if oid and address:
-                            included_map[oid] = address
-
-                rows = payload.get("data")
-                if not isinstance(rows, list):
-                    errors.append(f"page{page}:NO_DATA")
-                    continue
-
-                pages_ok += 1
-                for pool in rows:
-                    if not isinstance(pool, dict):
-                        continue
-                    attrs = pool.get("attributes")
-                    attrs = attrs if isinstance(attrs, dict) else {}
-                    relationships = pool.get("relationships")
-                    relationships = relationships if isinstance(relationships, dict) else {}
-                    base_rel = relationships.get("base_token")
-                    base_rel = base_rel if isinstance(base_rel, dict) else {}
-                    base_data = base_rel.get("data")
-                    base_data = base_data if isinstance(base_data, dict) else {}
-                    base_id = str(base_data.get("id") or "")
-
-                    ca = included_map.get(base_id, "")
-                    if not ca and "_" in base_id:
-                        maybe = base_id.split("_", 1)[-1].strip()
-                        if SOL_CA.fullmatch(maybe):
-                            ca = maybe
-                    if not (ca and SOL_CA.fullmatch(ca)):
-                        continue
-
-                    gecko_liq = None
-                    for key in ("reserve_in_usd", "liquidity_usd", "reserve_usd"):
-                        gecko_liq = num(attrs.get(key))
-                        if gecko_liq is not None:
-                            break
-                    if gecko_liq is not None and gecko_liq > 0:
-                        liq_updates[ca] = (gecko_liq, now)
-
-                    if ca not in seen:
-                        seen.add(ca)
-                        found.append(ca)
-
-            except Exception as e:
-                err_text = f"page{page}:{type(e).__name__}:{str(e)[:90]}"
-                errors.append(err_text)
-                if "429" in str(e) or "Too Many Requests" in str(e):
-                    gecko_429_until = now + GECKO_429_COOLDOWN
-                    if page > GECKO_BASE_PAGES:
-                        stop_deep = True
-                continue
-
-        # Prefer new_pools; only use broad pools endpoint if new_pools gave nothing.
-        if len(found) > endpoint_found_before:
-            break
-
-    with gecko_lock:
-        if found:
-            merged, merged_seen = [], set()
-            for ca in found + list(gecko_cache):
-                if ca not in merged_seen:
-                    merged_seen.add(ca)
-                    merged.append(ca)
-            gecko_cache = merged[:160]
-            gecko_liq_cache.update(liq_updates)
-
-            expired = [
-                ca for ca, (_, ts) in gecko_liq_cache.items()
-                if now - ts > GECKO_LIQ_CACHE_TTL
-            ]
-            for ca in expired:
-                gecko_liq_cache.pop(ca, None)
-
-            gecko_last_fetch = now
-            gecko_fail_count = 0
-            gecko_next_retry = 0
-            gecko_last_error = "; ".join(errors[-2:]) if errors else ""
-            gecko_last_status = "PARTIAL" if errors else "OK"
-        else:
-            gecko_fail_count += 1
-            # 30s, 60s, 120s, 240s, capped at 5m.
-            backoff = min(300, 30 * (2 ** min(gecko_fail_count - 1, 4)))
-            gecko_next_retry = now + backoff
-            gecko_last_fetch = now
-            gecko_last_error = "; ".join(errors[-3:]) if errors else "NO_RESULTS"
-            gecko_last_status = "BACKOFF" if gecko_cache else "ERR"
-
-        cached = list(gecko_cache)
-
-    print(
-        f"GECKO FEED {gecko_last_status}: api={len(found)} cache={len(cached)} "
-        f"liq={len(liq_updates)} pages_ok={pages_ok}/{page_limit} "
-        f"deep={'ON' if deep_allowed else 'OFF'} "
-        f"429cd={max(0,int(gecko_429_until-time.time()))}s "
-        f"retry={max(0,int(gecko_next_retry-time.time()))}s "
-        f"err={gecko_last_error[:180]}",
-        flush=True,
-    )
-    return cached
+    with birdeye_lock:
+        return list(birdeye_cache)
 
 def discovery_candidates():
     endpoints = [
@@ -1179,15 +391,6 @@ def discovery_candidates():
             birdeye_found.append(ca)
             candidate_sources[ca] = "BIRDEYE"
 
-    # Keyless fresh-pool fallback, especially important while Birdeye is in cooldown.
-    gecko_found, gecko_seen = [], set()
-    for ca in gecko_new_candidates():
-        if not ca or ca in birdeye_seen or ca in gecko_seen:
-            continue
-        gecko_seen.add(ca)
-        gecko_found.append(ca)
-        candidate_sources[ca] = "GECKO"
-
     dex_found, dex_seen = [], set()
     for url in endpoints:
         try:
@@ -1198,9 +401,9 @@ def discovery_candidates():
                 if str(item.get("chainId", "")).lower() != "solana":
                     continue
                 ca = str(item.get("tokenAddress", "")).strip()
-                if not (ca and SOL_CA.fullmatch(ca)):
+                if not (ca and SOL_CA.match(ca)):
                     continue
-                if ca in birdeye_seen or ca in gecko_seen or ca in dex_seen:
+                if ca in birdeye_seen or ca in dex_seen:
                     continue
                 dex_seen.add(ca)
                 dex_found.append(ca)
@@ -1208,104 +411,30 @@ def discovery_candidates():
         except Exception as e:
             print("DISCOVERY ERROR:", repr(e), flush=True)
 
-    selected = []
-    selected_seen = set()
-
-    # V15.1: armed micro candidates must be seen again or 2-tick confirmation
-    # cannot work reliably. Reserve up to 12 slots for live pending candidates.
-    _micro_rescan = []
-    with state_lock:
-        for _ca, _st in token_states.items():
-            if not isinstance(_st, dict):
-                continue
-            _mp = _st.get("micro_pending")
-            if not isinstance(_mp, dict):
-                continue
-            _mp_time = num(_mp.get("time")) or 0
-            if 0 <= time.time() - _mp_time <= 150:
-                _micro_rescan.append((_mp_time, _ca))
-    _micro_rescan = [ca for _, ca in sorted(_micro_rescan, reverse=True)[:12]]
-
-    def _add(ca):
-        if ca and ca not in selected_seen and len(selected) < RADAR_TARGET:
-            selected.append(ca)
-            selected_seen.add(ca)
-            return True
-        return False
-
-    for _ca in _micro_rescan:
-        if _ca not in candidate_sources:
-            candidate_sources[_ca] = "GECKO"
-        _add(_ca)
-
-    # V13.5 FRESH RADAR MIX
-    # Birdeye still gets first priority when healthy, but Gecko can no longer
-    # consume the entire 80-token radar before DEX fresh discovery is considered.
-    for ca in birdeye_found:
-        if len(selected) >= RADAR_TARGET:
-            break
-        _add(ca)
-
-    # When Birdeye is unavailable, cap Gecko at 60 so DEX has 20 real slots.
-    # If Birdeye contributes, only use Gecko up to the point that still preserves
-    # the DEX reserve.
-    gecko_cap_total = max(0, RADAR_TARGET - DEX_RESERVED_SLOTS)
-    gecko_added = 0
-    for ca in gecko_found:
-        if len(selected) >= gecko_cap_total or gecko_added >= GECKO_MAX_SELECTED:
-            break
-        if _add(ca):
-            gecko_added += 1
-
-    # DEX now gets reserved live-discovery capacity instead of being a last-resort
-    # fallback that often ended at DEX=0.
-    dex_added = 0
-    for ca in dex_found:
-        if len(selected) >= RADAR_TARGET or dex_added >= DEX_RESERVED_SLOTS:
-            break
-        if _add(ca):
-            dex_added += 1
-
-    # Never waste empty slots: after the DEX reservation was attempted, fill any
-    # remaining capacity with unused Gecko then unused DEX candidates.
-    for ca in gecko_found:
-        if len(selected) >= RADAR_TARGET:
-            break
-        _add(ca)
-
-    for ca in dex_found:
-        if len(selected) >= RADAR_TARGET:
-            break
-        _add(ca)
-
-    # V13.12: prioritize contracts not seen recently, then fill with repeats.
-    # This increases the chance of catching launch-stage runners without weakening GÄ°R gates.
-    now_seen = time.time()
-    with discovery_seen_lock:
-        expired = [ca for ca, ts in discovery_seen.items()
-                   if now_seen - ts > DISCOVERY_MEMORY_SECONDS]
-        for ca in expired:
-            discovery_seen.pop(ca, None)
-
-        fresh = [ca for ca in selected if ca not in discovery_seen]
-        repeats = [ca for ca in selected if ca in discovery_seen]
-        ordered = fresh + repeats[:MAX_REPEAT_PER_SCAN]
-
-        # If the fresh+repeat cap leaves room, preserve radar coverage rather than shrinking scan.
-        if len(ordered) < RADAR_TARGET:
-            used = set(ordered)
-            ordered.extend(ca for ca in selected if ca not in used)
-
-        # Do NOT mark candidates as seen here.
-        # The scanner owns the unique_new/repeat accounting immediately after
-        # discovery_candidates() returns. Pre-marking here made every candidate
-        # appear as repeat=80 even on the first scan.
-
-    return ordered[:RADAR_TARGET]
+    birdeye_selected = birdeye_found[:BIRDEYE_TARGET]
+    remaining = max(0, RADAR_TARGET - len(birdeye_selected))
+    dex_selected = dex_found[:min(DEX_TARGET, remaining)]
+    return (birdeye_selected + dex_selected)[:RADAR_TARGET]
 
 def birdeye_market_data(ca):
-    """Disabled as a hard dependency: fresh listings use listing liquidity + DEX + cache."""
-    return None
+    """Fetch Birdeye single-token market data as fallback when DEX liquidity is missing."""
+    if not BIRDEYE_API_KEY:
+        return None
+    try:
+        url = (
+            "https://public-api.birdeye.so/defi/v3/token/market-data?"
+            + urllib.parse.urlencode({"address": ca})
+        )
+        payload = get_json(
+            url,
+            timeout=12,
+            headers={"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"},
+        )
+        data = payload.get("data") if isinstance(payload, dict) else None
+        return data if isinstance(data, dict) else None
+    except Exception as e:
+        print("BIRDEYE MARKET DATA ERROR:", ca, repr(e), flush=True)
+        return None
 
 
 def rugcheck(ca):
@@ -1316,122 +445,28 @@ def rugcheck(ca):
         return None
 
 def holder_pct(holder):
-    """
-    RugCheck topHolders[].pct is already expressed in percentage points.
-    Example: pct=0.867 means 0.867%, NOT 86.7%.
-    """
     if not isinstance(holder, dict):
         return None
-
-    # RugCheck's canonical field: already percent units.
-    value = num(holder.get("pct"))
-    if value is not None:
-        return value if 0 <= value <= 100 else None
-
-    # Defensive fallbacks for alternate schemas.
-    for key in ("percentage", "percent"):
-        value = num(holder.get(key))
-        if value is not None:
-            return value if 0 <= value <= 100 else None
-
-    # Only this explicitly named ownership field may be fractional in some APIs.
-    value = num(holder.get("ownershipPercentage"))
-    if value is not None:
-        if 0 <= value <= 1:
-            value *= 100
-        return value if 0 <= value <= 100 else None
-
-    return None
-
-def rugcheck_holder_risk(report):
-    """Return True only when RugCheck itself reports holder concentration risk."""
-    if not isinstance(report, dict):
-        return False
-    try:
-        blob = json.dumps(report.get("risks") or [], ensure_ascii=False).lower()
-    except Exception:
-        blob = str(report.get("risks") or []).lower()
-    needles = (
-        "top 10 holder", "top10 holder", "top-10 holder",
-        "single holder", "holder ownership", "high ownership",
-        "large amount of the token supply", "holder concentrat",
-    )
-    return any(n in blob for n in needles)
-
-
-def _holder_identity(holder, index):
-    if not isinstance(holder, dict):
-        return f"row:{index}"
-    for key in ("owner", "address", "pubkey", "tokenAccount", "token_account"):
+    for key in ("pct", "percentage", "percent", "ownershipPercentage"):
         value = holder.get(key)
-        if value:
-            return str(value)
-    return f"row:{index}"
-
-
-def holders(report):
-    """
-    Primary Top-1/5/10 calculation from RugCheck.
-
-    V11.57 excludes accounts/owners that RugCheck itself identifies as
-    AMM/pool/market/bonding-curve inventory before calculating user-wallet
-    concentration. This prevents a pool inventory from masquerading as a
-    single whale while still keeping true user concentration as a hard gate.
-    """
-    if not report:
-        return None, None, None, False, None
-
-    items = report.get("topHolders") or report.get("top_holders") or []
-    protocol_addresses, protocol_owners = _protocol_holder_accounts(report)
-    owner_values = {}
-    anonymous_values = []
-
-    for index, item in enumerate(items):
-        if not isinstance(item, dict):
-            continue
-        value = holder_pct(item)
         if value is None:
             continue
-
-        address = str(item.get("address") or item.get("tokenAccount") or item.get("token_account") or "")
-        owner = str(item.get("owner") or "")
-
-        if address and address in protocol_addresses:
+        value = num(value)
+        if value is None:
             continue
-        if owner and (owner in protocol_owners or owner in protocol_addresses):
-            continue
+        if 0 <= value <= 1:
+            value *= 100
+        return value
+    return None
 
-        if owner:
-            # Multiple token accounts belonging to the same wallet are one holder.
-            owner_values[owner] = owner_values.get(owner, 0.0) + value
-        else:
-            anonymous_values.append(value)
-
-    rows = sorted(list(owner_values.values()) + anonymous_values, reverse=True)
-    if not rows:
-        return None, None, None, False, None
-
-    top1 = rows[0]
-    top5 = sum(rows[:5])
-    raw_top10 = sum(rows[:10])
-
-    if top1 > 100 or top5 > 100.5 or raw_top10 > 100.5:
-        return None, None, None, True, raw_top10
-
-    # Verified primary path requires enough actual user-holder rows.
-    # If fewer than 10 remain, RPC fallback may complete verification later.
-    if len(rows) < 10:
-        return top1, top5, None, True, raw_top10
-
-    # V12.1: both extremes are suspicious on ultra-fresh meme tokens.
-    # <1% usually means protocol/pool exclusion or incomplete holder parsing;
-    # ~100% usually means protocol inventory was counted as holders.
-    unreliable = (
-        raw_top10 < 1.0
-        or (raw_top10 >= 98.0 and not rugcheck_holder_risk(report))
-    )
-    top10 = None if unreliable else raw_top10
-    return top1, top5, top10, unreliable, raw_top10
+def holders(report):
+    if not report:
+        return None, None, None
+    items = report.get("topHolders") or report.get("top_holders") or []
+    values = [v for v in (holder_pct(i) for i in items) if v is not None]
+    if not values:
+        return None, None, None
+    return values[0], sum(values[:5]), sum(values[:10])
 
 def authority(report, key):
     if not report:
@@ -1550,19 +585,7 @@ def calculate_score(pair, report):
         score -= 20
         risks.append("Likidite dÃ¼ÅŸÃ¼k")
 
-    top1, top5, top10, holder_unreliable, holder_raw_top10 = holders(report)
-    holder_source = "RUGCHECK" if top10 is not None and not holder_unreliable else "UNVERIFIED"
-
-    # V11.57: only promising candidates spend RPC calls on secondary verification.
-    ca = str(((pair.get("baseToken") or {}).get("address") or "")).strip()
-    if (top10 is None or holder_unreliable) and _holder_rpc_prequal(metrics):
-        stats["holder_rpc_attempt"] = stats.get("holder_rpc_attempt", 0) + 1
-        r1, r5, r10, rpc_reliable = rpc_holder_top10(ca, report)
-        if rpc_reliable and r10 is not None:
-            top1, top5, top10 = r1, r5, r10
-            holder_unreliable = False
-            holder_raw_top10 = r10
-            holder_source = "SOLANA_RPC"
+    top1, top5, top10 = holders(report)
 
     if report is None:
         score -= 15
@@ -1655,10 +678,6 @@ def calculate_score(pair, report):
         "top1": top1,
         "top5": top5,
         "top10": top10,
-        "holder_raw_top10": holder_raw_top10,
-        "holder_unreliable": holder_unreliable,
-        "holder_source": holder_source,
-        "report": report,
         "mint": mint,
         "freeze": freeze,
         "signals": sig,
@@ -1769,25 +788,7 @@ def simple_action(result, momentum=0, previous=None):
     if sells > buys * 1.35 and buys + sells >= 8:
         return "ğŸ”´ SAT / GÄ°RME"
 
-    decision = unified_gir_decision(result, momentum, previous)
-
-    is_breakout = decision == "BREAKOUT_GIR"
-
-    is_strong_gir = decision == "STRONG_GIR"
-
-    if is_breakout:
-
-        stats["breakout"] = stats.get("breakout", 0) + 1
-
-    elif is_strong_gir:
-
-        stats["strong_gir"] = stats.get("strong_gir", 0) + 1
-
-    else:
-
-        stats["decision_izle"] = stats.get("decision_izle", 0) + 1
-
-    if decision in ("BREAKOUT_GIR", "STRONG_GIR"):
+    if strong_signal(result, momentum, previous):
         return "ğŸŸ¢ GÄ°R"
 
     if watch_candidate(result):
@@ -1834,7 +835,7 @@ Mint authority: {authority_text(result["mint"])}
 Freeze authority: {authority_text(result["freeze"])}
 
 ğŸ›¡ Hunter Elite Score: {result["score"]}/100
-ğŸ’ Potansiyel: {_watch_potential}
+ğŸ’ Potansiyel: IZLE
 
 ğŸ¯ Karar: {result["decision"]}"""
 
@@ -1855,7 +856,7 @@ def basic_signal_safe(result):
         return False
     if result["liq"] is None or result["liq"] < MIN_LIQUIDITY:
         return False
-    if result["top10"] is not None and result["top10"] >= HOLDER_HARD_MAX:
+    if result["top10"] is not None and result["top10"] >= 75:
         return False
     return True
 
@@ -1913,208 +914,44 @@ def watch_candidate(result):
         return False
     return True
 
-def gir_block_reason(result, score):
-    """Diagnostic only; never changes the GIR decision."""
-    liq = num(result.get("liq"))
-    top10 = num(result.get("top10"))
-    price5 = num(result.get("price5"))
-    buys5 = num(result.get("buys5")) or 0
-    sells5 = num(result.get("sells5")) or 0
-    vol5 = num(result.get("vol5")) or 0
-
-    if liq is None or top10 is None or price5 is None:
-        return "CRITICAL_DATA_WAIT"
-    if liq < MIN_LIQUIDITY:
-        return "LIQ_LOW"
-    if top10 > 82:
-        return "TOP10_HIGH"
-    if price5 < -8:
-        return "PRICE5_WEAK"
-    if price5 > 180:
-        ratio = buys5 / max(sells5, 1)
-        if (
-            score >= 70
-            and buys5 >= 100
-            and ratio >= 1.20
-            and vol5 >= 10000
-            and top10 <= 70
-            and liq / max((num(result.get("mc")) or 1), 1) >= 0.20
-        ):
-            return "EXTREME_BREAKOUT_READY"
-        if score < 70:
-            return "EXTENDED_MOVE_SCORE_LT70"
-        return "PRICE5_TOO_HIGH"
-    if sells5 > buys5 * 1.15:
-        return "SELL_PRESSURE"
-    if buys5 < 10:
-        return "ACTIVITY_LOW"
-    if vol5 < 500:
-        return "VOLUME_LOW"
-    if score < SIGNAL_SCORE:
-        _mc = num(result.get("mc")) or 0
-        _ratio = buys5 / max(sells5, 1)
-        if (
-            25 <= price5 <= 150
-            and score >= 52
-            and buys5 >= 80
-            and _ratio >= 1.50
-            and vol5 >= 5000
-            and top10 <= 65
-            and liq >= 1500
-            and liq / max(_mc, 1) >= 0.25
-        ):
-            return "EARLY_QUALITY_GIR_READY"
-        return "SCORE_BELOW_SIGNAL"
-    return "TREND_OR_MOMENTUM_WAIT"
-
-
-def unified_gir_decision(result, momentum=0, final_score=0):
+def liquidity_drain_detail(previous, current):
     """
-    One central promotion engine:
-    - BREAKOUT_GIR: RURU-style accelerating low-cap candidate.
-    - STRONG_GIR: hard-safe candidate with strong score/activity.
-    - IZLE: everything else.
-    Hard safety gates remain upstream and are never bypassed here.
+    Compare liquidity between consecutive scans.
+    Returns: (safe, drop_pct, level)
+
+    HARD: >=35% liquidity loss in one scan interval -> block/cancel.
+    WARN: >=20% loss -> reported, but does not by itself block.
+    Missing/invalid previous data never gets treated as a rug signal.
     """
-    mc = result.get("mc") or 0
-    liq = result.get("liq")
-    top10 = result.get("top10")
-    buys = result.get("buys5", 0) or 0
-    sells = result.get("sells5", 0) or 0
-    vol5 = result.get("vol5") or 0
-    price5 = result.get("price5")
-    score = result.get("score", 0) or 0
+    if not LIQ_DRAIN_GUARD_ENABLED or not previous or not current:
+        return True, 0.0, "NO_DATA"
 
-    if liq is None or top10 is None or price5 is None:
-        return "VERI_BEKLE"
+    old_liq = num(previous.get("liq"))
+    new_liq = num(current.get("liq"))
+    if old_liq is None or new_liq is None or old_liq <= 0:
+        return True, 0.0, "NO_DATA"
 
-    # Never bypass the existing core envelope.
-    if mc < 1000 or mc > 15000 or liq < MIN_LIQUIDITY or top10 > 82:
-        return "IZLE"
+    drop_pct = max(0.0, (old_liq - new_liq) / old_liq * 100.0)
 
-    ratio = buys / max(sells, 1)
-
-    # Extreme breakout: very fast move is not auto-rejected if quality is exceptional.
-    if (
-        180 < price5 <= 600
-        and score >= 70
-        and buys >= 100
-        and ratio >= 1.20
-        and vol5 >= 10000
-        and top10 <= 70
-        and liq / max(mc, 1) >= 0.20
-    ):
-        return "BREAKOUT_GIR"
-
-    # V11.50 quality override:
-    # A slightly lower composite score may still GIR when the live tape is
-    # exceptionally strong and holder/liquidity quality is clean.
-    if (
-        25 <= price5 <= 150
-        and 52 <= score < 60
-        and buys >= 80
-        and ratio >= 1.50
-        and vol5 >= 5000
-        and top10 <= 65
-        and liq >= 1500
-        and liq / max(mc, 1) >= 0.25
-    ):
-        return "BREAKOUT_GIR"
-
-    # V11.49 early breakout calibration:
-    # Score 60-69 may GIR only while the move is still early (<=180%).
-    # This avoids promoting already-extended +180% moves on score alone.
-    if (
-        25 <= price5 <= 180
-        and 60 <= score < 70
-        and buys >= 20
-        and ratio >= 1.20
-        and vol5 >= 1500
-        and top10 <= 70
-        and liq >= 800
-        and liq / max(mc, 1) >= 0.15
-    ):
-        return "BREAKOUT_GIR"
-
-    # RURU/MUMU style breakout.
-    if (
-        25 <= price5 <= 300
-        and buys >= 30
-        and ratio >= 1.10
-        and vol5 >= 2500
-        and liq / max(mc, 1) >= 0.12
-        and score >= WATCH_SCORE
-    ):
-        return "BREAKOUT_GIR"
-
-    # Strong pre-breakout candidate: score + real activity + buy pressure.
-    if (
-        score >= SIGNAL_SCORE
-        and buys >= 25
-        and ratio >= 1.25
-        and vol5 >= 2000
-        and -8 <= price5 <= 60
-    ):
-        return "STRONG_GIR"
-
-    # Preserve the existing confirmed signal path.
-    try:
-        if strong_signal(result, momentum, final_score):
-            return "STRONG_GIR"
-    except Exception:
-        pass
-
-    return "IZLE"
-
-
-def breakout_signal(result):
-    """RURU-style low-cap breakout path. Hard safety is still mandatory upstream."""
-    mc = result.get("mc") or 0
-    liq = result.get("liq")
-    top10 = result.get("top10")
-    buys = result.get("buys5", 0) or 0
-    sells = result.get("sells5", 0) or 0
-    vol5 = result.get("vol5") or 0
-    price5 = result.get("price5")
-
-    if liq is None or top10 is None or price5 is None:
-        return False
-
-    # Keep the core safety/early-entry envelope.
-    if not (1000 <= mc <= 15000):
-        return False
-    if liq < MIN_LIQUIDITY:
-        return False
-    if top10 > 82:
-        return False
-
-    # RURU-style breakout: already moving hard, but backed by real activity.
-    if not (35 <= price5 <= 300):
-        return False
-    if buys < 35:
-        return False
-    if sells > 0 and buys / sells < 1.10:
-        return False
-    if vol5 < 2500:
-        return False
-
-    # Avoid ultra-thin liquidity relative to market cap.
-    if mc > 0 and liq / mc < 0.12:
-        return False
-
-    return True
+    if drop_pct >= LIQ_DRAIN_HARD_PCT:
+        return False, drop_pct, "HARD"
+    if drop_pct >= LIQ_DRAIN_WARN_PCT:
+        return True, drop_pct, "WARN"
+    return True, drop_pct, "OK"
 
 
 def strong_signal(result, momentum, previous=None):
     if not basic_signal_safe(result):
         return False
-    # V11.55: GIR requires verified holder concentration.
-    if result.get("top10") is None or bool(result.get("holder_unreliable")):
-        return False
     if not crash_guard(result):
         return False
     if previous is None:
         return False
+
+    liq_safe, _, _ = liquidity_drain_detail(previous, result)
+    if not liq_safe:
+        return False
+
     if momentum < MIN_MOMENTUM_SIGNAL:
         return False
     if not trend_confirmed(previous, result):
@@ -2156,7 +993,7 @@ def filter_fail_reason(result, previous=None, momentum=0, for_signal=False):
         return "liq_fail"
 
     top10 = result.get("top10")
-    if top10 is not None and top10 >= HOLDER_HARD_MAX:
+    if top10 is not None and top10 >= 75:
         return "holder_fail"
 
     if not crash_guard(result):
@@ -2258,131 +1095,6 @@ def market_viral_score(result):
     return score, label
 
 
-def _pool_diag(reason):
-    POOL_DIAG[reason] = POOL_DIAG.get(reason, 0) + 1
-
-def pool_hard_safety_gate(result, now):
-    """V14 binary safety only: reject genuine danger, not ordinary early volatility."""
-    top10 = num(result.get("top10"))
-    if top10 is None or bool(result.get("holder_unreliable")):
-        return False, "POOL_HOLDER_UNVERIFIED"
-    if not (1.0 <= top10 <= QUALITY_MAX_TOP10):
-        return False, "POOL_HOLDER_RANGE"
-
-    rug_ok, rug_reason = hard_rug_gate(result)
-    if not rug_ok:
-        return False, rug_reason
-    if result.get("ca") in SIGNALLED_CAS:
-        return False, "ALREADY_SIGNALLED"
-
-    liq = num(result.get("liq"))
-    if liq is None or liq < MIN_LIQUIDITY:
-        return False, "POOL_LIQ_LOW"
-
-    p5 = num(result.get("price5"))
-    rmc = num(result.get("runner_mc_accel"))
-    rvol = num(result.get("runner_vol_accel"))
-    buys = num(result.get("buys5")) or 0
-    sells = num(result.get("sells5")) or 0
-    bs = buys / max(sells, 1)
-
-    # Genuine danger only.
-    if rmc is not None and rmc <= -3.0:
-        return False, "POOL_MC_DUMP"
-    if p5 is not None and p5 > 80.0:
-        return False, "POOL_EXTREME_CHASE"
-    if p5 is not None and p5 < -35.0:
-        return False, "POOL_PRICE_CRASH"
-    if rvol is not None and rvol <= -50.0:
-        return False, "POOL_VOLUME_COLLAPSE"
-    if bs < 0.70:
-        return False, "POOL_SELL_DOMINANT"
-    return True, "POOL_HARD_PASSED"
-
-def candidate_pool_update(ca, result, safety_ok, pool_hard_ok, now):
-    """V14 clean pool: hard risks reject; normal early-token noise is ranked."""
-    if not safety_ok:
-        _pool_diag("BLOCK_SAFETY")
-        with CANDIDATE_POOL_LOCK: CANDIDATE_POOL.pop(ca, None)
-        return False, 0.0, 0
-    if not pool_hard_ok:
-        _pool_diag("BLOCK_POOL_HARD")
-        with CANDIDATE_POOL_LOCK: CANDIDATE_POOL.pop(ca, None)
-        return False, 0.0, 0
-    if ca in SIGNALLED_CAS:
-        _pool_diag("BLOCK_SIGNALLED")
-        return False, 0.0, 0
-
-    mc = num(result.get("mc")) or 0
-    liq = num(result.get("liq")) or 0
-    score = num(result.get("score")) or 0
-    buys = num(result.get("buys5")) or 0
-    sells = num(result.get("sells5")) or 0
-    vol5 = num(result.get("vol5")) or 0
-    price5 = num(result.get("price5"))
-    rmc = num(result.get("runner_mc_accel"))
-    rvol = num(result.get("runner_vol_accel"))
-    age = num(result.get("age_hours"))
-    bs = buys / max(sells, 1)
-
-    # Only baseline eligibility here. Hard rug/holder/liquidity/dump/chase is above.
-    if mc < MC_MIN:
-        _pool_diag("BLOCK_MC"); return False, 0.0, 0
-    if score < 55:
-        _pool_diag("BLOCK_SCORE"); return False, 0.0, 0
-
-    rank = 0.0
-    rank += min(max(score - 55.0, 0.0), 30.0) * 1.4
-    rank += min(max(bs - 0.90, 0.0), 1.5) * 20.0
-    rank += min(vol5 / 250.0, 12.0) * 2.0
-
-    if price5 is not None:
-        if -8.0 <= price5 <= 30.0: rank += 12.0
-        elif -15.0 <= price5 < -8.0: rank += 3.0
-        elif 30.0 < price5 <= 50.0: rank += 5.0
-    if rmc is not None:
-        if rmc > 0: rank += min(rmc, 3.0) * 7.0
-        elif rmc > -0.50: rank += 2.0
-        else: rank -= min(abs(rmc), 3.0) * 4.0
-    if rvol is not None:
-        if rvol > 0: rank += min(rvol, 3.0) * 4.0
-        elif rvol < -0.10: rank -= 4.0
-    if age is not None and age <= 0.50: rank += 5.0
-
-    _pool_diag("ADMITTED")
-    with CANDIDATE_POOL_LOCK:
-        item = CANDIDATE_POOL.get(ca)
-        if item is None:
-            item = {"first_seen": now, "last_seen": now, "obs": 0, "best_rank": rank,
-                    "last_rank": rank, "ranks": []}
-            CANDIDATE_POOL[ca] = item
-        item["last_seen"] = now
-        item["obs"] = int(item.get("obs", 0)) + 1
-        item["best_rank"] = max(float(item.get("best_rank", rank)), rank)
-        item["last_rank"] = rank
-        ranks = list(item.get("ranks") or [])
-        ranks.append(rank)
-        item["ranks"] = ranks[-4:]
-        obs = item["obs"]
-
-        # Two-scan confirmation. Second observation must remain healthy and not fade.
-        prev = item["ranks"][-2] if len(item["ranks"]) >= 2 else None
-        stable = prev is None or rank >= prev - 12.0
-        confirmed = (
-            obs >= 2
-            and rank >= 34.0
-            and stable
-            and bs >= 1.00
-            and vol5 >= 120
-            and (price5 is None or -10.0 <= price5 <= 45.0)
-            and (rmc is None or rmc >= -0.75)
-            and (rvol is None or rvol >= -0.20)
-            and quality_signal_slot_available(now)
-        )
-        if confirmed:
-            _pool_diag("CONFIRMED")
-        return confirmed, rank, obs
-
 def auto_scanner():
     print("EARLY HUNTER SCANNER ACTIVE", flush=True)
     print(
@@ -2436,12 +1148,11 @@ def auto_scanner():
                 "volume_fail": 0,
                 "trend_fail": 0,
                 "momentum_fail": 0,
-                "src_birdeye": 0, "src_gecko": 0, "src_dex": 0,
-                "src_birdeye_stale": 0, "src_gecko_stale": 0, "src_dex_stale": 0,
-                "src_birdeye_safe": 0, "src_gecko_safe": 0, "src_dex_safe": 0,
-                "holder_unreliable": 0, "safe_score_samples": [], "score_fail_samples": [],
+                "src_birdeye": 0, "src_dex": 0,
+                "src_birdeye_stale": 0, "src_dex_stale": 0,
+                "src_birdeye_safe": 0, "src_dex_safe": 0,
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
-    "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "liq_gecko_ok": 0, "liq_gecko_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
+    "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
     "momentum_pass": 0,
             }
@@ -2449,20 +1160,14 @@ def auto_scanner():
             stats["unique_new"] = unique_new
             stats["repeat"] = repeat
 
-            # V13.10: 80 per-token DEX lookups caused avoidable misses/rate pressure.
-            # Batch all candidates first (max 30 addresses/request).
-            refresh_dex_batch_pairs(candidates)
-
             for ca in candidates:
                 try:
                     source_name = candidate_sources.get(ca)
-                    if source_name not in ("BIRDEYE", "GECKO", "DEX"):
+                    if source_name not in ("BIRDEYE", "DEX"):
                         source_name = "DEX"
 
                     if source_name == "BIRDEYE":
                         stats["src_birdeye"] += 1
-                    elif source_name == "GECKO":
-                        stats["src_gecko"] += 1
                     else:
                         stats["src_dex"] += 1
 
@@ -2477,12 +1182,8 @@ def auto_scanner():
                     pre_age = pre_metrics.get("age_hours")
                     if pre_age is not None and pre_age > FRESH_PAIR_MAX_HOURS:
                         stats["stale_pair"] += 1
-                        if source_name == "BIRDEYE":
-                            stats["src_birdeye_stale"] += 1
-                        elif source_name == "GECKO":
-                            stats["src_gecko_stale"] += 1
-                        else:
-                            stats["src_dex_stale"] += 1
+                        if source_name == "BIRDEYE": stats["src_birdeye_stale"] += 1
+                        else: stats["src_dex_stale"] += 1
                         continue
 
                     report = rugcheck(ca)
@@ -2521,51 +1222,18 @@ def auto_scanner():
 
                     liq = result.get("liq")
 
-
-                    # Short cache fallback for temporary liquidity API gaps.
-
-                    _now = time.time()
-
-                    if liq is not None and liq > 0:
-
-                        LIQ_CACHE[str(ca)] = (liq, _now)
-
-                    else:
-
-                        _cached_liq = LIQ_CACHE.get(str(ca))
-
-                        if _cached_liq and (_now - _cached_liq[1]) <= LIQ_CACHE_TTL:
-
-                            liq = _cached_liq[0]
-
-                            result["liq"] = liq
-
-                    # First use Gecko pool reserve for Gecko-sourced fresh tokens.
-                    if mc_ok and liq is None and source_name == "GECKO":
-                        _g = gecko_liq_cache.get(str(ca))
-                        if _g and (time.time() - _g[1]) <= GECKO_LIQ_CACHE_TTL:
-                            liq = _g[0]
-                            result["liq"] = liq
-                            result["liq_source"] = "GECKO"
-                            LIQ_CACHE[str(ca)] = (liq, time.time())
-                            stats["liq_gecko_ok"] += 1
-                        else:
-                            stats["liq_gecko_missing"] += 1
-
-                    # Then use liquidity supplied directly by Birdeye new-listing.
-                    if mc_ok and liq is None:
-                        _listing_liq = birdeye_listing_liq.get(str(ca))
-                        if _listing_liq is not None and _listing_liq > 0:
-                            liq = _listing_liq
-                            result["liq"] = liq
-                            result["liq_source"] = "BIRDEYE_LISTING"
-                            LIQ_CACHE[str(ca)] = (liq, time.time())
+                    # DEX liquidity is sometimes unavailable for very fresh Birdeye listings.
+                    # Only in that case, ask Birdeye Market Data for the token's liquidity.
+                    if mc_ok and liq is None and BIRDEYE_API_KEY:
+                        be_market = birdeye_market_data(ca)
+                        be_liq = num((be_market or {}).get("liquidity"))
+                        if be_liq is not None:
+                            liq = be_liq
+                            result["liq"] = be_liq
+                            result["liq_source"] = "BIRDEYE"
                             stats["liq_fallback_ok"] += 1
-
-                    # If still missing, do not fabricate liquidity.
-                    # The token remains pending and will be retried on the next scan.
-                    if mc_ok and liq is None:
-                        stats["liq_fallback_missing"] += 1
+                        else:
+                            stats["liq_fallback_missing"] += 1
 
                     if mc_ok:
                         if liq is None:
@@ -2583,28 +1251,8 @@ def auto_scanner():
                     if liq_ok: stats["liq_pass"] += 1
 
                     top10 = result.get("top10")
-                    holder_unreliable = bool(result.get("holder_unreliable"))
-                    holder_raw_top10 = result.get("holder_raw_top10")
-                    holder_source = result.get("holder_source")
-                    if holder_source in ("SOLANA_RPC", "SOLANA_RPC_OWNER", "SOLANA_RPC_ACCOUNTS"):
-                        stats["holder_rpc_verified"] = stats.get("holder_rpc_verified", 0) + 1
-                    elif holder_source == "RUGCHECK":
-                        stats["holder_rugcheck_verified"] = stats.get("holder_rugcheck_verified", 0) + 1
 
                     if liq_ok:
-                        if holder_unreliable:
-                            stats["holder_unreliable"] = stats.get("holder_unreliable", 0) + 1
-                        # Diagnostic samples are grouped by DISCOVERY source, not holder-data source.
-                        if top10 is not None:
-                            _key = "holder_gecko_samples" if source_name == "GECKO" else "holder_dex_samples"
-                            _checked = "holder_gecko_checked" if source_name == "GECKO" else "holder_dex_checked"
-                            _high = "holder_gecko_82" if source_name == "GECKO" else "holder_dex_82"
-                            stats[_checked] = stats.get(_checked, 0) + 1
-                            if top10 >= 82:
-                                stats[_high] = stats.get(_high, 0) + 1
-                            _samples = stats.setdefault(_key, [])
-                            if len(_samples) < 8:
-                                _samples.append(round(float(top10), 1))
                         if top10 is None:
                             stats["holder_missing"] += 1
                         elif top10 >= 82:
@@ -2616,7 +1264,7 @@ def auto_scanner():
                         elif top10 >= 50:
                             stats["holder_50_60"] += 1
 
-                    holder_ok = liq_ok and ((top10 is not None and top10 < HOLDER_HARD_MAX) or holder_unreliable)
+                    holder_ok = liq_ok and (top10 is None or top10 < 82)
                     if holder_ok: stats["holder_pass"] += 1
 
                     sig = result.get("signals") or {}
@@ -2650,25 +1298,13 @@ def auto_scanner():
                     safety_ok = crash_ok
                     if safety_ok:
                         stats["safety_pass"] += 1
-                        if source_name == "BIRDEYE":
-                            stats["src_birdeye_safe"] += 1
-                        elif source_name == "GECKO":
-                            stats["src_gecko_safe"] += 1
-                        else:
-                            stats["src_dex_safe"] += 1
+                        if source_name == "BIRDEYE": stats["src_birdeye_safe"] += 1
+                        else: stats["src_dex_safe"] += 1
                         if result.get("prepump"):
                             stats["prepump_safe"] += 1
-                        if len(stats["safe_score_samples"]) < 8:
-                            stats["safe_score_samples"].append(int(result.get("score", 0)))
 
                     score_ok = safety_ok and result.get("score", 0) >= WATCH_SCORE
-                    if score_ok:
-                        stats["score_pass"] += 1
-                    elif safety_ok and len(stats["score_fail_samples"]) < 5:
-                        stats["score_fail_samples"].append({
-                            "score": int(result.get("score", 0)),
-                            "risks": list(result.get("risks") or [])[:3],
-                        })
+                    if score_ok: stats["score_pass"] += 1
 
                     vol5 = result.get("vol5")
                     activity_ok = (score_ok
@@ -2681,6 +1317,10 @@ def auto_scanner():
                         previous = token_states.get(ca)
 
                     old_metrics = previous.get("metrics") if previous else None
+                    liq_drain_safe, liq_drop_pct, liq_drain_level = liquidity_drain_detail(old_metrics, result)
+                    result["liq_drop_pct"] = liq_drop_pct
+                    result["liq_drain_level"] = liq_drain_level
+
                     momentum = momentum_score(old_metrics, result)
                     trend_ok = activity_ok and old_metrics is not None and trend_confirmed(old_metrics, result)
                     if trend_ok: stats["trend_pass"] += 1
@@ -2691,380 +1331,11 @@ def auto_scanner():
                     last_sent = previous.get("last_sent", 0) if previous else 0
                     new_stage, message = stage, None
 
-                    # V11.54 FINAL: compute the central decision in scanner scope.
-                    # V11.57 referenced is_breakout/_watch_decision/_gir_block later
-                    # without defining them here, which could abort exactly when a
-                    # WATCH/SIGNAL message was ready to be delivered.
-                    _central_decision = unified_gir_decision(result, momentum, old_metrics) if safety_ok else "IZLE"
-                    is_breakout = _central_decision == "BREAKOUT_GIR"
-                    is_strong_gir = _central_decision == "STRONG_GIR"
-                    _gir_block = gir_block_reason(result, int(result.get("score", 0)))
-                    _watch_decision = "ğŸŸ¢ GÄ°R" if (_central_decision in ("BREAKOUT_GIR", "STRONG_GIR") and not _gir_block) else "ğŸŸ¡ Ä°ZLE / ERKEN ADAY"
-
-                    # V12.8 EARLY WATCH:
-                    # A hard-safe PREPUMP candidate may be surfaced on its first scan,
-                    # without weakening the final GÄ°R gate.
-                    _early_watch_ok = bool(
-                        safety_ok
-                        and result.get("prepump")
-                        and int(result.get("score", 0) or 0) >= WATCH_SCORE
-                        and result.get("buys5", 0) >= WATCH_MIN_BUYS_5M
-                        and (result.get("vol5") is None or result.get("vol5") >= WATCH_MIN_VOL_5M)
-                    )
-                    watch_ok = bool(watch_candidate(result) or _early_watch_ok)
-                    if result.get("prepump") and safety_ok:
-                        WATCH_DIAG["SAFE_PREPUMP_SEEN"] = WATCH_DIAG.get("SAFE_PREPUMP_SEEN", 0) + 1
-                        if _early_watch_ok:
-                            WATCH_DIAG["EARLY_WATCH_OK"] = WATCH_DIAG.get("EARLY_WATCH_OK", 0) + 1
-                        elif int(result.get("score", 0) or 0) < WATCH_SCORE:
-                            WATCH_DIAG["SCORE_LOW"] = WATCH_DIAG.get("SCORE_LOW", 0) + 1
-                        elif result.get("buys5", 0) < WATCH_MIN_BUYS_5M:
-                            WATCH_DIAG["BUYS_LOW"] = WATCH_DIAG.get("BUYS_LOW", 0) + 1
-                        elif result.get("vol5") is not None and result.get("vol5") < WATCH_MIN_VOL_5M:
-                            WATCH_DIAG["VOLUME_LOW"] = WATCH_DIAG.get("VOLUME_LOW", 0) + 1
-                        else:
-                            WATCH_DIAG["OTHER"] = WATCH_DIAG.get("OTHER", 0) + 1
-                        if watch_ok:
-                            WATCH_DIAG["WATCH_OK"] = WATCH_DIAG.get("WATCH_OK", 0) + 1
-                    # Keep hard safety mandatory. Confirmed trend remains the main
-                    # path, while the already-existing calibrated breakout engine
-                    # can promote a hard-safe, high-activity candidate instead of
-                    # being calculated but never used.
-                    _confirmed_signal = (
+                    watch_ok = watch_candidate(result)
+                    signal_ok = (
                         seen_count >= TREND_CONFIRM_SCANS
                         and strong_signal(result, momentum, old_metrics)
                     )
-                    _calibrated_breakout = (
-                        safety_ok
-                        and _central_decision in ("BREAKOUT_GIR", "STRONG_GIR")
-                    )
-                    # Candidate paths may propose a signal, but V12.1 has ONE
-                    # authoritative final gate. No path can bypass it.
-                    # V12.7: wire the runner engine into the actual proposal path.
-                    # Runner can PROPOSE a signal, but it can never bypass final_gir_gate.
-                    _runner_confirmed, _runner_mc_accel, _runner_vol_accel = v126_track_runner(
-                        ca, result, int(result.get("score", 0) or 0)
-                    )
-                    _runner_signal = bool(
-                        safety_ok
-                        and _runner_confirmed
-                        and seen_count >= TREND_CONFIRM_SCANS
-                        and momentum >= MIN_MOMENTUM_SIGNAL
-                    )
-
-                    _candidate_signal = bool(
-                        _confirmed_signal
-                        or _calibrated_breakout
-                        or _runner_signal
-                    )
-
-                    # V13.7 FAST PROPOSAL BRIDGE
-                    # Momentum-qualified, hard-safe tokens may enter the FAST lane
-                    # even if older strong_signal/central-decision proposal logic
-                    # has not yet promoted them. FAST acceleration requirements and
-                    # the hard gate still decide whether any GÄ°R can be emitted.
-                    _fast_candidate = bool(
-                        safety_ok
-                        and momentum_ok
-                        and seen_count >= TREND_CONFIRM_SCANS
-                    )
-
-                    result["ca"] = ca
-                    result["runner_mc_accel"] = _runner_mc_accel
-                    result["runner_vol_accel"] = _runner_vol_accel
-                    _final_gate_ok, _final_gate_reason = final_gir_gate(
-                        result, old_metrics, seen_count, momentum, now
-                    )
-                    _fast_hard_ok, _fast_hard_reason = fast_launch_hard_gate(
-                        result, old_metrics, seen_count, momentum, now
-                    )
-                    # V15 SIMPLE TRIGGER: no pool/ranking dependency.
-                    # Hard safety first, then arm a token from its own live flow.
-                    _pool_confirmed, _pool_rank, _pool_obs = False, 0.0, 0
-                    _micro_pending = previous.get("micro_pending") if previous else None
-                    _next_micro_pending = None
-                    _micro_signal_ok = False
-
-                    _micro_rug_ok, _micro_rug_reason = hard_rug_gate(result)
-                    _micro_top10 = num(result.get("top10"))
-                    _micro_liq = num(result.get("liq"))
-                    _micro_mc = num(result.get("mc")) or 0
-                    _micro_vol = num(result.get("vol5")) or 0
-                    _micro_price = num(result.get("price5"))
-                    _micro_buys = num(result.get("buys5")) or 0
-                    _micro_sells = num(result.get("sells5")) or 0
-                    _micro_bs = _micro_buys / max(_micro_sells, 1)
-                    _micro_score = num(result.get("score")) or 0
-                    _micro_rmc = num(result.get("runner_mc_accel"))
-                    _micro_rvol = num(result.get("runner_vol_accel"))
-
-                    _micro_hard_ok = bool(
-                        safety_ok
-                        and _micro_rug_ok
-                        and _micro_top10 is not None
-                        and 1.0 <= _micro_top10 <= QUALITY_MAX_TOP10
-                        and _micro_liq is not None and _micro_liq >= MIN_LIQUIDITY
-                        and ca not in SIGNALLED_CAS
-                        and (_micro_price is None or _micro_price > -35.0)
-                        and (_micro_price is None or _micro_price < 80.0)
-                        and (_micro_rmc is None or _micro_rmc > -3.0)
-                        and _micro_bs >= 0.80
-                    )
-
-                    # First tick: healthy capital flow. Deliberately moderate;
-                    # the second tick is what proves continuation.
-                    _micro_arm_ok = bool(
-                        _micro_hard_ok
-                        and _micro_score >= 62
-                        and _micro_mc >= MC_MIN
-                        and _micro_vol >= 250.0
-                        and _micro_buys >= 4
-                        and _micro_bs >= 1.10
-                        and (_micro_price is None or -8.0 <= _micro_price <= 40.0)
-                        and (_micro_rmc is None or _micro_rmc >= -0.50)
-                    )
-
-                    if isinstance(_micro_pending, dict):
-                        _mp_time = num(_micro_pending.get("time")) or 0
-                        _mp_mc = num(_micro_pending.get("mc")) or 0
-                        _mp_vol = num(_micro_pending.get("vol5")) or 0
-                        _mp_age = max(0.0, now - _mp_time)
-                        _micro_continue_ok = bool(
-                            _micro_hard_ok
-                            and 20.0 <= _mp_age <= 120.0
-                            and _mp_mc > 0
-                            and _micro_mc >= _mp_mc * 0.9975
-                            and _micro_bs >= 1.05
-                            and _micro_buys >= 3
-                            and (_mp_vol <= 0 or _micro_vol >= _mp_vol * 0.80)
-                            and (_micro_price is None or _micro_price >= -8.0)
-                            and (_micro_rmc is None or _micro_rmc >= -1.25)
-                            and (_micro_rvol is None or _micro_rvol >= -0.25)
-                            and quality_signal_slot_available(now)
-                        )
-                        if _micro_continue_ok:
-                            _micro_signal_ok = True
-                            FINAL_GATE_REJECTS["MICRO_2TICK_CONFIRMED"] = FINAL_GATE_REJECTS.get("MICRO_2TICK_CONFIRMED", 0) + 1
-                        elif _micro_arm_ok:
-                            # Still healthy: re-arm from current observation instead of losing it.
-                            _next_micro_pending = {
-                                "time": now, "mc": _micro_mc, "vol5": _micro_vol,
-                                "bs": _micro_bs, "score": _micro_score,
-                            }
-                            FINAL_GATE_REJECTS["MICRO_REARM"] = FINAL_GATE_REJECTS.get("MICRO_REARM", 0) + 1
-                        else:
-                            FINAL_GATE_REJECTS["MICRO_FADE"] = FINAL_GATE_REJECTS.get("MICRO_FADE", 0) + 1
-                    elif _micro_arm_ok:
-                        _next_micro_pending = {
-                            "time": now, "mc": _micro_mc, "vol5": _micro_vol,
-                            "bs": _micro_bs, "score": _micro_score,
-                        }
-                        FINAL_GATE_REJECTS["MICRO_ARMED"] = FINAL_GATE_REJECTS.get("MICRO_ARMED", 0) + 1
-                    if _candidate_signal and not _final_gate_ok:
-                        FINAL_GATE_REJECTS[_final_gate_reason] = FINAL_GATE_REJECTS.get(_final_gate_reason, 0) + 1
-
-                    # V13.6: FAST and CONFIRMED are separate lanes.
-                    # FAST can bypass only the soft quality gate; never hard safety.
-                    # A token that passes all normal gates is only ARMED on the first
-                    # qualifying scan. GÄ°R is sent on a later scan only if the move
-                    # is still continuing instead of immediately fading.
-                    _raw_signal_ok = bool(
-                        (_candidate_signal and _final_gate_ok)
-                        or (_fast_candidate and _fast_hard_ok)
-                    )
-                    _normal_lane_ok = bool(_candidate_signal and _final_gate_ok)
-
-                    if _fast_candidate:
-                        FINAL_GATE_REJECTS["FAST_CANDIDATE"] = FINAL_GATE_REJECTS.get("FAST_CANDIDATE", 0) + 1
-                        if not _fast_hard_ok:
-                            _fr = "FAST_BLOCK_" + str(_fast_hard_reason or "UNKNOWN")
-                            FINAL_GATE_REJECTS[_fr] = FINAL_GATE_REJECTS.get(_fr, 0) + 1
-                    _launch_pending = previous.get("launch_pending") if previous else None
-                    _fast_pending = previous.get("fast_pending") if previous else None
-                    _next_launch_pending = None
-                    _next_fast_pending = None
-                    signal_ok = False
-                    _fast_launch_ok = False
-
-                    # V13.12.2: a previously armed FAST candidate MUST be
-                    # evaluated on the next scan even if it no longer re-satisfies
-                    # every first-tick acceleration threshold.
-                    if _raw_signal_ok or isinstance(_fast_pending, dict):
-                        _mc_now = num(result.get("mc")) or 0
-                        _vol_now = num(result.get("vol5")) or 0
-                        _price_now = num(result.get("price5"))
-                        _buys_now = num(result.get("buys5")) or 0
-                        _sells_now = num(result.get("sells5")) or 0
-                        _bs_now = _buys_now / max(_sells_now, 1)
-                        _age_now = num(result.get("age_hours"))
-                        _score_now = num(result.get("score")) or 0
-                        _rmc_now = num(result.get("runner_mc_accel"))
-                        _rvol_now = num(result.get("runner_vol_accel"))
-
-                        # V13.4 FAST LAUNCH lane:
-                        # Catch the successful-pump pattern early, before waiting
-                        # another full confirmation scan, but only under unusually
-                        # strong simultaneous capital + volume + buy-pressure expansion.
-                        # V13.9 ACTIVE SIGNAL calibration:
-                        # require positive acceleration, strong buy pressure and real activity,
-                        # while keeping all hard safety/no-repeat/dump protections.
-                        _fast_launch_ok = bool(
-                            _fast_hard_ok
-                            and _score_now >= 72
-                            and _rmc_now is not None and _rmc_now >= 5.0
-                            and _rvol_now is not None and _rvol_now >= 10.0
-                            and _bs_now >= 1.35
-                            and _vol_now >= 3000.0
-                            and _price_now is not None and 3.0 <= _price_now <= 30.0
-                            and (_age_now is None or _age_now <= 0.25)
-                        )
-
-                        # V13.8 diagnostics: show exactly why a hard-safe FAST
-                        # candidate failed the acceleration signature.
-                        if _fast_candidate and _fast_hard_ok and not _fast_launch_ok:
-                            if _score_now < 72:
-                                _far = "FAST_ACCEL_SCORE"
-                            elif _rmc_now is None or _rmc_now < 5.0:
-                                _far = "FAST_ACCEL_MC"
-                            elif _rvol_now is None or _rvol_now < 10.0:
-                                _far = "FAST_ACCEL_VOLUME"
-                            elif _bs_now < 1.35:
-                                _far = "FAST_ACCEL_BUYSELL"
-                            elif _vol_now < 3000.0:
-                                _far = "FAST_ACCEL_VOL5"
-                            elif _price_now is None or not (3.0 <= _price_now <= 30.0):
-                                _far = "FAST_ACCEL_PRICE5"
-                            elif _age_now is not None and _age_now > 0.25:
-                                _far = "FAST_ACCEL_AGE"
-                            else:
-                                _far = "FAST_ACCEL_OTHER"
-                            FINAL_GATE_REJECTS[_far] = FINAL_GATE_REJECTS.get(_far, 0) + 1
-
-                        # TRUE 2-TICK confirmation:
-                        # First tick requires the strict FAST acceleration signature.
-                        # Second tick requires continuation + hard safety, not a second
-                        # copy of every first-tick acceleration threshold.
-                        if isinstance(_fast_pending, dict):
-                            _fp_mc = num(_fast_pending.get("mc")) or 0
-                            _fp_time = num(_fast_pending.get("time")) or 0
-                            _fp_age = max(0.0, now - _fp_time)
-
-                            _pending_rug_ok, _pending_rug_reason = hard_rug_gate(result)
-                            _pending_top10 = num(result.get("top10"))
-                            _pending_liq = num(result.get("liq"))
-                            _pending_hard_ok = bool(
-                                safety_ok
-                                and _pending_rug_ok
-                                and _pending_top10 is not None
-                                and 1.0 <= _pending_top10 <= QUALITY_MAX_TOP10
-                                and _pending_liq is not None and _pending_liq >= MIN_LIQUIDITY
-                                and result.get("ca") not in SIGNALLED_CAS
-                                and (_rmc_now is None or _rmc_now > -3.0)
-                                and (_price_now is None or _price_now <= 50.0)
-                                and _bs_now >= 1.20
-                            )
-
-                            _fast_continue_ok = bool(
-                                _pending_hard_ok
-                                and 20.0 <= _fp_age <= 120.0
-                                and _fp_mc > 0
-                                and _mc_now >= _fp_mc * 1.01
-                                and _bs_now >= 1.30
-                                and _rvol_now is not None and _rvol_now >= 5.0
-                                and _price_now is not None and _price_now >= 2.0
-                            )
-
-                            if _fast_continue_ok:
-                                signal_ok = True
-                                FINAL_GATE_REJECTS["FAST_LAUNCH_CONFIRMED"] = FINAL_GATE_REJECTS.get("FAST_LAUNCH_CONFIRMED", 0) + 1
-                            else:
-                                if not _pending_hard_ok:
-                                    _f2 = "FAST_2TICK_HARD_FAIL"
-                                elif not (20.0 <= _fp_age <= 120.0):
-                                    _f2 = "FAST_2TICK_TIME_FAIL"
-                                elif _fp_mc <= 0 or _mc_now < _fp_mc * 1.01:
-                                    _f2 = "FAST_2TICK_MC_FAIL"
-                                elif _bs_now < 1.30:
-                                    _f2 = "FAST_2TICK_BUYSELL_FAIL"
-                                elif _rvol_now is None or _rvol_now < 5.0:
-                                    _f2 = "FAST_2TICK_VOLUME_FAIL"
-                                else:
-                                    _f2 = "FAST_2TICK_PRICE_FAIL"
-                                FINAL_GATE_REJECTS[_f2] = FINAL_GATE_REJECTS.get(_f2, 0) + 1
-                                # Do not endlessly re-arm a failed second tick.
-                                _next_fast_pending = None
-
-                        elif _fast_launch_ok:
-                            FINAL_GATE_REJECTS["FAST_2TICK_WAIT"] = FINAL_GATE_REJECTS.get("FAST_2TICK_WAIT", 0) + 1
-                            _next_fast_pending = {
-                                "mc": _mc_now, "time": now,
-                                "bs": _bs_now, "vol5": _vol_now,
-                            }
-
-                        elif _normal_lane_ok and isinstance(_launch_pending, dict):
-                            _mc_arm = num(_launch_pending.get("mc")) or 0
-                            _vol_arm = num(_launch_pending.get("vol5")) or 0
-                            _price_arm = num(_launch_pending.get("price5"))
-                            _arm_time = num(_launch_pending.get("time")) or 0
-                            _arm_age = max(0.0, now - _arm_time)
-
-                            _launch_mc_ok = bool(
-                                _mc_arm > 0 and _mc_now >= _mc_arm * 1.015
-                            )
-                            _launch_buy_ok = bool(_bs_now >= 1.45)
-                            _launch_vol_ok = bool(
-                                _vol_arm <= 0 or _vol_now >= _vol_arm * 0.95
-                            )
-                            _launch_price_ok = bool(
-                                _price_now is not None
-                                and _price_now >= 3.0
-                                and (_price_arm is None or _price_now >= _price_arm - 2.0)
-                            )
-                            _launch_time_ok = bool(20.0 <= _arm_age <= 180.0)
-
-                            if (
-                                _launch_mc_ok
-                                and _launch_buy_ok
-                                and _launch_vol_ok
-                                and _launch_price_ok
-                                and _launch_time_ok
-                            ):
-                                signal_ok = True
-                                FINAL_GATE_REJECTS["LAUNCH_CONFIRMED"] = FINAL_GATE_REJECTS.get("LAUNCH_CONFIRMED", 0) + 1
-                            else:
-                                if not _launch_time_ok:
-                                    _launch_reason = "LAUNCH_TIME"
-                                elif not _launch_mc_ok:
-                                    _launch_reason = "LAUNCH_MC_WEAK"
-                                elif not _launch_buy_ok:
-                                    _launch_reason = "LAUNCH_BUY_WEAK"
-                                elif not _launch_vol_ok:
-                                    _launch_reason = "LAUNCH_VOLUME_FADE"
-                                else:
-                                    _launch_reason = "LAUNCH_PRICE_WEAK"
-                                FINAL_GATE_REJECTS[_launch_reason] = FINAL_GATE_REJECTS.get(_launch_reason, 0) + 1
-
-                                # Re-arm from the latest healthy qualifying scan.
-                                _next_launch_pending = {
-                                    "mc": _mc_now,
-                                    "vol5": _vol_now,
-                                    "price5": _price_now,
-                                    "time": now,
-                                }
-                        elif _normal_lane_ok:
-                            FINAL_GATE_REJECTS["LAUNCH_CONFIRM_WAIT"] = FINAL_GATE_REJECTS.get("LAUNCH_CONFIRM_WAIT", 0) + 1
-                            _next_launch_pending = {
-                                "mc": _mc_now,
-                                "vol5": _vol_now,
-                                "price5": _price_now,
-                                "time": now,
-                            }
-                        elif _fast_candidate and _fast_hard_ok:
-                            FINAL_GATE_REJECTS["FAST_SOFT_BYPASS_SEEN"] = FINAL_GATE_REJECTS.get("FAST_SOFT_BYPASS_SEEN", 0) + 1
-
-                    if _micro_signal_ok and not signal_ok:
-                        signal_ok = True
-                        FINAL_GATE_REJECTS["MICRO_GIR"] = FINAL_GATE_REJECTS.get("MICRO_GIR", 0) + 1
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -3082,20 +1353,11 @@ def auto_scanner():
                         and stage != "SIGNAL"
                     ):
                         new_stage = "SIGNAL"
-                        SIGNALLED_CAS.add(ca)
                         stats["signal"] += 1
-                        global _quality_signal_count, _quality_last_signal_at
-                        _quality_signal_count += 1
-                        _quality_last_signal_at = now
                         final_score = min(100, result["score"] + momentum)
                         age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
 
-                        signal_title = (
-                            "HUNTERELITE V15 GUCLU GIR"
-                            if _micro_signal_ok
-                            else ("HUNTERELITE FAST LAUNCH GIR" if _fast_launch_ok else "HUNTERELITE CONFIRMED LAUNCH GIR")
-                        )
-                        message = f"""{signal_title}
+                        message = f"""HUNTERELITE EARLY SIGNAL
 
 {name} ({symbol})
 CA: {ca}
@@ -3108,38 +1370,31 @@ Likidite: {money(result["liq"])}
 5dk fiyat: {percent(result["price5"])}
 
 Top-10: {percent(result["top10"])}
-Holder Verify: {result.get("holder_source", "N/A")}
-Hard Rug Gate: PASSED
-Final Gate: PASSED
+Likidite Guard: {"PASSED" if liq_drain_safe else "BLOCKED"}
+Likidite Degisim: -{liq_drop_pct:.1f}%
 
 Risk Score: {result["score"]}/100
 Momentum: +{momentum}
-Trend Teyidi: {seen_count} tarama / ONAYLI
-Launch Teyidi: {"MICRO MOMENTUM / 2-TICK ONAYLI" if _micro_signal_ok else ("FAST ACCELERATION / ONAYLI" if _fast_launch_ok else "2 asama / DEVAM HAREKETI ONAYLI")}
-Runner MC Ivme: {_runner_mc_accel:+.1f}%
-Runner Hacim Ivme: {_runner_vol_accel:+.1f}%
-1sa fiyat: {percent(result["price1h"])}
-6sa fiyat: {percent(result["price6h"])}
+1s fiyat: {percent(result["price1h"])}
+6s fiyat: {percent(result["price6h"])}
 Pair yasi: {age_text}
 Final Score: {final_score}/100
 
 KARAR: GIR
-POTANSIYEL: FILTRELERI GECEN ADAY
+POTANSIYEL: 5X-10X POTANSIYEL ADAYI
 
-UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur.
+UYARI: Potansiyel etiketi garanti degildir.
 Axiom'da son kontrolunu yap."""
 
                     elif (
-                        QUALITY_SEND_WATCH
-                        and watch_ok
+                        watch_ok
                         and stage == "NEW"
                         and now - last_sent > WATCH_REPEAT_COOLDOWN
                     ):
                         new_stage = "WATCH"
                         stats["watch"] += 1
 
-                        _watch_title = "HUNTERELITE ERKEN IZLE" if _early_watch_ok else "HUNTERELITE IZLE"
-                        message = f"""{_watch_title}
+                        message = f"""HUNTERELITE IZLE
 
 {name} ({symbol})
 CA: {ca}
@@ -3153,14 +1408,32 @@ Likidite: {money(result["liq"])}
 
 Top-10: {percent(result["top10"])}
 Score: {result["score"]}/100
-Mint: {"AKTIF" if result.get("mint") is True else ("KAPALI" if result.get("mint") is False else "DOGRULANAMADI")}
-Freeze: {"AKTIF" if result.get("freeze") is True else ("KAPALI" if result.get("freeze") is False else "DOGRULANAMADI")}
 
-Potansiyel: {"SAFE PREPUMP / ERKEN" if _early_watch_ok else "IZLE"}
-KARAR: {_watch_decision}
-GIR BLOCK: {_gir_block}
+Potansiyel: IZLE
+KARAR: IZLE / ERKEN ADAY
 
-GIR icin HunterElite teyidini bekle."""
+Momentum teyidi bekleniyor."""
+
+                    # V11.34 LIQ GUARD:
+                    # If a token that already signaled loses >=35% of pool liquidity
+                    # between scans, cancel immediately instead of waiting for price damage.
+                    if (
+                        stage == "SIGNAL"
+                        and not liq_drain_safe
+                        and liq_drain_level == "HARD"
+                    ):
+                        new_stage = "CANCELLED"
+                        message = f"""HUNTERELITE LIQUIDITY DRAIN
+
+{name} ({symbol})
+CA: {ca}
+
+Likidite onceki taramaya gore %{liq_drop_pct:.1f} dustu.
+Onceki Likidite: {money(old_metrics.get("liq") if old_metrics else None)}
+Guncel Likidite: {money(result.get("liq"))}
+
+KARAR: SAT / GIRME
+NEDEN: HIZLI LIKIDITE BOSALMASI"""
 
                     # Missing liquidity is a data-wait state, not a sell/cancel signal.
                     cancel_has_liq = result.get("liq") is not None
@@ -3183,7 +1456,6 @@ Yeni giris icin uygun degil."""
                     if message:
                         for chat_id in list(signal_chats):
                             send(chat_id, message)
-                            send_clickable_ca(chat_id, ca)
                             cancelled_this_scan.add(ca)
                         last_sent = now
 
@@ -3194,19 +1466,13 @@ Yeni giris icin uygun degil."""
                             "last_sent": last_sent,
                             "seen": now,
                             "seen_count": seen_count,
-                            "ever_signalled": bool(ca in SIGNALLED_CAS or (previous and previous.get("ever_signalled"))),
-                            "launch_pending": None if signal_ok else _next_launch_pending,
-                            "fast_pending": None if signal_ok else _next_fast_pending,
-                            "micro_pending": None if signal_ok else _next_micro_pending,
                         }
 
                     save_state()
                     time.sleep(1)
 
                 except Exception as e:
-                    import traceback
                     print("TOKEN SCAN ERROR:", ca, repr(e), flush=True)
-                    traceback.print_exc()
 
             print(
                 "SCAN SUMMARY | "
@@ -3238,27 +1504,17 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V15.1 | total={stats.get('radar',0)} "
+                    f"RADAR V11.34 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
-                    f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
-                    f"SOURCE_ACCOUNTED={stats.get('src_birdeye',0)+stats.get('src_gecko',0)+stats.get('src_dex',0)}\n"
-                    f"DATA_HEALTH={'DEGRADED' if (stats.get('src_birdeye',0)==0 and stats.get('src_gecko',0)==0) else 'OK'}\n"
-                    f"BIRDEYE_FEED={'COOLDOWN' if time.time() < birdeye_cooldown_until else ('OK' if not birdeye_last_error else 'ERR')} "
-                    f"cache={len(birdeye_cache)} "
-                    f"cooldown={max(0, int(birdeye_cooldown_until-time.time()))}s\n"
-                    f"BIRDEYE_ERR={birdeye_last_error[:180] if birdeye_last_error else '-'}\n"
-                    f"GECKO_FEED={gecko_last_status} cache={len(gecko_cache)} liq_cache={len(gecko_liq_cache)} "
-                    f"retry={max(0,int(gecko_next_retry-time.time()))}s\n"
-                    f"GECKO_ERR={gecko_last_error[:180] if gecko_last_error else '-'}\n"
+                    f"SOURCE_ACCOUNTED={stats.get('src_birdeye',0)+stats.get('src_dex',0)}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
                     f"> LIQ={stats.get('liq_pass',0)} "
                     f"> HOLDER={stats.get('holder_pass',0)}\n"
                     f"LIQ FALLBACK: birdeye_ok={stats.get('liq_fallback_ok',0)} "
-                    f"birdeye_missing={stats.get('liq_fallback_missing',0)} | "
-                    f"gecko_ok={stats.get('liq_gecko_ok',0)} gecko_missing={stats.get('liq_gecko_missing',0)}\n"
+                    f"birdeye_missing={stats.get('liq_fallback_missing',0)}\n"
                     f"LIQ BREAKDOWN: missing={stats.get('liq_missing',0)} "
                     f"$0-200={stats.get('liq_0_200',0)} "
                     f"$200-500={stats.get('liq_200_500',0)} "
@@ -3269,8 +1525,6 @@ Yeni giris icin uygun degil."""
                     f"60-70={stats.get('holder_60_70',0)} "
                     f"70-82={stats.get('holder_70_82',0)} "
                     f"82+={stats.get('holder_82_plus',0)}\n"
-                    f"HOLDER RECOVERY: rpc={stats.get('holder_rpc_verified',0)} rugcheck={stats.get('holder_rugcheck_verified',0)}\n"
-                    f"HOLDER DISCOVERY: GECKO checked={stats.get('holder_gecko_checked',0)} 82+={stats.get('holder_gecko_82',0)} samples={stats.get('holder_gecko_samples',[])} | DEX checked={stats.get('holder_dex_checked',0)} 82+={stats.get('holder_dex_82',0)} samples={stats.get('holder_dex_samples',[])} | unreliable={stats.get('holder_unreliable',0)}\n"
                     f"SAFETY: RUG_OK={stats.get('rug_ok',0)} "
                     f"> AUTH_OK={stats.get('auth_ok',0)} "
                     f"> CRASH_OK={stats.get('crash_ok',0)} "
@@ -3279,19 +1533,12 @@ Yeni giris icin uygun degil."""
                     f"H1_FAIL={stats.get('h1_fail',0)} "
                     f"H6_FAIL={stats.get('h6_fail',0)} "
                     f"H24_FAIL={stats.get('h24_fail',0)}\n"
-                    f"SAFE SCORES: samples={stats.get('safe_score_samples',[])} low={stats.get('score_fail_samples',[])}\n"
-                    f"WARMUP={'YES' if stats.get('repeat',0) == 0 else 'NO'} "
                     f"AFTER SAFE: SCORE={stats.get('score_pass',0)} "
                     f"> ACTIVITY={stats.get('activity_pass',0)} "
                     f"> TREND={stats.get('trend_pass',0)} "
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
-                    f"FINAL GATE REJECTS: {dict(sorted(FINAL_GATE_REJECTS.items(), key=lambda x: -x[1])[:6])}\n"
-                    f"QUALITY DETAILS: {dict(sorted(QUALITY_GATE_DETAILS.items(), key=lambda x: -x[1]))}\n"
-                    f"FAST DETAILS: {dict(sorted({k:v for k,v in FINAL_GATE_REJECTS.items() if k.startswith('FAST_')}.items(), key=lambda x: -x[1])[:10])}\n"
-                    f"V15.1 TRIGGER: armed={FINAL_GATE_REJECTS.get('MICRO_ARMED',0)} rearm={FINAL_GATE_REJECTS.get('MICRO_REARM',0)} fade={FINAL_GATE_REJECTS.get('MICRO_FADE',0)} confirmed={FINAL_GATE_REJECTS.get('MICRO_2TICK_CONFIRMED',0)} gir={FINAL_GATE_REJECTS.get('MICRO_GIR',0)} pending_rescan={len(_micro_rescan)}\\n"
-                    f"WATCH DIAG: {dict(sorted(WATCH_DIAG.items(), key=lambda x: -x[1]))}\n"
-                    f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} BREAKOUT={stats.get('breakout',0)} STRONG_GIR={stats.get('strong_gir',0)} "
-                    f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)} batch_pairs={len(DEX_BATCH_PAIR_CACHE)}\n"
+                    f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} "
+                    f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
                     f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"
                     f"H1 SMART: limit={MAX_SIGNAL_DROP_1H:.0f}% fails={stats.get('h1_fail_values',[])}"
                 )
@@ -3351,6 +1598,8 @@ Komutlar:
 ğŸ” Manuel analiz: AKTÄ°F
 ğŸš¨ Early Hunter: {"AKTÄ°F" if active else "KAPALI"}
 â± Tarama: {SCAN_INTERVAL} sn
+RURU Core: V11.34 ORIJINAL SINYAL ESikleri
+Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸ¯ Watch Score: {WATCH_SCORE}
 ğŸ”¥ Signal Score: {SIGNAL_SCORE}
 ğŸ“ˆ Trend teyidi: {TREND_CONFIRM_SCANS} tarama / min momentum {MIN_MOMENTUM_SIGNAL}
@@ -3388,9 +1637,9 @@ GerÃ§ek aday taramasÄ± baÅŸladÄ±.""")
 
     if command == "/radar":
         with radar_stats_lock:
-            radar_snapshot = dict(radar_stats)
+            s = dict(radar_stats)
 
-        updated = radar_snapshot.get("updated", 0)
+        updated = s.get("updated", 0)
         age = int(max(0, time.time() - updated)) if updated else None
         age_text = f"{age} sn Ã¶nce" if age is not None else "henÃ¼z ilk tur tamamlanmadÄ±"
 
@@ -3399,24 +1648,24 @@ GerÃ§ek aday taramasÄ± baÅŸladÄ±.""")
 SÃ¼rÃ¼m: {VERSION}
 Son tarama: {age_text}
 
-ğŸ” Radar adayÄ±: {radar_snapshot.get("radar", 0)}
-âœ… Ä°ÅŸlenen: {radar_snapshot.get("processed", 0)}
-âŒ Pair yok: {radar_snapshot.get("pair_yok", 0)}
+ğŸ” Radar adayÄ±: {s.get("radar", 0)}
+âœ… Ä°ÅŸlenen: {s.get("processed", 0)}
+âŒ Pair yok: {s.get("pair_yok", 0)}
 
 Filtreye takÄ±lanlar:
-â€¢ MC: {radar_snapshot.get("mc_fail", 0)}
-â€¢ Likidite: {radar_snapshot.get("liq_fail", 0)}
-â€¢ Holder: {radar_snapshot.get("holder_fail", 0)}
-â€¢ Mint/Freeze: {radar_snapshot.get("authority_fail", 0)}
-â€¢ Rug/Honeypot: {radar_snapshot.get("rug_fail", 0)}
-â€¢ Score: {radar_snapshot.get("score_fail", 0)}
-â€¢ Buy baskÄ±sÄ±: {radar_snapshot.get("buy_fail", 0)}
-â€¢ Hacim: {radar_snapshot.get("volume_fail", 0)}
-â€¢ Trend: {radar_snapshot.get("trend_fail", 0)}
-â€¢ Momentum: {radar_snapshot.get("momentum_fail", 0)}
+â€¢ MC: {s.get("mc_fail", 0)}
+â€¢ Likidite: {s.get("liq_fail", 0)}
+â€¢ Holder: {s.get("holder_fail", 0)}
+â€¢ Mint/Freeze: {s.get("authority_fail", 0)}
+â€¢ Rug/Honeypot: {s.get("rug_fail", 0)}
+â€¢ Score: {s.get("score_fail", 0)}
+â€¢ Buy baskÄ±sÄ±: {s.get("buy_fail", 0)}
+â€¢ Hacim: {s.get("volume_fail", 0)}
+â€¢ Trend: {s.get("trend_fail", 0)}
+â€¢ Momentum: {s.get("momentum_fail", 0)}
 
-ğŸ‘€ WATCH: {radar_snapshot.get("watch", 0)}
-ğŸš¨ SIGNAL: {radar_snapshot.get("signal", 0)}
+ğŸ‘€ WATCH: {s.get("watch", 0)}
+ğŸš¨ SIGNAL: {s.get("signal", 0)}
 
 Bu ekran teÅŸhis iÃ§indir; sinyal garantisi deÄŸildir.""")
         return
@@ -3479,13 +1728,13 @@ def startup_notify():
 Early Hunter: ACTIVE
 Scan: {SCAN_INTERVAL} sec
 Radar: {"BIRDEYE + DEX" if BIRDEYE_API_KEY else "DEX ONLY"}
-Birdeye: {"CONNECTED" if BIRDEYE_API_KEY else "KEY MISSING"}\nBirdeye Fresh: official 20/request + rolling unique cache / 60 sec\nRadar Mix: fresh-first Gecko + DEX 30 reserved + batch pair cache
+Birdeye: {"CONNECTED" if BIRDEYE_API_KEY else "KEY MISSING"}\nBirdeye Fresh: official 20/request + rolling unique cache / 60 sec\nRadar Mix: rolling Birdeye fills first + DEX max 20 fallback
 Watch Score: {WATCH_SCORE}
 Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV15.1 FINAL TRIGGER FIX + HARD SAFETY + MICRO MOMENTUM + PENDING RESCAN + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nSTATE DECISION LOCK + CENTRAL OUTPUT + LIQ FALLBACK: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
