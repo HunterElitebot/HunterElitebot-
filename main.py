@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.12.3.1 NAMEERROR HOTFIX"
+VERSION = "V13.13 ROLLING CANDIDATE POOL"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -48,6 +48,15 @@ QUALITY_GATE_DETAILS = {}
 WATCH_DIAG = {}
 HOLDER_HARD_MAX = 82.0
 SCAN_INTERVAL = 30
+
+# V13.13: rolling candidate pool.
+# This is an additional ranking lane; it NEVER bypasses hard rug/safety gates.
+CANDIDATE_POOL_TTL = 600.0
+CANDIDATE_POOL_MIN_OBS = 2
+CANDIDATE_POOL_SIGNAL_SCORE = 78.0
+CANDIDATE_POOL_MIN_MARGIN = 4.0
+CANDIDATE_POOL = {}
+CANDIDATE_POOL_LOCK = threading.Lock()
 
 # V11.57 QUALITY MODE
 # Target: roughly 10-20 high-quality alerts/day when the market provides them.
@@ -2228,6 +2237,82 @@ def market_viral_score(result):
     return score, label
 
 
+def candidate_pool_update(ca, result, safety_ok, fast_hard_ok, now):
+    """Rank hard-safe early movers across scans. Returns (confirmed, rank_score, obs)."""
+    if not safety_ok or not fast_hard_ok or ca in SIGNALLED_CAS:
+        with CANDIDATE_POOL_LOCK:
+            CANDIDATE_POOL.pop(ca, None)
+        return False, 0.0, 0
+
+    mc = num(result.get("mc")) or 0.0
+    liq = num(result.get("liq")) or 0.0
+    score = num(result.get("score")) or 0.0
+    buys = num(result.get("buys5")) or 0.0
+    sells = num(result.get("sells5")) or 0.0
+    vol5 = num(result.get("vol5")) or 0.0
+    price5 = num(result.get("price5"))
+    rmc = num(result.get("runner_mc_accel"))
+    rvol = num(result.get("runner_vol_accel"))
+    age = num(result.get("age_hours"))
+    bs = buys / max(sells, 1.0)
+
+    # Pool admission is deliberately softer than FAST first-tick, but still requires
+    # positive live behavior. Hard rug/dump/authority/holder gates remain upstream.
+    if mc < MC_MIN or liq < MIN_LIQUIDITY or score < 65 or bs < 1.15 or vol5 < 800:
+        return False, 0.0, 0
+    if price5 is None or price5 < -2.0 or price5 > 40.0:
+        return False, 0.0, 0
+    if rmc is not None and rmc < -1.0:
+        return False, 0.0, 0
+    if age is not None and age > 0.50:
+        return False, 0.0, 0
+
+    with CANDIDATE_POOL_LOCK:
+        for k, v in list(CANDIDATE_POOL.items()):
+            if now - (num(v.get("last")) or 0) > CANDIDATE_POOL_TTL:
+                CANDIDATE_POOL.pop(k, None)
+
+        prev = CANDIDATE_POOL.get(ca) or {}
+        first_mc = num(prev.get("first_mc")) or mc
+        first_vol = num(prev.get("first_vol")) or vol5
+        obs = int(prev.get("obs") or 0) + 1
+        mc_growth = ((mc / first_mc) - 1.0) * 100.0 if first_mc > 0 else 0.0
+        vol_growth = ((vol5 / first_vol) - 1.0) * 100.0 if first_vol > 0 else 0.0
+
+        rank = (
+            min(score, 100.0) * 0.35
+            + min(max(bs - 1.0, 0.0) * 25.0, 25.0)
+            + min(max(rmc or 0.0, 0.0), 20.0) * 0.75
+            + min(max(rvol or 0.0, 0.0), 30.0) * 0.45
+            + min(max(mc_growth, 0.0), 20.0) * 0.65
+            + min(max(vol_growth, 0.0), 30.0) * 0.25
+            + min(vol5 / max(liq, 1.0), 3.0) * 4.0
+        )
+
+        CANDIDATE_POOL[ca] = {
+            "first": num(prev.get("first")) or now, "last": now, "obs": obs,
+            "first_mc": first_mc, "first_vol": first_vol, "rank": rank,
+            "mc": mc, "vol5": vol5, "bs": bs,
+        }
+
+        ranks = sorted(
+            (num(v.get("rank")) or 0.0 for v in CANDIDATE_POOL.values()),
+            reverse=True
+        )
+        second = ranks[1] if len(ranks) > 1 else 0.0
+        is_top = bool(ranks and rank >= ranks[0] - 1e-9)
+        confirmed = bool(
+            obs >= CANDIDATE_POOL_MIN_OBS
+            and rank >= CANDIDATE_POOL_SIGNAL_SCORE
+            and is_top
+            and (rank - second >= CANDIDATE_POOL_MIN_MARGIN or rank >= 86.0)
+            and mc_growth >= 1.0
+            and bs >= 1.25
+            and (rvol is None or rvol >= 0.0)
+        )
+        return confirmed, rank, obs
+
+
 def auto_scanner():
     print("EARLY HUNTER SCANNER ACTIVE", flush=True)
     print(
@@ -2623,6 +2708,15 @@ def auto_scanner():
                     _fast_hard_ok, _fast_hard_reason = fast_launch_hard_gate(
                         result, old_metrics, seen_count, momentum, now
                     )
+                    _pool_confirmed, _pool_rank, _pool_obs = candidate_pool_update(
+                        ca, result, safety_ok, _fast_hard_ok, now
+                    )
+                    result["candidate_pool_rank"] = _pool_rank
+                    result["candidate_pool_obs"] = _pool_obs
+                    if _pool_obs:
+                        FINAL_GATE_REJECTS["POOL_CANDIDATE"] = FINAL_GATE_REJECTS.get("POOL_CANDIDATE", 0) + 1
+                    if _pool_confirmed:
+                        FINAL_GATE_REJECTS["POOL_TOP_CONFIRMED"] = FINAL_GATE_REJECTS.get("POOL_TOP_CONFIRMED", 0) + 1
                     if _candidate_signal and not _final_gate_ok:
                         FINAL_GATE_REJECTS[_final_gate_reason] = FINAL_GATE_REJECTS.get(_final_gate_reason, 0) + 1
 
@@ -2634,6 +2728,7 @@ def auto_scanner():
                     _raw_signal_ok = bool(
                         (_candidate_signal and _final_gate_ok)
                         or (_fast_candidate and _fast_hard_ok)
+                        or (_pool_confirmed and _fast_hard_ok)
                     )
                     _normal_lane_ok = bool(_candidate_signal and _final_gate_ok)
 
@@ -2825,6 +2920,10 @@ def auto_scanner():
                         elif _fast_candidate and _fast_hard_ok:
                             FINAL_GATE_REJECTS["FAST_SOFT_BYPASS_SEEN"] = FINAL_GATE_REJECTS.get("FAST_SOFT_BYPASS_SEEN", 0) + 1
 
+                    if _pool_confirmed and _fast_hard_ok and not signal_ok:
+                        signal_ok = True
+                        FINAL_GATE_REJECTS["POOL_GIR"] = FINAL_GATE_REJECTS.get("POOL_GIR", 0) + 1
+
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
                         stats[reason] = stats.get(reason, 0) + 1
@@ -2850,9 +2949,9 @@ def auto_scanner():
                         age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
 
                         signal_title = (
-                            "HUNTERELITE FAST LAUNCH GIR"
-                            if _fast_launch_ok
-                            else "HUNTERELITE CONFIRMED LAUNCH GIR"
+                            "HUNTERELITE POOL TOP GIR"
+                            if _pool_confirmed
+                            else ("HUNTERELITE FAST LAUNCH GIR" if _fast_launch_ok else "HUNTERELITE CONFIRMED LAUNCH GIR")
                         )
                         message = f"""{signal_title}
 
@@ -2874,7 +2973,8 @@ Final Gate: PASSED
 Risk Score: {result["score"]}/100
 Momentum: +{momentum}
 Trend Teyidi: {seen_count} tarama / ONAYLI
-Launch Teyidi: {"FAST ACCELERATION / ONAYLI" if _fast_launch_ok else "2 asama / DEVAM HAREKETI ONAYLI"}
+Launch Teyidi: {"ROLLING POOL / EN GUCLU ADAY" if _pool_confirmed else ("FAST ACCELERATION / ONAYLI" if _fast_launch_ok else "2 asama / DEVAM HAREKETI ONAYLI")}
+Pool Rank: {_pool_rank:.1f} / Obs: {_pool_obs}
 Runner MC Ivme: {_runner_mc_accel:+.1f}%
 Runner Hacim Ivme: {_runner_vol_accel:+.1f}%
 1sa fiyat: {percent(result["price1h"])}
@@ -2996,7 +3096,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.12.3.1 | total={stats.get('radar',0)} "
+                    f"RADAR V13.13 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -3242,7 +3342,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.12.3 ADAPTIVE GECKO + TRUE 2TICK + FRESH DISCOVERY + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.13 ROLLING CANDIDATE POOL + ADAPTIVE GECKO + TRUE 2TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
