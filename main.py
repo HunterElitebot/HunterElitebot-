@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V15 SIMPLE TRIGGER CORE"
+VERSION = "V15.1 FINAL TRIGGER FIX"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -1211,12 +1211,32 @@ def discovery_candidates():
     selected = []
     selected_seen = set()
 
+    # V15.1: armed micro candidates must be seen again or 2-tick confirmation
+    # cannot work reliably. Reserve up to 12 slots for live pending candidates.
+    _micro_rescan = []
+    with state_lock:
+        for _ca, _st in token_states.items():
+            if not isinstance(_st, dict):
+                continue
+            _mp = _st.get("micro_pending")
+            if not isinstance(_mp, dict):
+                continue
+            _mp_time = num(_mp.get("time")) or 0
+            if 0 <= time.time() - _mp_time <= 150:
+                _micro_rescan.append((_mp_time, _ca))
+    _micro_rescan = [ca for _, ca in sorted(_micro_rescan, reverse=True)[:12]]
+
     def _add(ca):
         if ca and ca not in selected_seen and len(selected) < RADAR_TARGET:
             selected.append(ca)
             selected_seen.add(ca)
             return True
         return False
+
+    for _ca in _micro_rescan:
+        if _ca not in candidate_sources:
+            candidate_sources[_ca] = "GECKO"
+        _add(_ca)
 
     # V13.5 FRESH RADAR MIX
     # Birdeye still gets first priority when healthy, but Gecko can no longer
@@ -2795,13 +2815,13 @@ def auto_scanner():
                     # the second tick is what proves continuation.
                     _micro_arm_ok = bool(
                         _micro_hard_ok
-                        and _micro_score >= 60
+                        and _micro_score >= 62
                         and _micro_mc >= MC_MIN
-                        and _micro_vol >= 150.0
-                        and _micro_buys >= 3
-                        and _micro_bs >= 1.05
-                        and (_micro_price is None or -10.0 <= _micro_price <= 45.0)
-                        and (_micro_rmc is None or _micro_rmc >= -0.75)
+                        and _micro_vol >= 250.0
+                        and _micro_buys >= 4
+                        and _micro_bs >= 1.10
+                        and (_micro_price is None or -8.0 <= _micro_price <= 40.0)
+                        and (_micro_rmc is None or _micro_rmc >= -0.50)
                     )
 
                     if isinstance(_micro_pending, dict):
@@ -2813,11 +2833,13 @@ def auto_scanner():
                             _micro_hard_ok
                             and 20.0 <= _mp_age <= 120.0
                             and _mp_mc > 0
-                            and _micro_mc >= _mp_mc * 1.005
-                            and _micro_bs >= 1.10
-                            and _micro_buys >= 4
-                            and (_mp_vol <= 0 or _micro_vol >= _mp_vol * 0.90)
-                            and (_micro_price is None or _micro_price >= -5.0)
+                            and _micro_mc >= _mp_mc * 0.9975
+                            and _micro_bs >= 1.05
+                            and _micro_buys >= 3
+                            and (_mp_vol <= 0 or _micro_vol >= _mp_vol * 0.80)
+                            and (_micro_price is None or _micro_price >= -8.0)
+                            and (_micro_rmc is None or _micro_rmc >= -1.25)
+                            and (_micro_rvol is None or _micro_rvol >= -0.25)
                             and quality_signal_slot_available(now)
                         )
                         if _micro_continue_ok:
@@ -3216,7 +3238,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V15 | total={stats.get('radar',0)} "
+                    f"RADAR V15.1 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -3266,7 +3288,7 @@ Yeni giris icin uygun degil."""
                     f"FINAL GATE REJECTS: {dict(sorted(FINAL_GATE_REJECTS.items(), key=lambda x: -x[1])[:6])}\n"
                     f"QUALITY DETAILS: {dict(sorted(QUALITY_GATE_DETAILS.items(), key=lambda x: -x[1]))}\n"
                     f"FAST DETAILS: {dict(sorted({k:v for k,v in FINAL_GATE_REJECTS.items() if k.startswith('FAST_')}.items(), key=lambda x: -x[1])[:10])}\n"
-                    f"V15 TRIGGER: armed={FINAL_GATE_REJECTS.get('MICRO_ARMED',0)} rearm={FINAL_GATE_REJECTS.get('MICRO_REARM',0)} confirmed={FINAL_GATE_REJECTS.get('MICRO_2TICK_CONFIRMED',0)} gir={FINAL_GATE_REJECTS.get('MICRO_GIR',0)}\\n"
+                    f"V15.1 TRIGGER: armed={FINAL_GATE_REJECTS.get('MICRO_ARMED',0)} rearm={FINAL_GATE_REJECTS.get('MICRO_REARM',0)} fade={FINAL_GATE_REJECTS.get('MICRO_FADE',0)} confirmed={FINAL_GATE_REJECTS.get('MICRO_2TICK_CONFIRMED',0)} gir={FINAL_GATE_REJECTS.get('MICRO_GIR',0)} pending_rescan={len(_micro_rescan)}\\n"
                     f"WATCH DIAG: {dict(sorted(WATCH_DIAG.items(), key=lambda x: -x[1]))}\n"
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} BREAKOUT={stats.get('breakout',0)} STRONG_GIR={stats.get('strong_gir',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)} batch_pairs={len(DEX_BATCH_PAIR_CACHE)}\n"
@@ -3463,7 +3485,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV15 SIMPLE TRIGGER CORE + HARD SAFETY + MICRO MOMENTUM + 2-TICK GIR + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV15.1 FINAL TRIGGER FIX + HARD SAFETY + MICRO MOMENTUM + PENDING RESCAN + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
