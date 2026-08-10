@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V14 CLEAN CORE"
+VERSION = "V15 SIMPLE TRIGGER CORE"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -2758,18 +2758,86 @@ def auto_scanner():
                     _fast_hard_ok, _fast_hard_reason = fast_launch_hard_gate(
                         result, old_metrics, seen_count, momentum, now
                     )
-                    _pool_hard_ok, _pool_hard_reason = pool_hard_safety_gate(result, now)
-                    _pool_confirmed, _pool_rank, _pool_obs = candidate_pool_update(
-                        ca, result, safety_ok, _pool_hard_ok, now
+                    # V15 SIMPLE TRIGGER: no pool/ranking dependency.
+                    # Hard safety first, then arm a token from its own live flow.
+                    _pool_confirmed, _pool_rank, _pool_obs = False, 0.0, 0
+                    _micro_pending = previous.get("micro_pending") if previous else None
+                    _next_micro_pending = None
+                    _micro_signal_ok = False
+
+                    _micro_rug_ok, _micro_rug_reason = hard_rug_gate(result)
+                    _micro_top10 = num(result.get("top10"))
+                    _micro_liq = num(result.get("liq"))
+                    _micro_mc = num(result.get("mc")) or 0
+                    _micro_vol = num(result.get("vol5")) or 0
+                    _micro_price = num(result.get("price5"))
+                    _micro_buys = num(result.get("buys5")) or 0
+                    _micro_sells = num(result.get("sells5")) or 0
+                    _micro_bs = _micro_buys / max(_micro_sells, 1)
+                    _micro_score = num(result.get("score")) or 0
+                    _micro_rmc = num(result.get("runner_mc_accel"))
+                    _micro_rvol = num(result.get("runner_vol_accel"))
+
+                    _micro_hard_ok = bool(
+                        safety_ok
+                        and _micro_rug_ok
+                        and _micro_top10 is not None
+                        and 1.0 <= _micro_top10 <= QUALITY_MAX_TOP10
+                        and _micro_liq is not None and _micro_liq >= MIN_LIQUIDITY
+                        and ca not in SIGNALLED_CAS
+                        and (_micro_price is None or _micro_price > -35.0)
+                        and (_micro_price is None or _micro_price < 80.0)
+                        and (_micro_rmc is None or _micro_rmc > -3.0)
+                        and _micro_bs >= 0.80
                     )
-                    if safety_ok and not _pool_hard_ok:
-                        _pool_diag("HARD_" + str(_pool_hard_reason or "UNKNOWN"))
-                    result["candidate_pool_rank"] = _pool_rank
-                    result["candidate_pool_obs"] = _pool_obs
-                    if _pool_obs:
-                        FINAL_GATE_REJECTS["POOL_CANDIDATE"] = FINAL_GATE_REJECTS.get("POOL_CANDIDATE", 0) + 1
-                    if _pool_confirmed:
-                        FINAL_GATE_REJECTS["POOL_TOP_CONFIRMED"] = FINAL_GATE_REJECTS.get("POOL_TOP_CONFIRMED", 0) + 1
+
+                    # First tick: healthy capital flow. Deliberately moderate;
+                    # the second tick is what proves continuation.
+                    _micro_arm_ok = bool(
+                        _micro_hard_ok
+                        and _micro_score >= 60
+                        and _micro_mc >= MC_MIN
+                        and _micro_vol >= 150.0
+                        and _micro_buys >= 3
+                        and _micro_bs >= 1.05
+                        and (_micro_price is None or -10.0 <= _micro_price <= 45.0)
+                        and (_micro_rmc is None or _micro_rmc >= -0.75)
+                    )
+
+                    if isinstance(_micro_pending, dict):
+                        _mp_time = num(_micro_pending.get("time")) or 0
+                        _mp_mc = num(_micro_pending.get("mc")) or 0
+                        _mp_vol = num(_micro_pending.get("vol5")) or 0
+                        _mp_age = max(0.0, now - _mp_time)
+                        _micro_continue_ok = bool(
+                            _micro_hard_ok
+                            and 20.0 <= _mp_age <= 120.0
+                            and _mp_mc > 0
+                            and _micro_mc >= _mp_mc * 1.005
+                            and _micro_bs >= 1.10
+                            and _micro_buys >= 4
+                            and (_mp_vol <= 0 or _micro_vol >= _mp_vol * 0.90)
+                            and (_micro_price is None or _micro_price >= -5.0)
+                            and quality_signal_slot_available(now)
+                        )
+                        if _micro_continue_ok:
+                            _micro_signal_ok = True
+                            FINAL_GATE_REJECTS["MICRO_2TICK_CONFIRMED"] = FINAL_GATE_REJECTS.get("MICRO_2TICK_CONFIRMED", 0) + 1
+                        elif _micro_arm_ok:
+                            # Still healthy: re-arm from current observation instead of losing it.
+                            _next_micro_pending = {
+                                "time": now, "mc": _micro_mc, "vol5": _micro_vol,
+                                "bs": _micro_bs, "score": _micro_score,
+                            }
+                            FINAL_GATE_REJECTS["MICRO_REARM"] = FINAL_GATE_REJECTS.get("MICRO_REARM", 0) + 1
+                        else:
+                            FINAL_GATE_REJECTS["MICRO_FADE"] = FINAL_GATE_REJECTS.get("MICRO_FADE", 0) + 1
+                    elif _micro_arm_ok:
+                        _next_micro_pending = {
+                            "time": now, "mc": _micro_mc, "vol5": _micro_vol,
+                            "bs": _micro_bs, "score": _micro_score,
+                        }
+                        FINAL_GATE_REJECTS["MICRO_ARMED"] = FINAL_GATE_REJECTS.get("MICRO_ARMED", 0) + 1
                     if _candidate_signal and not _final_gate_ok:
                         FINAL_GATE_REJECTS[_final_gate_reason] = FINAL_GATE_REJECTS.get(_final_gate_reason, 0) + 1
 
@@ -2781,7 +2849,6 @@ def auto_scanner():
                     _raw_signal_ok = bool(
                         (_candidate_signal and _final_gate_ok)
                         or (_fast_candidate and _fast_hard_ok)
-                        or (_pool_confirmed and _pool_hard_ok)
                     )
                     _normal_lane_ok = bool(_candidate_signal and _final_gate_ok)
 
@@ -2973,9 +3040,9 @@ def auto_scanner():
                         elif _fast_candidate and _fast_hard_ok:
                             FINAL_GATE_REJECTS["FAST_SOFT_BYPASS_SEEN"] = FINAL_GATE_REJECTS.get("FAST_SOFT_BYPASS_SEEN", 0) + 1
 
-                    if _pool_confirmed and _pool_hard_ok and not signal_ok:
+                    if _micro_signal_ok and not signal_ok:
                         signal_ok = True
-                        FINAL_GATE_REJECTS["POOL_GIR"] = FINAL_GATE_REJECTS.get("POOL_GIR", 0) + 1
+                        FINAL_GATE_REJECTS["MICRO_GIR"] = FINAL_GATE_REJECTS.get("MICRO_GIR", 0) + 1
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -3002,8 +3069,8 @@ def auto_scanner():
                         age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
 
                         signal_title = (
-                            "HUNTERELITE POOL TOP GIR"
-                            if _pool_confirmed
+                            "HUNTERELITE V15 GUCLU GIR"
+                            if _micro_signal_ok
                             else ("HUNTERELITE FAST LAUNCH GIR" if _fast_launch_ok else "HUNTERELITE CONFIRMED LAUNCH GIR")
                         )
                         message = f"""{signal_title}
@@ -3026,8 +3093,7 @@ Final Gate: PASSED
 Risk Score: {result["score"]}/100
 Momentum: +{momentum}
 Trend Teyidi: {seen_count} tarama / ONAYLI
-Launch Teyidi: {"ROLLING POOL / EN GUCLU ADAY" if _pool_confirmed else ("FAST ACCELERATION / ONAYLI" if _fast_launch_ok else "2 asama / DEVAM HAREKETI ONAYLI")}
-Pool Rank: {_pool_rank:.1f} / Obs: {_pool_obs}
+Launch Teyidi: {"MICRO MOMENTUM / 2-TICK ONAYLI" if _micro_signal_ok else ("FAST ACCELERATION / ONAYLI" if _fast_launch_ok else "2 asama / DEVAM HAREKETI ONAYLI")}
 Runner MC Ivme: {_runner_mc_accel:+.1f}%
 Runner Hacim Ivme: {_runner_vol_accel:+.1f}%
 1sa fiyat: {percent(result["price1h"])}
@@ -3109,6 +3175,7 @@ Yeni giris icin uygun degil."""
                             "ever_signalled": bool(ca in SIGNALLED_CAS or (previous and previous.get("ever_signalled"))),
                             "launch_pending": None if signal_ok else _next_launch_pending,
                             "fast_pending": None if signal_ok else _next_fast_pending,
+                            "micro_pending": None if signal_ok else _next_micro_pending,
                         }
 
                     save_state()
@@ -3149,7 +3216,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V14 | total={stats.get('radar',0)} "
+                    f"RADAR V15 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -3199,7 +3266,7 @@ Yeni giris icin uygun degil."""
                     f"FINAL GATE REJECTS: {dict(sorted(FINAL_GATE_REJECTS.items(), key=lambda x: -x[1])[:6])}\n"
                     f"QUALITY DETAILS: {dict(sorted(QUALITY_GATE_DETAILS.items(), key=lambda x: -x[1]))}\n"
                     f"FAST DETAILS: {dict(sorted({k:v for k,v in FINAL_GATE_REJECTS.items() if k.startswith('FAST_')}.items(), key=lambda x: -x[1])[:10])}\n"
-                    f"POOL DIAG: {dict(sorted(POOL_DIAG.items(), key=lambda x: -x[1]))} | pool_size={len(CANDIDATE_POOL)}\\n"
+                    f"V15 TRIGGER: armed={FINAL_GATE_REJECTS.get('MICRO_ARMED',0)} rearm={FINAL_GATE_REJECTS.get('MICRO_REARM',0)} confirmed={FINAL_GATE_REJECTS.get('MICRO_2TICK_CONFIRMED',0)} gir={FINAL_GATE_REJECTS.get('MICRO_GIR',0)}\\n"
                     f"WATCH DIAG: {dict(sorted(WATCH_DIAG.items(), key=lambda x: -x[1]))}\n"
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} BREAKOUT={stats.get('breakout',0)} STRONG_GIR={stats.get('strong_gir',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)} batch_pairs={len(DEX_BATCH_PAIR_CACHE)}\n"
@@ -3396,7 +3463,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV14 CLEAN CORE + HARD SAFETY + ROLLING POOL + 2-SCAN CONFIRM + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV15 SIMPLE TRIGGER CORE + HARD SAFETY + MICRO MOMENTUM + 2-TICK GIR + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
