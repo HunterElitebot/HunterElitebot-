@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import html
 import time
 import threading
 import urllib.request
@@ -9,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE FINAL DIRECT GIR + MANUAL + AXIOM"
+VERSION = "HUNTERELITE FINAL DIRECT GIR + CLICKABLE CA + AXIOM"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -204,24 +205,35 @@ def clean_telegram_text(text):
     return s.replace("\ufffd", "")
 
 def axiom_token_url(ca):
-    # Direct Solana token page. Kept centralized so it is identical everywhere.
     return f"https://axiom.trade/t/{ca}/@215162?chain=sol"
 
 
 def send(chat_id, text):
     try:
         text = clean_telegram_text(text)
+
+        # Detect CA before HTML escaping.
+        ca_match = re.search(r"(?m)^CA:\s*([1-9A-HJ-NP-Za-km-z]{32,44})\s*$", text)
+        ca = ca_match.group(1) if ca_match else None
+
+        # Escape every outgoing character first so Telegram HTML is always valid.
+        safe_text = html.escape(text, quote=False)
+
+        # Make the CONTRACT ADDRESS itself clickable.
+        if ca:
+            plain = f"CA: {html.escape(ca, quote=False)}"
+            linked = f'CA: <a href="{axiom_token_url(ca)}">{html.escape(ca, quote=False)}</a>'
+            safe_text = safe_text.replace(plain, linked, 1)
+
         payload = {
             "chat_id": str(chat_id),
-            "text": text[:4000],
+            "text": safe_text[:4000],
+            "parse_mode": "HTML",
             "disable_web_page_preview": "true"
         }
 
-        # Any HunterElite token message containing a CA gets an Axiom button.
-        # This includes AUTO IZLE/GIR and MANUEL analysis.
-        ca_match = re.search(r"(?m)^CA:\s*([1-9A-HJ-NP-Za-km-z]{32,44})\s*$", text)
-        if ca_match:
-            ca = ca_match.group(1)
+        # Keep the dedicated Axiom button too.
+        if ca:
             payload["reply_markup"] = json.dumps({
                 "inline_keyboard": [[
                     {"text": "ğŸš€ AXIOM'DA AÃ‡", "url": axiom_token_url(ca)}
@@ -2171,7 +2183,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $5K-$10K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL DIRECT GIR: AUTO $5K-$10K + NO IZLE + GIR/GUCLU GIR + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $5K-$10K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL DIRECT GIR: CLICKABLE CA + AXIOM BUTTON + NO IZLE + GIR/GUCLU GIR + MANUAL: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
