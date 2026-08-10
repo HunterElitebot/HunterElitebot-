@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.1 DYNAMIC PRICE GATE"
+VERSION = "V13.2 SMART MC TOLERANCE"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -211,10 +211,18 @@ def final_gir_gate(result, old_metrics, seen_count, momentum, now):
     _p5 = num(result.get("price5"))
     _rmc = num(result.get("runner_mc_accel"))
     _rvol = num(result.get("runner_vol_accel"))
-    if _rmc is not None and _rmc < 0:
-        return False, "MC_ACCEL_NOT_POSITIVE"
+    # V13.2 SMART MC TOLERANCE
+    # Small temporary MC dips may pass only with strong volume + buy pressure.
+    if _rmc is not None and _rmc <= -3.0:
+        return False, "MC_ACCEL_NEGATIVE_HARD"
+    if _rmc is not None and -3.0 < _rmc < 0:
+        _buys = num(result.get("buys5")) or 0
+        _sells = num(result.get("sells5")) or 0
+        _buy_sell = _buys / max(_sells, 1)
+        if _rvol is None or _rvol < 8.0 or _buy_sell < 1.50:
+            return False, "MC_ACCEL_SOFT_FAIL"
 
-    # V13.1 DYNAMIC PRICE GATE
+    # V13.2 DYNAMIC PRICE GATE
     # Do not reject a strong runner only because its 5m candle is above +50%.
     # The faster the price has already moved, the stronger MC + volume acceleration
     # must be to avoid chasing a local top.
@@ -2575,7 +2583,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.1 | total={stats.get('radar',0)} "
+                    f"RADAR V13.2 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2820,7 +2828,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.1 DYNAMIC PRICE GATE + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.2 SMART MC TOLERANCE + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
