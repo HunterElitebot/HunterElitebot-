@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.12.3 ADAPTIVE GECKO"
+VERSION = "V13.12.3.1 NAMEERROR HOTFIX"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -658,7 +658,7 @@ def telegram(method, data=None, timeout=35):
 
 def clean_telegram_text(text):
     """One final cleanup point for every outgoing Telegram message."""
-    s = "" if text is None else str(text)
+    cleaned_text = "" if text is None else str(text)
     replacements = {
         "âš ï¸": "UYARI:", "ğŸ‘€": "", "ğŸš¨": "", "ğŸ’": "", "ğŸŸ¡": "",
         "ğŸ”´": "", "ğŸŸ¢": "", "â³": "", "ğŸ“ˆ": "", "ğŸ“Š": "", "ğŸ’§": "",
@@ -679,8 +679,8 @@ def clean_telegram_text(text):
         "VERÄ° ALINAMADI": "VERI BEKLENIYOR",
     }
     for old, new in replacements.items():
-        s = s.replace(old, new)
-    return s.replace("\ufffd", "")
+        cleaned_text = cleaned_text.replace(old, new)
+    return cleaned_text.replace("\ufffd", "")
 
 def send_clickable_ca(chat_id, ca):
     if not ca:
@@ -2962,7 +2962,9 @@ Yeni giris icin uygun degil."""
                     time.sleep(1)
 
                 except Exception as e:
+                    import traceback
                     print("TOKEN SCAN ERROR:", ca, repr(e), flush=True)
+                    traceback.print_exc()
 
             print(
                 "SCAN SUMMARY | "
@@ -2994,7 +2996,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.12.3 | total={stats.get('radar',0)} "
+                    f"RADAR V13.12.3.1 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -3143,9 +3145,9 @@ GerÃ§ek aday taramasÄ± baÅŸladÄ±.""")
 
     if command == "/radar":
         with radar_stats_lock:
-            s = dict(radar_stats)
+            radar_snapshot = dict(radar_stats)
 
-        updated = s.get("updated", 0)
+        updated = radar_snapshot.get("updated", 0)
         age = int(max(0, time.time() - updated)) if updated else None
         age_text = f"{age} sn Ã¶nce" if age is not None else "henÃ¼z ilk tur tamamlanmadÄ±"
 
@@ -3154,24 +3156,24 @@ GerÃ§ek aday taramasÄ± baÅŸladÄ±.""")
 SÃ¼rÃ¼m: {VERSION}
 Son tarama: {age_text}
 
-ğŸ” Radar adayÄ±: {s.get("radar", 0)}
-âœ… Ä°ÅŸlenen: {s.get("processed", 0)}
-âŒ Pair yok: {s.get("pair_yok", 0)}
+ğŸ” Radar adayÄ±: {radar_snapshot.get("radar", 0)}
+âœ… Ä°ÅŸlenen: {radar_snapshot.get("processed", 0)}
+âŒ Pair yok: {radar_snapshot.get("pair_yok", 0)}
 
 Filtreye takÄ±lanlar:
-â€¢ MC: {s.get("mc_fail", 0)}
-â€¢ Likidite: {s.get("liq_fail", 0)}
-â€¢ Holder: {s.get("holder_fail", 0)}
-â€¢ Mint/Freeze: {s.get("authority_fail", 0)}
-â€¢ Rug/Honeypot: {s.get("rug_fail", 0)}
-â€¢ Score: {s.get("score_fail", 0)}
-â€¢ Buy baskÄ±sÄ±: {s.get("buy_fail", 0)}
-â€¢ Hacim: {s.get("volume_fail", 0)}
-â€¢ Trend: {s.get("trend_fail", 0)}
-â€¢ Momentum: {s.get("momentum_fail", 0)}
+â€¢ MC: {radar_snapshot.get("mc_fail", 0)}
+â€¢ Likidite: {radar_snapshot.get("liq_fail", 0)}
+â€¢ Holder: {radar_snapshot.get("holder_fail", 0)}
+â€¢ Mint/Freeze: {radar_snapshot.get("authority_fail", 0)}
+â€¢ Rug/Honeypot: {radar_snapshot.get("rug_fail", 0)}
+â€¢ Score: {radar_snapshot.get("score_fail", 0)}
+â€¢ Buy baskÄ±sÄ±: {radar_snapshot.get("buy_fail", 0)}
+â€¢ Hacim: {radar_snapshot.get("volume_fail", 0)}
+â€¢ Trend: {radar_snapshot.get("trend_fail", 0)}
+â€¢ Momentum: {radar_snapshot.get("momentum_fail", 0)}
 
-ğŸ‘€ WATCH: {s.get("watch", 0)}
-ğŸš¨ SIGNAL: {s.get("signal", 0)}
+ğŸ‘€ WATCH: {radar_snapshot.get("watch", 0)}
+ğŸš¨ SIGNAL: {radar_snapshot.get("signal", 0)}
 
 Bu ekran teÅŸhis iÃ§indir; sinyal garantisi deÄŸildir.""")
         return
