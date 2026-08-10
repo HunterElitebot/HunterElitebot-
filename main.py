@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13 QUALITY GIR NO REPEAT DUMP SHIELD"
+VERSION = "V13.1 DYNAMIC PRICE GATE"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -62,7 +62,7 @@ QUALITY_MIN_BUYS_5M = 30
 QUALITY_MIN_VOL_5M = 3000.0
 QUALITY_MIN_BUY_SELL_RATIO = 1.35
 QUALITY_MIN_PRICE5 = -5.0
-QUALITY_MAX_PRICE5 = 50.0
+QUALITY_MAX_PRICE5 = 80.0
 
 _quality_day = None
 _quality_signal_count = 0
@@ -213,10 +213,24 @@ def final_gir_gate(result, old_metrics, seen_count, momentum, now):
     _rvol = num(result.get("runner_vol_accel"))
     if _rmc is not None and _rmc < 0:
         return False, "MC_ACCEL_NOT_POSITIVE"
-    if _p5 is not None and _p5 >= 40.0 and (_rmc is None or _rmc < 8.0):
-        return False, "TOP_CHASE"
-    if _p5 is not None and _p5 >= 30.0 and _rvol is not None and _rvol <= 0:
-        return False, "VOLUME_FADE"
+
+    # V13.1 DYNAMIC PRICE GATE
+    # Do not reject a strong runner only because its 5m candle is above +50%.
+    # The faster the price has already moved, the stronger MC + volume acceleration
+    # must be to avoid chasing a local top.
+    if _p5 is not None:
+        if _p5 > 80.0:
+            return False, "PRICE_EXTREME"
+        if _p5 >= 70.0 and (
+            _rmc is None or _rmc < 15.0 or _rvol is None or _rvol < 10.0
+        ):
+            return False, "TOP_CHASE_70"
+        if _p5 >= 50.0 and (
+            _rmc is None or _rmc < 10.0 or _rvol is None or _rvol < 5.0
+        ):
+            return False, "TOP_CHASE_50"
+        if _p5 >= 30.0 and _rvol is not None and _rvol <= 0:
+            return False, "VOLUME_FADE"
 
     if not quality_signal_gate(result):
         return False, "QUALITY_GATE"
@@ -2561,7 +2575,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13 | total={stats.get('radar',0)} "
+                    f"RADAR V13.1 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2806,7 +2820,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13 QUALITY GIR + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.1 DYNAMIC PRICE GATE + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
