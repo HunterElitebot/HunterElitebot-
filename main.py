@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE FINAL DIRECT GIR + CLICKABLE CA + AXIOM"
+VERSION = "HUNTERELITE FINAL 3K-12K ALL-IN-ONE"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -22,9 +22,9 @@ POLLING_ENABLED = os.getenv("POLLING_ENABLED", "1").strip().lower() in ("1", "tr
 
 # AUTO QUALITY MODE: only 5K-10K market-cap candidates are promoted.
 # Manual CA analysis is independent from this band.
-MC_MIN = 5000
-MC_MAX = 10000
-EARLY_MC_MAX = 10000
+MC_MIN = 3000
+MC_MAX = 12000
+EARLY_MC_MAX = 12000
 MIN_LIQUIDITY = 800
 
 # V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
@@ -1127,7 +1127,7 @@ def simple_action(result, momentum=0, previous=None):
     return "ğŸ”´ GÄ°RME"
 
 def manual_decision(result, report):
-    """One-shot manual CA decision engine; independent from AUTO 5K-10K band."""
+    """One-shot manual CA decision engine; independent from AUTO 3K-12K band."""
     if not result:
         return "BEKLE", "Piyasa verisi eksik.", "Veri yenilenince tekrar test et."
 
@@ -1216,7 +1216,7 @@ GIR TETIGI: Pair/veri olusunca tekrar test et."""
 
     decision, reason, trigger = manual_decision(result, report)
     mc = num(result.get("mc"))
-    auto_band = "ICINDE" if mc is not None and 5000 <= mc <= 10000 else "DISINDA"
+    auto_band = "ICINDE" if mc is not None and 3000 <= mc <= 12000 else "DISINDA"
 
     text = f"""HUNTERELITE MANUEL ANALIZ
 
@@ -1224,7 +1224,7 @@ GIR TETIGI: Pair/veri olusunca tekrar test et."""
 CA: {ca}
 ------------------------------
 
-AUTO QUALITY BAND ($5K-$10K): {auto_band}
+AUTO QUALITY BAND ($3K-$12K): {auto_band}
 
 Market Cap: {money(result["mc"])}
 Likidite: {money(result["liq"])}
@@ -2020,7 +2020,7 @@ def process_message(message):
         send(chat_id, f"""âœ… HunterElite {VERSION} ONLINE
 
 ğŸ¯ Early Hunter: AKTÄ°F
-ğŸ¯ AUTO QUALITY BAND: $5Kâ€“$10K
+ğŸ¯ AUTO QUALITY BAND: $3Kâ€“$12K
 ğŸ§ª RugCheck: AKTÄ°F
 ğŸ“¡ Eksik veri korumasÄ±: AKTÄ°F
 ğŸš¨ Otomatik sinyal: AKTÄ°F
@@ -2056,7 +2056,7 @@ Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸŸ¢ Birdeye API: {"BAÄLI" if BIRDEYE_API_KEY else "KEY YOK"}
 â± Birdeye yenileme: {BIRDEYE_POLL_INTERVAL} sn
 ğŸ’§ Min Likidite: {money(MIN_LIQUIDITY)}
-ğŸ“Š AUTO Market: $5Kâ€“$10K
+ğŸ“Š AUTO Market: $3Kâ€“$12K
 âœ… Quality Gate: buy>=5, hacim>=$500, buy/sell>=1.10, late-pump<=+180%\nğŸ“¡ /radar teÅŸhisi: AKTÄ°F\nğŸ§© Single Engine: AKTÄ°F""")
         return
 
@@ -2183,7 +2183,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $5K-$10K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL DIRECT GIR: CLICKABLE CA + AXIOM BUTTON + NO IZLE + GIR/GUCLU GIR + MANUAL: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL DIRECT GIR: CLICKABLE CA + AXIOM BUTTON + NO IZLE + GIR/GUCLU GIR + MANUAL: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
