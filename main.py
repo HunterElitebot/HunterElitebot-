@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.34 QUALITY 5K-10K + MANUAL + AXIOM"
+VERSION = "HUNTERELITE FINAL DIRECT GIR + MANUAL + AXIOM"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -203,6 +203,11 @@ def clean_telegram_text(text):
         s = s.replace(old, new)
     return s.replace("\ufffd", "")
 
+def axiom_token_url(ca):
+    # Direct Solana token page. Kept centralized so it is identical everywhere.
+    return f"https://axiom.trade/t/{ca}/@215162?chain=sol"
+
+
 def send(chat_id, text):
     try:
         text = clean_telegram_text(text)
@@ -212,21 +217,14 @@ def send(chat_id, text):
             "disable_web_page_preview": "true"
         }
 
-        # Add a direct Axiom button only to token WATCH / ENTRY messages.
-        # Signal/filter logic is untouched.
-        ca_match = re.search(r"(?m)^CA:\\s*([1-9A-HJ-NP-Za-km-z]{32,44})\\s*$", text)
-        token_alert = (
-            "HUNTERELITE IZLE" in text
-            or "HUNTERELITE EARLY SIGNAL" in text
-            or "HUNTERELITE MANUEL ANALIZ" in text
-            or "KARAR: GIR" in text
-        )
-        if ca_match and token_alert:
+        # Any HunterElite token message containing a CA gets an Axiom button.
+        # This includes AUTO IZLE/GIR and MANUEL analysis.
+        ca_match = re.search(r"(?m)^CA:\s*([1-9A-HJ-NP-Za-km-z]{32,44})\s*$", text)
+        if ca_match:
             ca = ca_match.group(1)
-            axiom_url = f"https://axiom.trade/t/{ca}/@215162?chain=sol"
             payload["reply_markup"] = json.dumps({
                 "inline_keyboard": [[
-                    {"text": "AXIOM'DA AC", "url": axiom_url}
+                    {"text": "ğŸš€ AXIOM'DA AÃ‡", "url": axiom_token_url(ca)}
                 ]]
             }, ensure_ascii=False)
 
@@ -1192,6 +1190,7 @@ def analyse(ca):
         return None, f"""HUNTERELITE MANUEL ANALIZ
 
 CA: {ca}
+------------------------------
 
 KARAR: BEKLE
 NEDEN: DEX pair verisi bulunamadi.
@@ -1211,6 +1210,7 @@ GIR TETIGI: Pair/veri olusunca tekrar test et."""
 
 {name} ({symbol})
 CA: {ca}
+------------------------------
 
 AUTO QUALITY BAND ($5K-$10K): {auto_band}
 
@@ -1794,10 +1794,31 @@ def auto_scanner():
                         final_score = min(100, result["score"] + momentum)
                         age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
 
-                        message = f"""HUNTERELITE EARLY SIGNAL
+                        # DIRECT decision label.
+                        buys5 = result.get("buys5", 0) or 0
+                        sells5 = result.get("sells5", 0) or 0
+                        ratio5 = buys5 / max(sells5, 1)
+                        vol5_now = result.get("vol5") or 0
+                        price5_now = result.get("price5")
+                        liq_now = result.get("liq") or 0
+                        mc_now = result.get("mc") or 1
+
+                        guclu_gir = (
+                            final_score >= 75
+                            and buys5 >= 15
+                            and ratio5 >= 1.20
+                            and vol5_now >= 2500
+                            and liq_now / max(mc_now, 1) >= 0.20
+                            and (price5_now is None or -5 <= price5_now <= 160)
+                        )
+
+                        karar_label = "GUCLU GIR" if guclu_gir else "GIR"
+
+                        message = f"""HUNTERELITE {karar_label}
 
 {name} ({symbol})
 CA: {ca}
+------------------------------
 
 Market Cap: {money(result["mc"])}
 Likidite: {money(result["liq"])}
@@ -1808,48 +1829,22 @@ Likidite: {money(result["liq"])}
 
 Top-10: {percent(result["top10"])}
 Likidite Guard: {"PASSED" if liq_drain_safe else "BLOCKED"}
-Likidite Degisim: -{liq_drop_pct:.1f}%
 
 Risk Score: {result["score"]}/100
 Momentum: +{momentum}
-1s fiyat: {percent(result["price1h"])}
-6s fiyat: {percent(result["price6h"])}
-Pair yasi: {age_text}
 Final Score: {final_score}/100
 
-KARAR: GIR
-POTANSIYEL: 5X-10X POTANSIYEL ADAYI
+KARAR: {karar_label}
 
-UYARI: Potansiyel etiketi garanti degildir.
-Axiom'da son kontrolunu yap."""
+UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur."""
 
                     elif (
                         watch_ok
                         and stage == "NEW"
-                        and now - last_sent > WATCH_REPEAT_COOLDOWN
                     ):
+                        # DIRECT GIR MODE: track silently; never send IZLE.
                         new_stage = "WATCH"
-                        stats["watch"] += 1
-
-                        message = f"""HUNTERELITE IZLE
-
-{name} ({symbol})
-CA: {ca}
-
-Market Cap: {money(result["mc"])}
-Likidite: {money(result["liq"])}
-
-5dk: {result["buys5"]} buy / {result["sells5"]} sell
-5dk hacim: {money(result["vol5"])}
-5dk fiyat: {percent(result["price5"])}
-
-Top-10: {percent(result["top10"])}
-Score: {result["score"]}/100
-
-Potansiyel: IZLE
-KARAR: IZLE / ERKEN ADAY
-
-Momentum teyidi bekleniyor."""
+                        message = None
 
                     # V11.34 LIQ GUARD:
                     # If a token that already signaled loses >=35% of pool liquidity
@@ -1864,6 +1859,7 @@ Momentum teyidi bekleniyor."""
 
 {name} ({symbol})
 CA: {ca}
+------------------------------
 
 Likidite onceki taramaya gore %{liq_drop_pct:.1f} dustu.
 Onceki Likidite: {money(old_metrics.get("liq") if old_metrics else None)}
@@ -1879,6 +1875,7 @@ NEDEN: HIZLI LIKIDITE BOSALMASI"""
                         message = f"""HUNTERELITE SINYAL IPTAL
 
 CA: {ca}
+------------------------------
 
 Risk sartlari kotulesti.
 
@@ -2174,7 +2171,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $5K-$10K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nQUALITY 5K-10K + MANUAL DECISION + GECKO + HOLDER FIX + LIQ GUARD + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $5K-$10K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL DIRECT GIR: AUTO $5K-$10K + NO IZLE + GIR/GUCLU GIR + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
