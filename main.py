@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE RURU FAST + CONTINUATION FINAL"
+VERSION = "HUNTERELITE RURU STORY HUNTER V3"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -1239,6 +1239,7 @@ GIR TETIGI: Pair/veri olusunca tekrar test et."""
     report = rugcheck(ca)
     result = calculate_score(pair, report)
     result["social"] = social_presence(pair)
+    result["narrative"] = narrative_viral(pair)
     base = pair.get("baseToken") or {}
     name = base.get("name") or "Unknown"
     symbol = base.get("symbol") or "N/A"
@@ -1390,6 +1391,163 @@ def liquidity_drain_detail(previous, current):
         return True, drop_pct, "WARN"
     return True, drop_pct, "OK"
 
+
+def narrative_viral(pair):
+    """
+    STORY HUNTER V3
+    Detects the SOURCE STORY linked in token metadata.
+
+    Priority:
+      direct TikTok video / X status / Instagram reel-post / YouTube video-short /
+      Reddit post > generic social profile > generic website.
+
+    This layer never invents views/likes/reposts. If the source platform's
+    engagement is not available from a verified API, engagement stays UNKNOWN.
+    """
+    info = (pair or {}).get("info") or {}
+    socials = info.get("socials") or []
+    websites = info.get("websites") or []
+    base = (pair or {}).get("baseToken") or {}
+
+    name = str(base.get("name") or "").strip()
+    symbol = str(base.get("symbol") or "").strip()
+
+    links = []
+    def add_link(item, origin):
+        if not isinstance(item, dict):
+            return
+        url = str(item.get("url") or "").strip()
+        if not url:
+            return
+        label = str(item.get("label") or item.get("type") or item.get("platform") or "").strip()
+        links.append({"url": url, "label": label, "origin": origin})
+
+    for item in socials:
+        add_link(item, "social")
+    for item in websites:
+        add_link(item, "website")
+
+    sources = []
+    profiles = []
+
+    def classify(url):
+        low = url.lower()
+
+        # Direct story/content links
+        if ("tiktok.com/" in low) and ("/video/" in low or "/t/" in low):
+            return "TIKTOK", True
+        if ("x.com/" in low or "twitter.com/" in low) and "/status/" in low:
+            return "X", True
+        if "instagram.com/" in low and ("/reel/" in low or "/p/" in low):
+            return "INSTAGRAM", True
+        if ("youtube.com/" in low and ("/watch" in low or "/shorts/" in low)) or "youtu.be/" in low:
+            return "YOUTUBE", True
+        if "reddit.com/" in low and ("/comments/" in low or "/r/" in low):
+            return "REDDIT", True
+
+        # Generic profiles / communities
+        if "tiktok.com/" in low:
+            return "TIKTOK", False
+        if "x.com/" in low or "twitter.com/" in low:
+            return "X", False
+        if "instagram.com/" in low:
+            return "INSTAGRAM", False
+        if "youtube.com/" in low or "youtu.be/" in low:
+            return "YOUTUBE", False
+        if "reddit.com/" in low:
+            return "REDDIT", False
+        if "t.me/" in low or "telegram.me/" in low:
+            return "TELEGRAM", False
+        return "WEB", False
+
+    for item in links:
+        platform, direct = classify(item["url"])
+        row = {**item, "platform": platform, "direct": direct}
+        if direct:
+            sources.append(row)
+        else:
+            profiles.append(row)
+
+    # Source-story evidence is intentionally much stronger than profile presence.
+    score = 0
+    reasons = []
+
+    direct_weights = {
+        "TIKTOK": 55,
+        "X": 50,
+        "INSTAGRAM": 45,
+        "YOUTUBE": 45,
+        "REDDIT": 40,
+    }
+    profile_weights = {
+        "TIKTOK": 12,
+        "X": 12,
+        "INSTAGRAM": 10,
+        "YOUTUBE": 10,
+        "REDDIT": 10,
+        "TELEGRAM": 8,
+        "WEB": 4,
+    }
+
+    seen_direct = set()
+    for s in sources:
+        p = s["platform"]
+        if p not in seen_direct:
+            score += direct_weights.get(p, 0)
+            seen_direct.add(p)
+            reasons.append(f"SOURCE_{p}")
+
+    seen_profiles = set()
+    for p in profiles:
+        platform = p["platform"]
+        if platform not in seen_profiles:
+            score += profile_weights.get(platform, 0)
+            seen_profiles.add(platform)
+
+    # Multiple independent story sources = stronger narrative proof.
+    if len(seen_direct) >= 2:
+        score += 15
+        reasons.append("MULTI_SOURCE")
+
+    # Token has a usable narrative identity. Weak bonus only.
+    if len(name) >= 3:
+        score += 5
+    if symbol and len(symbol) <= 12:
+        score += 5
+
+    score = min(score, 100)
+
+    # Prefer the strongest direct source.
+    priority = {"TIKTOK": 5, "X": 4, "INSTAGRAM": 3, "YOUTUBE": 2, "REDDIT": 1}
+    sources.sort(key=lambda x: priority.get(x["platform"], 0), reverse=True)
+    primary = sources[0] if sources else None
+
+    if primary and score >= 60:
+        label = "STORY LINKED"
+    elif primary:
+        label = "STORY SOURCE FOUND"
+    elif score >= 25:
+        label = "STORY POSSIBLE"
+    else:
+        label = "NO STORY PROOF"
+
+    return {
+        "score": score,
+        "label": label,
+        "story_linked": bool(primary),
+        "source_platform": primary["platform"] if primary else None,
+        "source_url": primary["url"] if primary else None,
+        "source_x": next((s["url"] for s in sources if s["platform"] == "X"), None),
+        "x_status": any(s["platform"] == "X" for s in sources),
+        "tiktok_video": any(s["platform"] == "TIKTOK" for s in sources),
+        "instagram_post": any(s["platform"] == "INSTAGRAM" for s in sources),
+        "youtube_video": any(s["platform"] == "YOUTUBE" for s in sources),
+        "reddit_post": any(s["platform"] == "REDDIT" for s in sources),
+        "telegram": any(p["platform"] == "TELEGRAM" for p in profiles),
+        "reddit": any((s["platform"] == "REDDIT") for s in sources) or any(p["platform"] == "REDDIT" for p in profiles),
+        "reasons": reasons,
+        "engagement": "UNKNOWN_NO_VERIFIED_API",
+    }
 
 def social_presence(pair):
     """
@@ -1817,6 +1975,7 @@ def auto_scanner():
                     result = calculate_score(pair, report)
                     social = social_presence(pair)
                     result["social"] = social
+                    result["narrative"] = narrative_viral(pair)
                     stats["processed"] += 1
 
                     viral_score, viral_label = market_viral_score(result)
@@ -1980,6 +2139,15 @@ def auto_scanner():
                     cont_ok, cont_detail = continuation_confirm(result, old_metrics, SCAN_INTERVAL)
                     fast_decision = fast_candidate if (fast_candidate is not None and cont_ok) else None
 
+                    if fast_candidate is not None:
+                        stats["fast_candidate"] = stats.get("fast_candidate", 0) + 1
+                        if not cont_ok:
+                            samples = stats.setdefault("fast_block_samples", [])
+                            if len(samples) < 6:
+                                base_dbg = pair.get("baseToken") or {}
+                                sym_dbg = base_dbg.get("symbol") or base_dbg.get("name") or ca[:6]
+                                samples.append(f"{sym_dbg}:{cont_detail}")
+
                     # RURU confirmed path remains intact.
                     ruru_signal = (
                         seen_count >= TREND_CONFIRM_SCANS
@@ -2034,12 +2202,17 @@ def auto_scanner():
                             and (price5_now is None or -5 <= price5_now <= 160)
                         )
 
+                        narrative_score = safe_int(result.get("narrative", {}).get("score"))
+                        narrative_linked = bool(result.get("narrative", {}).get("story_linked"))
+
                         if fast_decision == "GUCLU GIR":
                             karar_label = "GUCLU GIR"
                         elif fast_decision == "GIR":
-                            karar_label = "GIR"
+                            # Narrative can upgrade quality label only AFTER
+                            # safety + continuation already passed.
+                            karar_label = "GUCLU GIR" if (narrative_linked and narrative_score >= 55 and final_score >= 70) else "GIR"
                         else:
-                            karar_label = "GUCLU GIR" if guclu_gir else "GIR"
+                            karar_label = "GUCLU GIR" if (guclu_gir or (narrative_linked and narrative_score >= 55 and final_score >= 75)) else "GIR"
 
                         message = f"""HUNTERELITE {karar_label}
 
@@ -2059,6 +2232,10 @@ Likidite Guard: {"PASSED" if liq_drain_safe else "BLOCKED"}
 
 Social Presence: {result.get("social", {}).get("score", 0)}/100 - {result.get("social", {}).get("label", "SOCIAL WEAK")}
 X: {"VAR" if result.get("social", {}).get("x") else "YOK"} | Telegram: {"VAR" if result.get("social", {}).get("telegram") else "YOK"} | Reddit: {"VAR" if result.get("social", {}).get("reddit") else "YOK"}
+Hikaye: {result.get("narrative", {}).get("score", 0)}/100 - {result.get("narrative", {}).get("label", "NO STORY PROOF")}
+Hikaye Kaynagi: {result.get("narrative", {}).get("source_platform") or "BULUNAMADI"}
+Kaynak Icerik: {"VAR" if result.get("narrative", {}).get("story_linked") else "YOK"}
+Etkilesim: DOGRULANMIS API YOKSA BILINMIYOR
 
 Risk Score: {result["score"]}/100
 Momentum: +{momentum}
@@ -2207,7 +2384,9 @@ Yeni giris icin uygun degil."""
                     f"> TREND={stats.get('trend_pass',0)} "
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} FAST={stats.get('fast_signal',0)} "
+                    f"FAST_CAND={stats.get('fast_candidate',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
+                    f"FAST BLOCK: {stats.get('fast_block_samples',[])}\n"
                     f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"
                     f"H1 SMART: limit={MAX_SIGNAL_DROP_1H:.0f}% fails={stats.get('h1_fail_values',[])}"
                 )
@@ -2403,7 +2582,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nRURU FAST + CONTINUATION: FAST GIR artÄ±k hacim + yeni alÄ±cÄ± akÄ±ÅŸÄ± + MC ilerlemesi teyidiyle Ã§Ä±kar. NO IZLE + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nRURU STORY HUNTER V3: TikTok/X/Instagram/YouTube/Reddit source-story detection + RURU/CONTINUATION + NO FAKE ENGAGEMENT + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
