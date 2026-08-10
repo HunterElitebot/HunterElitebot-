@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V12.7 RUNNER SIGNAL INTEGRATION FINAL"
+VERSION = "V12.8 SMART FINAL GATE"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -93,10 +93,12 @@ def hard_rug_gate(result):
         return False, "HOLDER_IMPLAUSIBLE"
     if top10 > QUALITY_MAX_TOP10:
         return False, "HOLDER_CONCENTRATION"
-    if result.get("mint") is not False:
-        return False, "MINT_UNVERIFIED"
-    if result.get("freeze") is not False:
-        return False, "FREEZE_UNVERIFIED"
+    # V12.8: "unknown" authority data is uncertainty, not proof of danger.
+    # Explicitly active mint/freeze authority remains a HARD reject.
+    if result.get("mint") is True:
+        return False, "MINT_ACTIVE"
+    if result.get("freeze") is True:
+        return False, "FREEZE_ACTIVE"
 
     critical_terms = ("honeypot","rug pull","rugpull","bundler","bundle","insider",
                       "sniper","blacklist","cannot sell","sell blocked")
@@ -2284,7 +2286,17 @@ def auto_scanner():
                     _watch_decision = "ğŸŸ¢ GÄ°R" if _central_decision in ("BREAKOUT_GIR", "STRONG_GIR") else "ğŸŸ¡ Ä°ZLE / ERKEN ADAY"
                     _gir_block = gir_block_reason(result, int(result.get("score", 0)))
 
-                    watch_ok = watch_candidate(result)
+                    # V12.8 EARLY WATCH:
+                    # A hard-safe PREPUMP candidate may be surfaced on its first scan,
+                    # without weakening the final GÄ°R gate.
+                    _early_watch_ok = bool(
+                        safety_ok
+                        and result.get("prepump")
+                        and int(result.get("score", 0) or 0) >= WATCH_SCORE
+                        and result.get("buys5", 0) >= WATCH_MIN_BUYS_5M
+                        and (result.get("vol5") is None or result.get("vol5") >= WATCH_MIN_VOL_5M)
+                    )
+                    watch_ok = bool(watch_candidate(result) or _early_watch_ok)
                     # Keep hard safety mandatory. Confirmed trend remains the main
                     # path, while the already-existing calibrated breakout engine
                     # can promote a hard-safe, high-activity candidate instead of
@@ -2396,7 +2408,8 @@ Axiom'da son kontrolunu yap."""
                         new_stage = "WATCH"
                         stats["watch"] += 1
 
-                        message = f"""HUNTERELITE IZLE
+                        _watch_title = "HUNTERELITE ERKEN IZLE" if _early_watch_ok else "HUNTERELITE IZLE"
+                        message = f"""{_watch_title}
 
 {name} ({symbol})
 CA: {ca}
@@ -2410,8 +2423,10 @@ Likidite: {money(result["liq"])}
 
 Top-10: {percent(result["top10"])}
 Score: {result["score"]}/100
+Mint: {"AKTIF" if result.get("mint") is True else ("KAPALI" if result.get("mint") is False else "DOGRULANAMADI")}
+Freeze: {"AKTIF" if result.get("freeze") is True else ("KAPALI" if result.get("freeze") is False else "DOGRULANAMADI")}
 
-Potansiyel: IZLE
+Potansiyel: {"SAFE PREPUMP / ERKEN" if _early_watch_ok else "IZLE"}
 KARAR: {_watch_decision}
 GIR BLOCK: {_gir_block}
 
