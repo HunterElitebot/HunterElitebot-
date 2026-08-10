@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.13 ROLLING CANDIDATE POOL"
+VERSION = "V13.14 ACTIVE POOL FIX"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -53,8 +53,8 @@ SCAN_INTERVAL = 30
 # This is an additional ranking lane; it NEVER bypasses hard rug/safety gates.
 CANDIDATE_POOL_TTL = 600.0
 CANDIDATE_POOL_MIN_OBS = 2
-CANDIDATE_POOL_SIGNAL_SCORE = 78.0
-CANDIDATE_POOL_MIN_MARGIN = 4.0
+CANDIDATE_POOL_SIGNAL_SCORE = 72.0
+CANDIDATE_POOL_MIN_MARGIN = 2.0
 CANDIDATE_POOL = {}
 CANDIDATE_POOL_LOCK = threading.Lock()
 
@@ -2258,11 +2258,11 @@ def candidate_pool_update(ca, result, safety_ok, fast_hard_ok, now):
 
     # Pool admission is deliberately softer than FAST first-tick, but still requires
     # positive live behavior. Hard rug/dump/authority/holder gates remain upstream.
-    if mc < MC_MIN or liq < MIN_LIQUIDITY or score < 65 or bs < 1.15 or vol5 < 800:
+    if mc < MC_MIN or liq < MIN_LIQUIDITY or score < 60 or bs < 1.05 or vol5 < 250:
         return False, 0.0, 0
-    if price5 is None or price5 < -2.0 or price5 > 40.0:
+    if price5 is None or price5 < -5.0 or price5 > 55.0:
         return False, 0.0, 0
-    if rmc is not None and rmc < -1.0:
+    if rmc is not None and rmc < -0.35:
         return False, 0.0, 0
     if age is not None and age > 0.50:
         return False, 0.0, 0
@@ -2306,9 +2306,9 @@ def candidate_pool_update(ca, result, safety_ok, fast_hard_ok, now):
             and rank >= CANDIDATE_POOL_SIGNAL_SCORE
             and is_top
             and (rank - second >= CANDIDATE_POOL_MIN_MARGIN or rank >= 86.0)
-            and mc_growth >= 1.0
-            and bs >= 1.25
-            and (rvol is None or rvol >= 0.0)
+            and mc_growth >= 0.5
+            and bs >= 1.15
+            and (rvol is None or rvol >= -0.10)
         )
         return confirmed, rank, obs
 
@@ -3096,7 +3096,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.13 | total={stats.get('radar',0)} "
+                    f"RADAR V13.14 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -3342,7 +3342,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.13 ROLLING CANDIDATE POOL + ADAPTIVE GECKO + TRUE 2TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.14 ACTIVE POOL FIX + ROLLING RANK + TRUE 2TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
