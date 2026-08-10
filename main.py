@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.16 POOL ENGINE FIX"
+VERSION = "V14 CLEAN CORE"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -2242,12 +2242,7 @@ def _pool_diag(reason):
     POOL_DIAG[reason] = POOL_DIAG.get(reason, 0) + 1
 
 def pool_hard_safety_gate(result, now):
-    """
-    Pool-specific hard safety gate.
-    Intentionally does NOT require old_metrics / trend / momentum, because the
-    rolling pool itself exists to build those observations across scans.
-    It still fails closed on rug/holder/liquidity/no-repeat and severe dump/chase.
-    """
+    """V14 binary safety only: reject genuine danger, not ordinary early volatility."""
     top10 = num(result.get("top10"))
     if top10 is None or bool(result.get("holder_unreliable")):
         return False, "POOL_HOLDER_UNVERIFIED"
@@ -2257,7 +2252,6 @@ def pool_hard_safety_gate(result, now):
     rug_ok, rug_reason = hard_rug_gate(result)
     if not rug_ok:
         return False, rug_reason
-
     if result.get("ca") in SIGNALLED_CAS:
         return False, "ALREADY_SIGNALLED"
 
@@ -2272,102 +2266,102 @@ def pool_hard_safety_gate(result, now):
     sells = num(result.get("sells5")) or 0
     bs = buys / max(sells, 1)
 
+    # Genuine danger only.
     if rmc is not None and rmc <= -3.0:
         return False, "POOL_MC_DUMP"
-    if p5 is not None and p5 > 50.0:
-        return False, "POOL_TOP_CHASE"
-    if rvol is not None and rvol <= -25.0:
+    if p5 is not None and p5 > 80.0:
+        return False, "POOL_EXTREME_CHASE"
+    if p5 is not None and p5 < -35.0:
+        return False, "POOL_PRICE_CRASH"
+    if rvol is not None and rvol <= -50.0:
         return False, "POOL_VOLUME_COLLAPSE"
-    if bs < 0.95:
+    if bs < 0.70:
         return False, "POOL_SELL_DOMINANT"
-
     return True, "POOL_HARD_PASSED"
 
-
 def candidate_pool_update(ca, result, safety_ok, pool_hard_ok, now):
-    """Rank hard-safe early movers across scans. Returns (confirmed, rank_score, obs)."""
+    """V14 clean pool: hard risks reject; normal early-token noise is ranked."""
     if not safety_ok:
-        _pool_diag("BLOCK_SAFETY"); return False, 0.0, 0
+        _pool_diag("BLOCK_SAFETY")
+        with CANDIDATE_POOL_LOCK: CANDIDATE_POOL.pop(ca, None)
+        return False, 0.0, 0
     if not pool_hard_ok:
         _pool_diag("BLOCK_POOL_HARD")
         with CANDIDATE_POOL_LOCK: CANDIDATE_POOL.pop(ca, None)
         return False, 0.0, 0
     if ca in SIGNALLED_CAS:
-        _pool_diag("BLOCK_SIGNALLED"); return False, 0.0, 0
+        _pool_diag("BLOCK_SIGNALLED")
+        return False, 0.0, 0
 
-    mc = num(result.get("mc")) or 0.0
-    liq = num(result.get("liq")) or 0.0
-    score = num(result.get("score")) or 0.0
-    buys = num(result.get("buys5")) or 0.0
-    sells = num(result.get("sells5")) or 0.0
-    vol5 = num(result.get("vol5")) or 0.0
+    mc = num(result.get("mc")) or 0
+    liq = num(result.get("liq")) or 0
+    score = num(result.get("score")) or 0
+    buys = num(result.get("buys5")) or 0
+    sells = num(result.get("sells5")) or 0
+    vol5 = num(result.get("vol5")) or 0
     price5 = num(result.get("price5"))
     rmc = num(result.get("runner_mc_accel"))
     rvol = num(result.get("runner_vol_accel"))
     age = num(result.get("age_hours"))
-    bs = buys / max(sells, 1.0)
+    bs = buys / max(sells, 1)
 
-    # Pool admission is deliberately softer than FAST first-tick, but still requires
-    # positive live behavior. Hard rug/dump/authority/holder gates remain upstream.
-    if mc < MC_MIN: _pool_diag("BLOCK_MC"); return False, 0.0, 0
-    if liq < MIN_LIQUIDITY: _pool_diag("BLOCK_LIQ"); return False, 0.0, 0
-    if score < 60: _pool_diag("BLOCK_SCORE"); return False, 0.0, 0
-    if bs < 1.05: _pool_diag("BLOCK_BUYSELL"); return False, 0.0, 0
-    if vol5 < 250: _pool_diag("BLOCK_VOL5"); return False, 0.0, 0
-    if price5 is None: _pool_diag("BLOCK_PRICE_MISSING"); return False, 0.0, 0
-    if price5 < -5.0: _pool_diag("BLOCK_PRICE_NEG"); return False, 0.0, 0
-    if price5 > 55.0: _pool_diag("BLOCK_PRICE_CHASE"); return False, 0.0, 0
-    if rmc is not None and rmc < -0.35: _pool_diag("BLOCK_RMC"); return False, 0.0, 0
-    if age is not None and age > 0.50: _pool_diag("BLOCK_AGE"); return False, 0.0, 0
+    # Only baseline eligibility here. Hard rug/holder/liquidity/dump/chase is above.
+    if mc < MC_MIN:
+        _pool_diag("BLOCK_MC"); return False, 0.0, 0
+    if score < 55:
+        _pool_diag("BLOCK_SCORE"); return False, 0.0, 0
+
+    rank = 0.0
+    rank += min(max(score - 55.0, 0.0), 30.0) * 1.4
+    rank += min(max(bs - 0.90, 0.0), 1.5) * 20.0
+    rank += min(vol5 / 250.0, 12.0) * 2.0
+
+    if price5 is not None:
+        if -8.0 <= price5 <= 30.0: rank += 12.0
+        elif -15.0 <= price5 < -8.0: rank += 3.0
+        elif 30.0 < price5 <= 50.0: rank += 5.0
+    if rmc is not None:
+        if rmc > 0: rank += min(rmc, 3.0) * 7.0
+        elif rmc > -0.50: rank += 2.0
+        else: rank -= min(abs(rmc), 3.0) * 4.0
+    if rvol is not None:
+        if rvol > 0: rank += min(rvol, 3.0) * 4.0
+        elif rvol < -0.10: rank -= 4.0
+    if age is not None and age <= 0.50: rank += 5.0
+
     _pool_diag("ADMITTED")
-
     with CANDIDATE_POOL_LOCK:
-        for k, v in list(CANDIDATE_POOL.items()):
-            if now - (num(v.get("last")) or 0) > CANDIDATE_POOL_TTL:
-                CANDIDATE_POOL.pop(k, None)
+        item = CANDIDATE_POOL.get(ca)
+        if item is None:
+            item = {"first_seen": now, "last_seen": now, "obs": 0, "best_rank": rank,
+                    "last_rank": rank, "ranks": []}
+            CANDIDATE_POOL[ca] = item
+        item["last_seen"] = now
+        item["obs"] = int(item.get("obs", 0)) + 1
+        item["best_rank"] = max(float(item.get("best_rank", rank)), rank)
+        item["last_rank"] = rank
+        ranks = list(item.get("ranks") or [])
+        ranks.append(rank)
+        item["ranks"] = ranks[-4:]
+        obs = item["obs"]
 
-        prev = CANDIDATE_POOL.get(ca) or {}
-        first_mc = num(prev.get("first_mc")) or mc
-        first_vol = num(prev.get("first_vol")) or vol5
-        obs = int(prev.get("obs") or 0) + 1
-        mc_growth = ((mc / first_mc) - 1.0) * 100.0 if first_mc > 0 else 0.0
-        vol_growth = ((vol5 / first_vol) - 1.0) * 100.0 if first_vol > 0 else 0.0
-
-        rank = (
-            min(score, 100.0) * 0.35
-            + min(max(bs - 1.0, 0.0) * 25.0, 25.0)
-            + min(max(rmc or 0.0, 0.0), 20.0) * 0.75
-            + min(max(rvol or 0.0, 0.0), 30.0) * 0.45
-            + min(max(mc_growth, 0.0), 20.0) * 0.65
-            + min(max(vol_growth, 0.0), 30.0) * 0.25
-            + min(vol5 / max(liq, 1.0), 3.0) * 4.0
-        )
-
-        CANDIDATE_POOL[ca] = {
-            "first": num(prev.get("first")) or now, "last": now, "obs": obs,
-            "first_mc": first_mc, "first_vol": first_vol, "rank": rank,
-            "mc": mc, "vol5": vol5, "bs": bs,
-        }
-
-        ranks = sorted(
-            (num(v.get("rank")) or 0.0 for v in CANDIDATE_POOL.values()),
-            reverse=True
-        )
-        second = ranks[1] if len(ranks) > 1 else 0.0
-        is_top = bool(ranks and rank >= ranks[0] - 1e-9)
-        confirmed = bool(
-            obs >= CANDIDATE_POOL_MIN_OBS
-            and rank >= CANDIDATE_POOL_SIGNAL_SCORE
-            and is_top
-            and (rank - second >= CANDIDATE_POOL_MIN_MARGIN or rank >= 86.0)
-            and mc_growth >= 0.5
-            and bs >= 1.15
-            and (rvol is None or rvol >= -0.10)
+        # Two-scan confirmation. Second observation must remain healthy and not fade.
+        prev = item["ranks"][-2] if len(item["ranks"]) >= 2 else None
+        stable = prev is None or rank >= prev - 12.0
+        confirmed = (
+            obs >= 2
+            and rank >= 34.0
+            and stable
+            and bs >= 1.00
+            and vol5 >= 120
+            and (price5 is None or -10.0 <= price5 <= 45.0)
+            and (rmc is None or rmc >= -0.75)
+            and (rvol is None or rvol >= -0.20)
             and quality_signal_slot_available(now)
         )
-        if confirmed: _pool_diag("CONFIRMED")
+        if confirmed:
+            _pool_diag("CONFIRMED")
         return confirmed, rank, obs
-
 
 def auto_scanner():
     print("EARLY HUNTER SCANNER ACTIVE", flush=True)
@@ -3155,7 +3149,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.16 | total={stats.get('radar',0)} "
+                    f"RADAR V14 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -3402,7 +3396,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.16 POOL ENGINE FIX + ROLLING RANK + TRUE 2TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV14 CLEAN CORE + HARD SAFETY + ROLLING POOL + 2-SCAN CONFIRM + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
