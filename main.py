@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.6 DUAL LANE LAUNCH"
+VERSION = "V13.7 FAST PROPOSAL BRIDGE"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -2506,6 +2506,17 @@ def auto_scanner():
                         or _runner_signal
                     )
 
+                    # V13.7 FAST PROPOSAL BRIDGE
+                    # Momentum-qualified, hard-safe tokens may enter the FAST lane
+                    # even if older strong_signal/central-decision proposal logic
+                    # has not yet promoted them. FAST acceleration requirements and
+                    # the hard gate still decide whether any GÄ°R can be emitted.
+                    _fast_candidate = bool(
+                        safety_ok
+                        and momentum_ok
+                        and seen_count >= TREND_CONFIRM_SCANS
+                    )
+
                     result["ca"] = ca
                     result["runner_mc_accel"] = _runner_mc_accel
                     result["runner_vol_accel"] = _runner_vol_accel
@@ -2524,9 +2535,16 @@ def auto_scanner():
                     # qualifying scan. GÄ°R is sent on a later scan only if the move
                     # is still continuing instead of immediately fading.
                     _raw_signal_ok = bool(
-                        _candidate_signal and (_final_gate_ok or _fast_hard_ok)
+                        (_candidate_signal and _final_gate_ok)
+                        or (_fast_candidate and _fast_hard_ok)
                     )
                     _normal_lane_ok = bool(_candidate_signal and _final_gate_ok)
+
+                    if _fast_candidate:
+                        FINAL_GATE_REJECTS["FAST_CANDIDATE"] = FINAL_GATE_REJECTS.get("FAST_CANDIDATE", 0) + 1
+                        if not _fast_hard_ok:
+                            _fr = "FAST_BLOCK_" + str(_fast_hard_reason or "UNKNOWN")
+                            FINAL_GATE_REJECTS[_fr] = FINAL_GATE_REJECTS.get(_fr, 0) + 1
                     _launch_pending = previous.get("launch_pending") if previous else None
                     _next_launch_pending = None
                     signal_ok = False
@@ -2621,7 +2639,7 @@ def auto_scanner():
                                 "price5": _price_now,
                                 "time": now,
                             }
-                        elif _candidate_signal and _fast_hard_ok:
+                        elif _fast_candidate and _fast_hard_ok:
                             FINAL_GATE_REJECTS["FAST_SOFT_BYPASS_SEEN"] = FINAL_GATE_REJECTS.get("FAST_SOFT_BYPASS_SEEN", 0) + 1
 
                     if ca not in cancelled_this_scan and (not watch_ok):
@@ -2792,7 +2810,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.6 | total={stats.get('radar',0)} "
+                    f"RADAR V13.7 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -3037,7 +3055,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.6 DUAL LANE LAUNCH + FRESH RADAR + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.7 FAST PROPOSAL BRIDGE + DUAL LANE + FRESH RADAR + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
