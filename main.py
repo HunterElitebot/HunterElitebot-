@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.9 ACTIVE TRADING SIGNAL"
+VERSION = "V13.10 TRADE READY"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -413,6 +413,9 @@ radar_stats_lock = threading.Lock()
 last_diag_send = 0.0
 discovery_seen = {}
 candidate_sources = {}
+DEX_BATCH_PAIR_CACHE = {}
+DEX_BATCH_PAIR_CACHE_TS = 0.0
+DEX_BATCH_PAIR_CACHE_TTL = 45
 discovery_seen_lock = threading.Lock()
 DISCOVERY_MEMORY_SECONDS = 21600
 RADAR_RAW_LIMIT = 240
@@ -747,11 +750,51 @@ def dex_pairs(ca):
             print("DEX PAIR ERROR:", repr(e), flush=True)
     return []
 
+def refresh_dex_batch_pairs(addresses):
+    """V13.10: fetch pair data in batches of up to 30 token addresses."""
+    global DEX_BATCH_PAIR_CACHE, DEX_BATCH_PAIR_CACHE_TS
+    now = time.time()
+    addresses = [a for a in dict.fromkeys(addresses or []) if a and SOL_CA.fullmatch(str(a))]
+    if not addresses:
+        return
+
+    fresh = {}
+    for i in range(0, len(addresses), 30):
+        chunk = addresses[i:i+30]
+        url = "https://api.dexscreener.com/tokens/v1/solana/" + ",".join(chunk)
+        try:
+            data = get_json(url, timeout=15)
+            pairs = data if isinstance(data, list) else []
+            for p in pairs:
+                if not isinstance(p, dict):
+                    continue
+                base = (p.get("baseToken") or {}).get("address")
+                quote = (p.get("quoteToken") or {}).get("address")
+                for ca in (base, quote):
+                    if ca in addresses:
+                        prev = fresh.get(ca)
+                        liq = num((p.get("liquidity") or {}).get("usd")) or 0
+                        prev_liq = num(((prev or {}).get("liquidity") or {}).get("usd")) or 0
+                        if prev is None or liq > prev_liq:
+                            fresh[ca] = p
+        except Exception as e:
+            print("DEX BATCH ERROR:", repr(e), flush=True)
+
+    if fresh:
+        DEX_BATCH_PAIR_CACHE.update(fresh)
+    DEX_BATCH_PAIR_CACHE_TS = now
+
+
 def best_pair(ca):
+    cached = DEX_BATCH_PAIR_CACHE.get(ca)
+    if cached is not None:
+        return cached
     pairs = dex_pairs(ca)
     if not pairs:
         return None
-    return max(pairs, key=lambda p: num((p.get("liquidity") or {}).get("usd"), 0))
+    best = max(pairs, key=lambda p: num((p.get("liquidity") or {}).get("usd"), 0))
+    DEX_BATCH_PAIR_CACHE[ca] = best
+    return best
 
 def extract_birdeye_items(payload):
     if not isinstance(payload, dict):
@@ -2201,6 +2244,10 @@ def auto_scanner():
             stats["unique_new"] = unique_new
             stats["repeat"] = repeat
 
+            # V13.10: 80 per-token DEX lookups caused avoidable misses/rate pressure.
+            # Batch all candidates first (max 30 addresses/request).
+            refresh_dex_batch_pairs(candidates)
+
             for ca in candidates:
                 try:
                     source_name = candidate_sources.get(ca)
@@ -2546,7 +2593,9 @@ def auto_scanner():
                             _fr = "FAST_BLOCK_" + str(_fast_hard_reason or "UNKNOWN")
                             FINAL_GATE_REJECTS[_fr] = FINAL_GATE_REJECTS.get(_fr, 0) + 1
                     _launch_pending = previous.get("launch_pending") if previous else None
+                    _fast_pending = previous.get("fast_pending") if previous else None
                     _next_launch_pending = None
+                    _next_fast_pending = None
                     signal_ok = False
                     _fast_launch_ok = False
 
@@ -2602,8 +2651,36 @@ def auto_scanner():
                             FINAL_GATE_REJECTS[_far] = FINAL_GATE_REJECTS.get(_far, 0) + 1
 
                         if _fast_launch_ok:
-                            signal_ok = True
-                            FINAL_GATE_REJECTS["FAST_LAUNCH_CONFIRMED"] = FINAL_GATE_REJECTS.get("FAST_LAUNCH_CONFIRMED", 0) + 1
+                            # V13.10 FAST 2-TICK: do not trade a one-scan spike.
+                            # Arm on first FAST scan, signal only if the next scan still
+                            # shows healthy continuation.
+                            if isinstance(_fast_pending, dict):
+                                _fp_mc = num(_fast_pending.get("mc")) or 0
+                                _fp_time = num(_fast_pending.get("time")) or 0
+                                _fp_age = max(0.0, now - _fp_time)
+                                _fast_continue_ok = bool(
+                                    20.0 <= _fp_age <= 120.0
+                                    and _fp_mc > 0
+                                    and _mc_now >= _fp_mc * 1.01
+                                    and _bs_now >= 1.30
+                                    and _rvol_now is not None and _rvol_now >= 5.0
+                                    and _price_now is not None and _price_now >= 2.0
+                                )
+                                if _fast_continue_ok:
+                                    signal_ok = True
+                                    FINAL_GATE_REJECTS["FAST_LAUNCH_CONFIRMED"] = FINAL_GATE_REJECTS.get("FAST_LAUNCH_CONFIRMED", 0) + 1
+                                else:
+                                    FINAL_GATE_REJECTS["FAST_2TICK_FAIL"] = FINAL_GATE_REJECTS.get("FAST_2TICK_FAIL", 0) + 1
+                                    _next_fast_pending = {
+                                        "mc": _mc_now, "time": now,
+                                        "bs": _bs_now, "vol5": _vol_now,
+                                    }
+                            else:
+                                FINAL_GATE_REJECTS["FAST_2TICK_WAIT"] = FINAL_GATE_REJECTS.get("FAST_2TICK_WAIT", 0) + 1
+                                _next_fast_pending = {
+                                    "mc": _mc_now, "time": now,
+                                    "bs": _bs_now, "vol5": _vol_now,
+                                }
 
                         elif _normal_lane_ok and isinstance(_launch_pending, dict):
                             _mc_arm = num(_launch_pending.get("mc")) or 0
@@ -2796,6 +2873,7 @@ Yeni giris icin uygun degil."""
                             "seen_count": seen_count,
                             "ever_signalled": bool(ca in SIGNALLED_CAS or (previous and previous.get("ever_signalled"))),
                             "launch_pending": None if signal_ok else _next_launch_pending,
+                            "fast_pending": None if signal_ok else _next_fast_pending,
                         }
 
                     save_state()
@@ -2834,7 +2912,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.9 | total={stats.get('radar',0)} "
+                    f"RADAR V13.10 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2885,7 +2963,7 @@ Yeni giris icin uygun degil."""
                     f"QUALITY DETAILS: {dict(sorted(QUALITY_GATE_DETAILS.items(), key=lambda x: -x[1]))}\n"
                     f"WATCH DIAG: {dict(sorted(WATCH_DIAG.items(), key=lambda x: -x[1]))}\n"
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} BREAKOUT={stats.get('breakout',0)} STRONG_GIR={stats.get('strong_gir',0)} "
-                    f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
+                    f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)} batch_pairs={len(DEX_BATCH_PAIR_CACHE)}\n"
                     f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"
                     f"H1 SMART: limit={MAX_SIGNAL_DROP_1H:.0f}% fails={stats.get('h1_fail_values',[])}"
                 )
@@ -3079,7 +3157,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.9 ACTIVE TRADING SIGNAL + DUAL LANE + FRESH RADAR + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.10 TRADE READY + BATCH PAIR DATA + FAST 2-TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
