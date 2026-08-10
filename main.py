@@ -2304,8 +2304,8 @@ def auto_scanner():
                     _central_decision = unified_gir_decision(result, momentum, old_metrics) if safety_ok else "IZLE"
                     is_breakout = _central_decision == "BREAKOUT_GIR"
                     is_strong_gir = _central_decision == "STRONG_GIR"
-                    _watch_decision = "ğŸŸ¢ GÄ°R" if _central_decision in ("BREAKOUT_GIR", "STRONG_GIR") else "ğŸŸ¡ Ä°ZLE / ERKEN ADAY"
                     _gir_block = gir_block_reason(result, int(result.get("score", 0)))
+                    _watch_decision = "ğŸŸ¢ GÄ°R" if (_central_decision in ("BREAKOUT_GIR", "STRONG_GIR") and not _gir_block) else "ğŸŸ¡ Ä°ZLE / ERKEN ADAY"
 
                     # V12.8 EARLY WATCH:
                     # A hard-safe PREPUMP candidate may be surfaced on its first scan,
@@ -2782,7 +2782,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.10 DIAGNOSTIC + WATCH ON + HARD SAFETY: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.10 WATCH DECISION FIX + HARD SAFETY: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
