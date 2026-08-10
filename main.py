@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V12.9 MC MOMENTUM GUARD"
+VERSION = "V12.10 DIAGNOSTIC"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -44,6 +44,8 @@ RUNNER_MIN_PRICE5 = 2.0
 RUNNER_MAX_PRICE5 = 80.0
 RUNNER_STATE = {}
 FINAL_GATE_REJECTS = {}
+QUALITY_GATE_DETAILS = {}
+WATCH_DIAG = {}
 HOLDER_HARD_MAX = 82.0
 SCAN_INTERVAL = 30
 
@@ -207,7 +209,7 @@ def final_gir_gate(result, old_metrics, seen_count, momentum, now):
     if not quality_signal_slot_available(now):
         return False, "RATE_LIMIT"
 
-    # V12.9 MC MOMENTUM GUARD
+    # V12.10 DIAGNOSTIC
     _runner_mc = result.get("runner_mc_accel")
     try:
         _runner_mc = float(_runner_mc) if _runner_mc is not None else None
@@ -230,24 +232,33 @@ def quality_signal_gate(result):
     score = num(result.get("score")) or 0
 
     if top10 is None or bool(result.get("holder_unreliable")):
+        QUALITY_GATE_DETAILS["Q1"] = QUALITY_GATE_DETAILS.get("Q1", 0) + 1
         return False
     if top10 > QUALITY_MAX_TOP10:
+        QUALITY_GATE_DETAILS["Q2"] = QUALITY_GATE_DETAILS.get("Q2", 0) + 1
         return False
     if liq is None or liq < QUALITY_MIN_LIQ:
+        QUALITY_GATE_DETAILS["Q3"] = QUALITY_GATE_DETAILS.get("Q3", 0) + 1
         return False
     if score < QUALITY_MIN_SCORE:
+        QUALITY_GATE_DETAILS["Q4"] = QUALITY_GATE_DETAILS.get("Q4", 0) + 1
         return False
     if buys < QUALITY_MIN_BUYS_5M:
+        QUALITY_GATE_DETAILS["Q5"] = QUALITY_GATE_DETAILS.get("Q5", 0) + 1
         return False
     if vol5 < QUALITY_MIN_VOL_5M:
+        QUALITY_GATE_DETAILS["Q6"] = QUALITY_GATE_DETAILS.get("Q6", 0) + 1
         return False
     if buys / max(sells, 1) < QUALITY_MIN_BUY_SELL_RATIO:
+        QUALITY_GATE_DETAILS["Q7"] = QUALITY_GATE_DETAILS.get("Q7", 0) + 1
         return False
     if price5 is None or not (QUALITY_MIN_PRICE5 <= price5 <= QUALITY_MAX_PRICE5):
+        QUALITY_GATE_DETAILS["Q8"] = QUALITY_GATE_DETAILS.get("Q8", 0) + 1
         return False
     # Avoid chasing a candle that has already expanded too far in a single 5m window.
     # A later confirmed scan can still qualify if activity remains healthy.
     if price5 > 80:
+        QUALITY_GATE_DETAILS["Q9"] = QUALITY_GATE_DETAILS.get("Q9", 0) + 1
         return False
     return True
 
@@ -2307,6 +2318,20 @@ def auto_scanner():
                         and (result.get("vol5") is None or result.get("vol5") >= WATCH_MIN_VOL_5M)
                     )
                     watch_ok = bool(watch_candidate(result) or _early_watch_ok)
+                    if result.get("prepump") and safety_ok:
+                        WATCH_DIAG["SAFE_PREPUMP_SEEN"] = WATCH_DIAG.get("SAFE_PREPUMP_SEEN", 0) + 1
+                        if _early_watch_ok:
+                            WATCH_DIAG["EARLY_WATCH_OK"] = WATCH_DIAG.get("EARLY_WATCH_OK", 0) + 1
+                        elif int(result.get("score", 0) or 0) < WATCH_SCORE:
+                            WATCH_DIAG["SCORE_LOW"] = WATCH_DIAG.get("SCORE_LOW", 0) + 1
+                        elif result.get("buys5", 0) < WATCH_MIN_BUYS_5M:
+                            WATCH_DIAG["BUYS_LOW"] = WATCH_DIAG.get("BUYS_LOW", 0) + 1
+                        elif result.get("vol5") is not None and result.get("vol5") < WATCH_MIN_VOL_5M:
+                            WATCH_DIAG["VOLUME_LOW"] = WATCH_DIAG.get("VOLUME_LOW", 0) + 1
+                        else:
+                            WATCH_DIAG["OTHER"] = WATCH_DIAG.get("OTHER", 0) + 1
+                        if watch_ok:
+                            WATCH_DIAG["WATCH_OK"] = WATCH_DIAG.get("WATCH_OK", 0) + 1
                     # Keep hard safety mandatory. Confirmed trend remains the main
                     # path, while the already-existing calibrated breakout engine
                     # can promote a hard-safe, high-activity candidate instead of
@@ -2512,7 +2537,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V12.9 | total={stats.get('radar',0)} "
+                    f"RADAR V12.10 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2560,6 +2585,8 @@ Yeni giris icin uygun degil."""
                     f"> TREND={stats.get('trend_pass',0)} "
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
                     f"FINAL GATE REJECTS: {dict(sorted(FINAL_GATE_REJECTS.items(), key=lambda x: -x[1])[:6])}\n"
+                    f"QUALITY DETAILS: {dict(sorted(QUALITY_GATE_DETAILS.items(), key=lambda x: -x[1]))}\n"
+                    f"WATCH DIAG: {dict(sorted(WATCH_DIAG.items(), key=lambda x: -x[1]))}\n"
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} BREAKOUT={stats.get('breakout',0)} STRONG_GIR={stats.get('strong_gir',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
                     f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"
@@ -2755,7 +2782,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.9 MC MOMENTUM GUARD + HARD SAFETY: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.10 DIAGNOSTIC + HARD SAFETY: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
