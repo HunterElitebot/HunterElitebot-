@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.4 FAST LAUNCH ACCELERATION"
+VERSION = "V13.5 FRESH RADAR MIX"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -366,6 +366,8 @@ RADAR_RAW_LIMIT = 240
 RADAR_TARGET = 80
 BIRDEYE_TARGET = 80
 DEX_TARGET = 20
+DEX_RESERVED_SLOTS = 20
+GECKO_MAX_SELECTED = 60
 MAX_REPEAT_PER_SCAN = 20
 FRESH_PAIR_MAX_HOURS = 6.0
 
@@ -1074,24 +1076,54 @@ def discovery_candidates():
             print("DISCOVERY ERROR:", repr(e), flush=True)
 
     selected = []
+    selected_seen = set()
 
-    # Birdeye has first priority when healthy.
+    def _add(ca):
+        if ca and ca not in selected_seen and len(selected) < RADAR_TARGET:
+            selected.append(ca)
+            selected_seen.add(ca)
+            return True
+        return False
+
+    # V13.5 FRESH RADAR MIX
+    # Birdeye still gets first priority when healthy, but Gecko can no longer
+    # consume the entire 80-token radar before DEX fresh discovery is considered.
     for ca in birdeye_found:
         if len(selected) >= RADAR_TARGET:
             break
-        selected.append(ca)
+        _add(ca)
 
-    # Gecko fills the fresh-token gap without an API key.
+    # When Birdeye is unavailable, cap Gecko at 60 so DEX has 20 real slots.
+    # If Birdeye contributes, only use Gecko up to the point that still preserves
+    # the DEX reserve.
+    gecko_cap_total = max(0, RADAR_TARGET - DEX_RESERVED_SLOTS)
+    gecko_added = 0
+    for ca in gecko_found:
+        if len(selected) >= gecko_cap_total or gecko_added >= GECKO_MAX_SELECTED:
+            break
+        if _add(ca):
+            gecko_added += 1
+
+    # DEX now gets reserved live-discovery capacity instead of being a last-resort
+    # fallback that often ended at DEX=0.
+    dex_added = 0
+    for ca in dex_found:
+        if len(selected) >= RADAR_TARGET or dex_added >= DEX_RESERVED_SLOTS:
+            break
+        if _add(ca):
+            dex_added += 1
+
+    # Never waste empty slots: after the DEX reservation was attempted, fill any
+    # remaining capacity with unused Gecko then unused DEX candidates.
     for ca in gecko_found:
         if len(selected) >= RADAR_TARGET:
             break
-        selected.append(ca)
+        _add(ca)
 
-    # DEX profile/boost feeds only fill any remaining capacity.
     for ca in dex_found:
         if len(selected) >= RADAR_TARGET:
             break
-        selected.append(ca)
+        _add(ca)
 
     return selected[:RADAR_TARGET]
 
@@ -2697,7 +2729,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.4 | total={stats.get('radar',0)} "
+                    f"RADAR V13.5 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2942,7 +2974,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.4 FAST LAUNCH ACCELERATION + CONFIRMED LAUNCH + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.5 FRESH RADAR MIX + FAST LAUNCH + CONFIRMED LAUNCH + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
