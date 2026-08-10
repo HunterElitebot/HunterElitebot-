@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.15 POOL DIAGNOSTIC"
+VERSION = "V13.16 POOL ENGINE FIX"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -2241,12 +2241,55 @@ def market_viral_score(result):
 def _pool_diag(reason):
     POOL_DIAG[reason] = POOL_DIAG.get(reason, 0) + 1
 
-def candidate_pool_update(ca, result, safety_ok, fast_hard_ok, now):
+def pool_hard_safety_gate(result, now):
+    """
+    Pool-specific hard safety gate.
+    Intentionally does NOT require old_metrics / trend / momentum, because the
+    rolling pool itself exists to build those observations across scans.
+    It still fails closed on rug/holder/liquidity/no-repeat and severe dump/chase.
+    """
+    top10 = num(result.get("top10"))
+    if top10 is None or bool(result.get("holder_unreliable")):
+        return False, "POOL_HOLDER_UNVERIFIED"
+    if not (1.0 <= top10 <= QUALITY_MAX_TOP10):
+        return False, "POOL_HOLDER_RANGE"
+
+    rug_ok, rug_reason = hard_rug_gate(result)
+    if not rug_ok:
+        return False, rug_reason
+
+    if result.get("ca") in SIGNALLED_CAS:
+        return False, "ALREADY_SIGNALLED"
+
+    liq = num(result.get("liq"))
+    if liq is None or liq < MIN_LIQUIDITY:
+        return False, "POOL_LIQ_LOW"
+
+    p5 = num(result.get("price5"))
+    rmc = num(result.get("runner_mc_accel"))
+    rvol = num(result.get("runner_vol_accel"))
+    buys = num(result.get("buys5")) or 0
+    sells = num(result.get("sells5")) or 0
+    bs = buys / max(sells, 1)
+
+    if rmc is not None and rmc <= -3.0:
+        return False, "POOL_MC_DUMP"
+    if p5 is not None and p5 > 50.0:
+        return False, "POOL_TOP_CHASE"
+    if rvol is not None and rvol <= -25.0:
+        return False, "POOL_VOLUME_COLLAPSE"
+    if bs < 0.95:
+        return False, "POOL_SELL_DOMINANT"
+
+    return True, "POOL_HARD_PASSED"
+
+
+def candidate_pool_update(ca, result, safety_ok, pool_hard_ok, now):
     """Rank hard-safe early movers across scans. Returns (confirmed, rank_score, obs)."""
     if not safety_ok:
         _pool_diag("BLOCK_SAFETY"); return False, 0.0, 0
-    if not fast_hard_ok:
-        _pool_diag("BLOCK_FAST_HARD")
+    if not pool_hard_ok:
+        _pool_diag("BLOCK_POOL_HARD")
         with CANDIDATE_POOL_LOCK: CANDIDATE_POOL.pop(ca, None)
         return False, 0.0, 0
     if ca in SIGNALLED_CAS:
@@ -2320,6 +2363,7 @@ def candidate_pool_update(ca, result, safety_ok, fast_hard_ok, now):
             and mc_growth >= 0.5
             and bs >= 1.15
             and (rvol is None or rvol >= -0.10)
+            and quality_signal_slot_available(now)
         )
         if confirmed: _pool_diag("CONFIRMED")
         return confirmed, rank, obs
@@ -2720,9 +2764,12 @@ def auto_scanner():
                     _fast_hard_ok, _fast_hard_reason = fast_launch_hard_gate(
                         result, old_metrics, seen_count, momentum, now
                     )
+                    _pool_hard_ok, _pool_hard_reason = pool_hard_safety_gate(result, now)
                     _pool_confirmed, _pool_rank, _pool_obs = candidate_pool_update(
-                        ca, result, safety_ok, _fast_hard_ok, now
+                        ca, result, safety_ok, _pool_hard_ok, now
                     )
+                    if safety_ok and not _pool_hard_ok:
+                        _pool_diag("HARD_" + str(_pool_hard_reason or "UNKNOWN"))
                     result["candidate_pool_rank"] = _pool_rank
                     result["candidate_pool_obs"] = _pool_obs
                     if _pool_obs:
@@ -2740,7 +2787,7 @@ def auto_scanner():
                     _raw_signal_ok = bool(
                         (_candidate_signal and _final_gate_ok)
                         or (_fast_candidate and _fast_hard_ok)
-                        or (_pool_confirmed and _fast_hard_ok)
+                        or (_pool_confirmed and _pool_hard_ok)
                     )
                     _normal_lane_ok = bool(_candidate_signal and _final_gate_ok)
 
@@ -2932,7 +2979,7 @@ def auto_scanner():
                         elif _fast_candidate and _fast_hard_ok:
                             FINAL_GATE_REJECTS["FAST_SOFT_BYPASS_SEEN"] = FINAL_GATE_REJECTS.get("FAST_SOFT_BYPASS_SEEN", 0) + 1
 
-                    if _pool_confirmed and _fast_hard_ok and not signal_ok:
+                    if _pool_confirmed and _pool_hard_ok and not signal_ok:
                         signal_ok = True
                         FINAL_GATE_REJECTS["POOL_GIR"] = FINAL_GATE_REJECTS.get("POOL_GIR", 0) + 1
 
@@ -3108,7 +3155,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.15 | total={stats.get('radar',0)} "
+                    f"RADAR V13.16 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -3355,7 +3402,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.15 POOL DIAGNOSTIC + ROLLING RANK + TRUE 2TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.16 POOL ENGINE FIX + ROLLING RANK + TRUE 2TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
