@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V12.8 SMART FINAL GATE"
+VERSION = "V12.9 MC MOMENTUM GUARD"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -207,6 +207,16 @@ def final_gir_gate(result, old_metrics, seen_count, momentum, now):
     if not quality_signal_slot_available(now):
         return False, "RATE_LIMIT"
 
+    # V12.9 MC MOMENTUM GUARD
+    _runner_mc = result.get("runner_mc_accel")
+    try:
+        _runner_mc = float(_runner_mc) if _runner_mc is not None else None
+    except (TypeError, ValueError):
+        _runner_mc = None
+    if _runner_mc is not None and _runner_mc <= -30.0:
+        return False, "MC_ACCEL_CRITICAL"
+    if _runner_mc is not None and _runner_mc <= -20.0:
+        return False, "MC_ACCEL_NEGATIVE"
     return True, "PASSED"
 
 
@@ -2502,7 +2512,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V12.7 | total={stats.get('radar',0)} "
+                    f"RADAR V12.9 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2745,7 +2755,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.7 RUNNER SIGNAL INTEGRATION + FINAL GATE + HARD SAFETY: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV12.9 MC MOMENTUM GUARD + HARD SAFETY: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
