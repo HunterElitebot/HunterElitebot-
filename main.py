@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.34 RURU CORE + GECKO + LIQ GUARD"
+VERSION = "V11.34 RURU CORE + GECKO + HOLDER FIX + LIQ GUARD + AXIOM"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -200,11 +200,30 @@ def clean_telegram_text(text):
 def send(chat_id, text):
     try:
         text = clean_telegram_text(text)
-        telegram("sendMessage", {
+        payload = {
             "chat_id": str(chat_id),
             "text": text[:4000],
             "disable_web_page_preview": "true"
-        })
+        }
+
+        # Add a direct Axiom button only to token WATCH / ENTRY messages.
+        # Signal/filter logic is untouched.
+        ca_match = re.search(r"(?m)^CA:\\s*([1-9A-HJ-NP-Za-km-z]{32,44})\\s*$", text)
+        token_alert = (
+            "HUNTERELITE IZLE" in text
+            or "HUNTERELITE EARLY SIGNAL" in text
+            or "KARAR: GIR" in text
+        )
+        if ca_match and token_alert:
+            ca = ca_match.group(1)
+            axiom_url = f"https://axiom.trade/t/{ca}/@215162?chain=sol"
+            payload["reply_markup"] = json.dumps({
+                "inline_keyboard": [[
+                    {"text": "AXIOM'DA AC", "url": axiom_url}
+                ]]
+            }, ensure_ascii=False)
+
+        telegram("sendMessage", payload)
     except Exception as e:
         print("SEND ERROR:", repr(e), flush=True)
 
@@ -636,29 +655,131 @@ def rugcheck(ca):
         print("RUGCHECK ERROR:", repr(e), flush=True)
         return None
 
+def _protocol_holder_accounts(report):
+    """
+    Exclude AMM/pool/market/bonding-curve inventory from user-holder concentration.
+    Uses only accounts RugCheck itself identifies as protocol infrastructure.
+    """
+    addresses, owners = set(), set()
+    if not isinstance(report, dict):
+        return addresses, owners
+
+    for market in report.get("markets") or []:
+        if not isinstance(market, dict):
+            continue
+        for key in ("pubkey", "liquidityA", "liquidityB"):
+            value = market.get(key)
+            if value:
+                addresses.add(str(value))
+        for key in ("liquidityAAccount", "liquidityBAccount"):
+            acct = market.get(key) or {}
+            if isinstance(acct, dict):
+                owner = acct.get("owner")
+                if owner:
+                    owners.add(str(owner))
+
+    known = report.get("knownAccounts") or {}
+    if isinstance(known, dict):
+        for address, meta in known.items():
+            meta = meta or {}
+            if isinstance(meta, dict):
+                blob = f"{meta.get('name','')} {meta.get('type','')}".lower()
+            else:
+                blob = str(meta).lower()
+            if any(word in blob for word in ("amm", "pool", "dex", "market", "bonding", "liquidity")):
+                addresses.add(str(address))
+
+    return addresses, owners
+
+
 def holder_pct(holder):
+    """
+    IMPORTANT RugCheck fix:
+    topHolders[].pct is ALREADY in percentage points.
+    Example: pct=0.867 means 0.867%, not 86.7%.
+    """
     if not isinstance(holder, dict):
         return None
-    for key in ("pct", "percentage", "percent", "ownershipPercentage"):
-        value = holder.get(key)
-        if value is None:
-            continue
-        value = num(value)
-        if value is None:
-            continue
+
+    value = num(holder.get("pct"))
+    if value is not None:
+        return value if 0 <= value <= 100 else None
+
+    for key in ("percentage", "percent"):
+        value = num(holder.get(key))
+        if value is not None:
+            return value if 0 <= value <= 100 else None
+
+    # Only this explicitly-named field may arrive as a 0..1 fraction.
+    value = num(holder.get("ownershipPercentage"))
+    if value is not None:
         if 0 <= value <= 1:
             value *= 100
-        return value
+        return value if 0 <= value <= 100 else None
+
     return None
 
+
 def holders(report):
+    """
+    Calculate user-wallet Top-1/5/10 from RugCheck.
+
+    Fixes two false-high causes:
+    1) pct values below 1 are NOT multiplied by 100.
+    2) RugCheck-identified pool/AMM/bonding-curve inventory is excluded.
+
+    The existing V11.34 Top-10 safety threshold is NOT changed.
+    """
     if not report:
         return None, None, None
+
     items = report.get("topHolders") or report.get("top_holders") or []
-    values = [v for v in (holder_pct(i) for i in items) if v is not None]
+    protocol_addresses, protocol_owners = _protocol_holder_accounts(report)
+
+    owner_values = {}
+    anonymous_values = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        value = holder_pct(item)
+        if value is None:
+            continue
+
+        address = str(
+            item.get("address")
+            or item.get("tokenAccount")
+            or item.get("token_account")
+            or ""
+        )
+        owner = str(item.get("owner") or "")
+
+        if address and address in protocol_addresses:
+            continue
+        if owner and (owner in protocol_owners or owner in protocol_addresses):
+            continue
+
+        # Multiple token accounts belonging to the same wallet count as one holder.
+        if owner:
+            owner_values[owner] = owner_values.get(owner, 0.0) + value
+        else:
+            anonymous_values.append(value)
+
+    values = sorted(list(owner_values.values()) + anonymous_values, reverse=True)
     if not values:
         return None, None, None
-    return values[0], sum(values[:5]), sum(values[:10])
+
+    top1 = values[0]
+    top5 = sum(values[:5])
+    top10 = sum(values[:10])
+
+    # Invalid parse protection: never convert impossible totals into a valid pass.
+    if top1 > 100 or top5 > 100.5 or top10 > 100.5:
+        return None, None, None
+
+    return top1, top5, top10
+
 
 def authority(report, key):
     if not report:
@@ -1950,7 +2071,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nSTATE DECISION LOCK + GECKO RADAR + CENTRAL OUTPUT + LIQ GUARD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nSTATE DECISION LOCK + GECKO RADAR + RUGCHECK HOLDER FIX + CENTRAL OUTPUT + LIQ GUARD + AXIOM BUTTON: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
