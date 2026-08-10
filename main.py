@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.12 FRESH DISCOVERY"
+VERSION = "V13.12.1 FRESH COUNTER FIX"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -1239,8 +1239,10 @@ def discovery_candidates():
             used = set(ordered)
             ordered.extend(ca for ca in selected if ca not in used)
 
-        for ca in ordered[:RADAR_TARGET]:
-            discovery_seen[ca] = now_seen
+        # Do NOT mark candidates as seen here.
+        # The scanner owns the unique_new/repeat accounting immediately after
+        # discovery_candidates() returns. Pre-marking here made every candidate
+        # appear as repeat=80 even on the first scan.
 
     return ordered[:RADAR_TARGET]
 
@@ -2933,7 +2935,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.12 | total={stats.get('radar',0)} "
+                    f"RADAR V13.12.1 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -3179,7 +3181,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.12 FRESH DISCOVERY + BATCH PAIR DATA + FAST 2-TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.12.1 FRESH COUNTER FIX + BATCH PAIR DATA + FAST 2-TICK + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
