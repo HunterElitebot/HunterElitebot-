@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE RURU STORY HUNTER V3"
+VERSION = "HUNTERELITE RURU STORY HUNTER V3 + NEGATIVE PRICE GUARD"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -81,6 +81,13 @@ CONT_MAX_MC_DROP_PCT = -4.0
 CONT_MIN_FLOW_RATIO = 1.10
 CONT_HIGH_PUMP_PRICE5 = 80.0
 CONT_HIGH_PUMP_MIN_MC_PCT = 2.0
+
+# NEGATIVE PRICE GUARD
+# Story/Narrative score must never override active downside.
+NEG_PRICE_BLOCK_GUCLU_5M = -2.0
+NEG_PRICE_BLOCK_GIR_5M = -8.0
+NEG_PRICE_RECOVERY_MC_PCT = 2.0
+NEG_PRICE_RECOVERY_FLOW = 1.20
 
 SIGNAL_MIN_BUYS_5M = 8
 SIGNAL_MIN_BUY_SELL_RATIO = 1.10
@@ -1664,6 +1671,60 @@ def fast_gir_decision(result):
     return None
 
 
+def negative_price_guard(result, previous=None):
+    """
+    Prevent Story/RURU strength from masking an active selloff.
+
+    Returns:
+      (allow_gir, allow_guclu, detail)
+
+    - GUCLU GIR is blocked when 5m price is below -2%.
+    - GIR is blocked when 5m price is below -8%.
+    - If prior data exists, a recovery can restore GIR only when MC is rising
+      and fresh buy flow is strong.
+    """
+    price5 = num(result.get("price5"))
+    if price5 is None:
+        return True, True, "PRICE_NA"
+
+    # Normal positive/flat case.
+    if price5 >= NEG_PRICE_BLOCK_GUCLU_5M:
+        return True, True, f"PRICE5={price5:+.1f}%"
+
+    # Mild negative: normal GIR may remain, GUCLU is blocked.
+    if price5 >= NEG_PRICE_BLOCK_GIR_5M:
+        return True, False, f"GUCLU_BLOCK_PRICE5={price5:+.1f}%"
+
+    # Strong negative: require visible recovery before even normal GIR.
+    if not previous:
+        return False, False, f"GIR_BLOCK_PRICE5={price5:+.1f}%"
+
+    mc = num(result.get("mc"))
+    old_mc = num(previous.get("mc"))
+    buys = safe_int(result.get("buys5"))
+    old_buys = safe_int(previous.get("buys5"))
+    sells = safe_int(result.get("sells5"))
+    old_sells = safe_int(previous.get("sells5"))
+
+    if mc is None or old_mc is None or old_mc <= 0:
+        return False, False, f"GIR_BLOCK_PRICE5={price5:+.1f}%"
+
+    mc_pct = ((mc - old_mc) / old_mc) * 100.0
+    buy_delta = max(0, buys - old_buys)
+    sell_delta = max(0, sells - old_sells)
+    flow = buy_delta / max(sell_delta, 1)
+
+    recovered = (
+        mc_pct >= NEG_PRICE_RECOVERY_MC_PCT
+        and buy_delta >= 2
+        and flow >= NEG_PRICE_RECOVERY_FLOW
+    )
+    if recovered:
+        return True, False, f"RECOVERY price5={price5:+.1f}% MC={mc_pct:+.1f}% FLOW={flow:.2f}"
+
+    return False, False, f"GIR_BLOCK price5={price5:+.1f}% MC={mc_pct:+.1f}% FLOW={flow:.2f}"
+
+
 def continuation_confirm(result, previous, elapsed_seconds=30):
     """
     Confirm that volume is translating into fresh buy flow AND price/MC progress.
@@ -2137,7 +2198,11 @@ def auto_scanner():
                     watch_ok = watch_candidate(result)
                     fast_candidate = fast_gir_decision(result)
                     cont_ok, cont_detail = continuation_confirm(result, old_metrics, SCAN_INTERVAL)
-                    fast_decision = fast_candidate if (fast_candidate is not None and cont_ok) else None
+                    price_allow_gir, price_allow_guclu, price_guard_detail = negative_price_guard(result, old_metrics)
+
+                    fast_decision = fast_candidate if (fast_candidate is not None and cont_ok and price_allow_gir) else None
+                    if fast_decision == "GUCLU GIR" and not price_allow_guclu:
+                        fast_decision = "GIR" if price_allow_gir else None
 
                     if fast_candidate is not None:
                         stats["fast_candidate"] = stats.get("fast_candidate", 0) + 1
@@ -2158,6 +2223,10 @@ def auto_scanner():
                     # the RURU lane on the same scan.
                     high_pump = (num(result.get("price5")) or 0) >= CONT_HIGH_PUMP_PRICE5
                     if high_pump and fast_candidate is not None and not cont_ok:
+                        ruru_signal = False
+
+                    # Story/RURU may not override active downside.
+                    if not price_allow_gir:
                         ruru_signal = False
 
                     signal_ok = (fast_decision is not None) or ruru_signal
@@ -2206,13 +2275,23 @@ def auto_scanner():
                         narrative_linked = bool(result.get("narrative", {}).get("story_linked"))
 
                         if fast_decision == "GUCLU GIR":
-                            karar_label = "GUCLU GIR"
+                            karar_label = "GUCLU GIR" if price_allow_guclu else "GIR"
                         elif fast_decision == "GIR":
-                            # Narrative can upgrade quality label only AFTER
-                            # safety + continuation already passed.
-                            karar_label = "GUCLU GIR" if (narrative_linked and narrative_score >= 55 and final_score >= 70) else "GIR"
+                            # Narrative can upgrade only after price guard permits GUCLU.
+                            karar_label = (
+                                "GUCLU GIR"
+                                if (price_allow_guclu and narrative_linked and narrative_score >= 55 and final_score >= 70)
+                                else "GIR"
+                            )
                         else:
-                            karar_label = "GUCLU GIR" if (guclu_gir or (narrative_linked and narrative_score >= 55 and final_score >= 75)) else "GIR"
+                            karar_label = (
+                                "GUCLU GIR"
+                                if (
+                                    price_allow_guclu
+                                    and (guclu_gir or (narrative_linked and narrative_score >= 55 and final_score >= 75))
+                                )
+                                else "GIR"
+                            )
 
                         message = f"""HUNTERELITE {karar_label}
 
@@ -2244,6 +2323,7 @@ Final Score: {final_score}/100
 KARAR: {karar_label}
 SINYAL YOLU: {"FAST / CONTINUATION TEYITLI" if fast_decision else "RURU / TREND TEYITLI"}
 DEVAMLILIK: {cont_detail if fast_decision else "RURU TREND"}
+PRICE GUARD: {price_guard_detail}
 
 UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur."""
 
@@ -2582,7 +2662,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nRURU STORY HUNTER V3: TikTok/X/Instagram/YouTube/Reddit source-story detection + RURU/CONTINUATION + NO FAKE ENGAGEMENT + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nRURU STORY HUNTER V3 + NEGATIVE PRICE GUARD: Story cannot override active downside. RURU/CONTINUATION + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
