@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V13.5 FRESH RADAR MIX"
+VERSION = "V13.6 DUAL LANE LAUNCH"
 LIQ_CACHE = {}
 LIQ_CACHE_TTL = 300
 TOKEN = os.getenv("TOKEN", "").strip()
@@ -178,6 +178,59 @@ def v126_gate_reject(reason):
     reason = str(reason or "UNKNOWN")
     FINAL_GATE_REJECTS[reason] = FINAL_GATE_REJECTS.get(reason, 0) + 1
     return False
+
+def fast_launch_hard_gate(result, old_metrics, seen_count, momentum, now):
+    """
+    V13.6 FAST lane.
+    Keeps hard safety, holder verification, trend/momentum, no-repeat and
+    top-chase protection, but deliberately does NOT require quality_signal_gate().
+    """
+    if old_metrics is None:
+        return False, "FAST_WARMUP"
+    if seen_count < TREND_CONFIRM_SCANS:
+        return False, "FAST_TREND_SCANS"
+    if not trend_confirmed(old_metrics, result):
+        return False, "FAST_TREND_NOT_CONFIRMED"
+    if momentum < MIN_MOMENTUM_SIGNAL:
+        return False, "FAST_MOMENTUM_LOW"
+
+    top10 = num(result.get("top10"))
+    if top10 is None or bool(result.get("holder_unreliable")):
+        return False, "FAST_HOLDER_UNVERIFIED"
+    if not (1.0 <= top10 <= QUALITY_MAX_TOP10):
+        return False, "FAST_HOLDER_RANGE"
+
+    rug_ok, rug_reason = hard_rug_gate(result)
+    if not rug_ok:
+        return False, rug_reason
+
+    if result.get("ca") in SIGNALLED_CAS:
+        return False, "ALREADY_SIGNALLED"
+
+    liq = num(result.get("liq"))
+    if liq is None or liq < MIN_LIQ:
+        return False, "FAST_LIQ_LOW"
+
+    p5 = num(result.get("price5"))
+    rmc = num(result.get("runner_mc_accel"))
+    rvol = num(result.get("runner_vol_accel"))
+    buys = num(result.get("buys5")) or 0
+    sells = num(result.get("sells5")) or 0
+    bs = buys / max(sells, 1)
+
+    if rmc is not None and rmc <= -3.0:
+        return False, "MC_ACCEL_NEGATIVE_HARD"
+    if p5 is not None and p5 > 50.0:
+        return False, "FAST_TOP_CHASE"
+    if rvol is not None and rvol <= 0:
+        return False, "FAST_VOLUME_FADE"
+    if bs < 1.20:
+        return False, "FAST_SELL_PRESSURE"
+
+    if not quality_signal_slot_available(now):
+        return False, "RATE_LIMIT"
+    return True, "FAST_HARD_PASSED"
+
 
 def final_gir_gate(result, old_metrics, seen_count, momentum, now):
     """
@@ -2459,14 +2512,21 @@ def auto_scanner():
                     _final_gate_ok, _final_gate_reason = final_gir_gate(
                         result, old_metrics, seen_count, momentum, now
                     )
+                    _fast_hard_ok, _fast_hard_reason = fast_launch_hard_gate(
+                        result, old_metrics, seen_count, momentum, now
+                    )
                     if _candidate_signal and not _final_gate_ok:
                         FINAL_GATE_REJECTS[_final_gate_reason] = FINAL_GATE_REJECTS.get(_final_gate_reason, 0) + 1
 
-                    # V13.3 CONFIRMED LAUNCH
+                    # V13.6: FAST and CONFIRMED are separate lanes.
+                    # FAST can bypass only the soft quality gate; never hard safety.
                     # A token that passes all normal gates is only ARMED on the first
                     # qualifying scan. GÄ°R is sent on a later scan only if the move
                     # is still continuing instead of immediately fading.
-                    _raw_signal_ok = bool(_candidate_signal and _final_gate_ok)
+                    _raw_signal_ok = bool(
+                        _candidate_signal and (_final_gate_ok or _fast_hard_ok)
+                    )
+                    _normal_lane_ok = bool(_candidate_signal and _final_gate_ok)
                     _launch_pending = previous.get("launch_pending") if previous else None
                     _next_launch_pending = None
                     signal_ok = False
@@ -2489,7 +2549,8 @@ def auto_scanner():
                         # another full confirmation scan, but only under unusually
                         # strong simultaneous capital + volume + buy-pressure expansion.
                         _fast_launch_ok = bool(
-                            _score_now >= 75
+                            _fast_hard_ok
+                            and _score_now >= 75
                             and _rmc_now is not None and _rmc_now >= 12.0
                             and _rvol_now is not None and _rvol_now >= 25.0
                             and _bs_now >= 1.60
@@ -2502,7 +2563,7 @@ def auto_scanner():
                             signal_ok = True
                             FINAL_GATE_REJECTS["FAST_LAUNCH_CONFIRMED"] = FINAL_GATE_REJECTS.get("FAST_LAUNCH_CONFIRMED", 0) + 1
 
-                        elif isinstance(_launch_pending, dict):
+                        elif _normal_lane_ok and isinstance(_launch_pending, dict):
                             _mc_arm = num(_launch_pending.get("mc")) or 0
                             _vol_arm = num(_launch_pending.get("vol5")) or 0
                             _price_arm = num(_launch_pending.get("price5"))
@@ -2552,7 +2613,7 @@ def auto_scanner():
                                     "price5": _price_now,
                                     "time": now,
                                 }
-                        else:
+                        elif _normal_lane_ok:
                             FINAL_GATE_REJECTS["LAUNCH_CONFIRM_WAIT"] = FINAL_GATE_REJECTS.get("LAUNCH_CONFIRM_WAIT", 0) + 1
                             _next_launch_pending = {
                                 "mc": _mc_now,
@@ -2560,6 +2621,8 @@ def auto_scanner():
                                 "price5": _price_now,
                                 "time": now,
                             }
+                        elif _candidate_signal and _fast_hard_ok:
+                            FINAL_GATE_REJECTS["FAST_SOFT_BYPASS_SEEN"] = FINAL_GATE_REJECTS.get("FAST_SOFT_BYPASS_SEEN", 0) + 1
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -2729,7 +2792,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V13.5 | total={stats.get('radar',0)} "
+                    f"RADAR V13.6 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2974,7 +3037,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.5 FRESH RADAR MIX + FAST LAUNCH + CONFIRMED LAUNCH + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nV13.6 DUAL LANE LAUNCH + FRESH RADAR + NO REPEAT + DUMP SHIELD: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
