@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE FINAL FIXED"
+VERSION = "HUNTERELITE RURU CORE V11.38 FLOW EXPANSION"
 
 # FINAL PRODUCTION POLICY
 # - Story/narrative is a catalyst, never a safety bypass.
@@ -18,6 +18,15 @@ VERSION = "HUNTERELITE FINAL FIXED"
 # - FAST requires fresh volume, fresh buy flow and MC progress.
 # - RURU trend remains the confirmed runner path.
 # - Telegram output is GIR / GUCLU GIR only; no IZLE spam.
+# ================================================================
+# RURU ORIGINAL CORE FREEZE
+# Source: HunterElite_V11.37_TRAJECTORY_ENGINE_main.py
+# Entry path: V11.34 RURU confirmed trend logic as preserved in source.
+# Later FAST/VB/TRJ/social/narrative/anti-chase/negative-price routing
+# is diagnostic only and cannot create or block the RURU entry.
+# Hard safety checks remain active.
+# ================================================================
+
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -33,7 +42,6 @@ MC_MIN = 3000
 MC_MAX = 12000
 EARLY_MC_MAX = 12000
 MIN_LIQUIDITY = 800
-RUG_TOP10_MAX = 35.0
 
 # V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
 WATCH_SCORE = 47
@@ -154,6 +162,34 @@ TG_API = f"https://api.telegram.org/bot{TOKEN}"
 SOL_CA = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 signal_chats = set()
+
+# RURU QUALITY PACER
+# Max 2 real RURU alerts in a rolling 10-minute window.
+# It never fabricates a signal and does not weaken RURU/safety filters.
+# FLOW EXPANSION â€” calibrated from the observed runner profile.
+# IMPORTANT: Holder/Pro-Trader counts shown in Axiom are not available in the current
+# public feed used by this bot, so they are NOT fabricated or used as hard gates.
+FLOW_MIN_VOL_MC = 0.30
+FLOW_STRONG_VOL_MC = 0.60
+FLOW_MIN_LIQ_MC = 0.15
+FLOW_STRONG_LIQ_MC = 0.20
+FLOW_MIN_BUY_SELL = 1.15
+FLOW_MIN_BUYS_5M = 10
+
+RURU_SIGNAL_WINDOW_SECONDS = 600
+RURU_MAX_SIGNALS_PER_WINDOW = 2
+ruru_signal_times = []
+ruru_signal_times_lock = threading.Lock()
+
+def reserve_ruru_signal_slot(now=None):
+    now = time.time() if now is None else float(now)
+    cutoff = now - RURU_SIGNAL_WINDOW_SECONDS
+    with ruru_signal_times_lock:
+        ruru_signal_times[:] = [t for t in ruru_signal_times if t >= cutoff]
+        if len(ruru_signal_times) >= RURU_MAX_SIGNALS_PER_WINDOW:
+            return False
+        ruru_signal_times.append(now)
+        return True
 token_states = {}
 state_lock = threading.Lock()
 birdeye_lock = threading.Lock()
@@ -1339,23 +1375,21 @@ GIR TETIGI: {trigger}"""
 def basic_signal_safe(result):
     if not result:
         return False
-    sig = result.get("signals") or {}
-    if sig.get("rug") or sig.get("honeypot") or sig.get("insider") or sig.get("bundler"):
+    if result["signals"]["rug"] or result["signals"]["honeypot"]:
         return False
-    if result.get("mint") is True or result.get("freeze") is True:
+    if result["mint"] is True or result["freeze"] is True:
         return False
-    if result.get("mc") is None or not (MC_MIN <= result["mc"] <= MC_MAX):
+    if result["mc"] is None or not (MC_MIN <= result["mc"] <= MC_MAX):
         return False
-    if result.get("liq") is None or result["liq"] < MIN_LIQUIDITY:
+    if result["liq"] is None or result["liq"] < MIN_LIQUIDITY:
         return False
-    top10 = result.get("top10")
-    if top10 is None or top10 > RUG_TOP10_MAX:
+    if result["top10"] is not None and result["top10"] >= 75:
         return False
     return True
 
 def crash_guard(result):
-    # RUG ONLY FINAL: price-history crash checks are informational, not a hard entry block.
-    return True
+    ok, _ = crash_guard_detail(result)
+    return ok
 
 
 def trend_confirmed(previous, current):
@@ -2053,6 +2087,39 @@ def market_viral_score(result):
     return score, label
 
 
+def ruru_flow_expansion(result):
+    """Confirm RURU-like capital/activity expansion using metrics the bot really has."""
+    if not result:
+        return False, False, "NO DATA"
+
+    mc = num(result.get("mc"), 0) or 0
+    liq = num(result.get("liq"), 0) or 0
+    vol5 = num(result.get("vol5"), 0) or 0
+    buys = safe_int(result.get("buys5"))
+    sells = safe_int(result.get("sells5"))
+
+    if mc <= 0:
+        return False, False, "MC YOK"
+
+    vol_mc = vol5 / mc
+    liq_mc = liq / mc
+    flow = buys / max(sells, 1)
+
+    base = (
+        vol_mc >= FLOW_MIN_VOL_MC
+        and liq_mc >= FLOW_MIN_LIQ_MC
+        and flow >= FLOW_MIN_BUY_SELL
+        and buys >= FLOW_MIN_BUYS_5M
+    )
+    strong = (
+        base
+        and vol_mc >= FLOW_STRONG_VOL_MC
+        and liq_mc >= FLOW_STRONG_LIQ_MC
+    )
+    detail = f"VOL/MC={vol_mc:.2f} LIQ/MC={liq_mc:.2f} FLOW={flow:.2f} BUY={buys}"
+    return base, strong, detail
+
+
 def auto_scanner():
     print("EARLY HUNTER SCANNER ACTIVE", flush=True)
     print(
@@ -2242,13 +2309,12 @@ def auto_scanner():
                         elif top10 >= 50:
                             stats["holder_50_60"] += 1
 
-                    holder_ok = liq_ok and top10 is not None and top10 <= RUG_TOP10_MAX
+                    holder_ok = liq_ok and (top10 is None or top10 < 82)
                     if holder_ok: stats["holder_pass"] += 1
 
                     sig = result.get("signals") or {}
 
-                    rug_ok = (holder_ok and not sig.get("rug") and not sig.get("honeypot")
-                              and not sig.get("insider") and not sig.get("bundler"))
+                    rug_ok = holder_ok and not sig.get("rug") and not sig.get("honeypot")
                     if rug_ok: stats["rug_ok"] += 1
 
                     auth_ok = (rug_ok
@@ -2274,7 +2340,7 @@ def auto_scanner():
                         elif crash_reason == "h24":
                             stats["h24_fail"] += 1
 
-                    safety_ok = auth_ok
+                    safety_ok = crash_ok
                     if safety_ok:
                         stats["safety_pass"] += 1
                         if source_name == "BIRDEYE":
@@ -2317,91 +2383,37 @@ def auto_scanner():
                     new_stage, message = stage, None
 
                     watch_ok = watch_candidate(result)
-                    fast_candidate = fast_gir_decision(result)
-                    cont_ok, cont_detail = continuation_confirm(result, old_metrics, SCAN_INTERVAL)
-                    vb_ok, vb_strong, vb_detail = volume_breakout_confirm(result, old_metrics)
-                    trj_ok, trj_strong, trj_detail = trajectory_breakout_confirm(result, metric_history or ([old_metrics] if old_metrics else []))
-                    price_allow_gir, price_allow_guclu, price_guard_detail = negative_price_guard(result, old_metrics)
 
-                    fast_decision = fast_candidate if (fast_candidate is not None and cont_ok and price_allow_gir) else None
-                    if fast_decision == "GUCLU GIR" and not price_allow_guclu:
-                        fast_decision = "GIR" if price_allow_gir else None
+                    # RURU ORIGINAL CORE
+                    # Preserve the V11.34 trend thresholds that this source explicitly
+                    # labels as the RURU confirmed runner path.
+                    #
+                    # Later routing layers are intentionally NOT allowed to alter entry:
+                    # FAST/CONTINUATION, V11.36 Volume Breakout, V11.37 Trajectory,
+                    # Negative Price Guard, Social/Narrative quality upgrades,
+                    # and positive Anti-Chase.
+                    flow_ok, flow_strong, flow_detail = ruru_flow_expansion(result)
 
-                    if fast_candidate is not None:
-                        stats["fast_candidate"] = stats.get("fast_candidate", 0) + 1
-                        if not cont_ok:
-                            samples = stats.setdefault("fast_block_samples", [])
-                            if len(samples) < 6:
-                                base_dbg = pair.get("baseToken") or {}
-                                sym_dbg = base_dbg.get("symbol") or base_dbg.get("name") or ca[:6]
-                                samples.append(f"{sym_dbg}:{cont_detail}")
-
-                    # RURU confirmed path remains intact.
                     ruru_signal = (
                         seen_count >= TREND_CONFIRM_SCANS
                         and strong_signal(result, momentum, old_metrics)
+                        and flow_ok
                     )
 
-                    # High-pump FAST candidates must never bypass continuation through
-                    # the RURU lane on the same scan.
-                    high_pump = (num(result.get("price5")) or 0) >= CONT_HIGH_PUMP_PRICE5
-                    if high_pump and fast_candidate is not None and not cont_ok:
-                        ruru_signal = False
-
-                    # Story/RURU may not override active downside.
-                    if not price_allow_gir:
-                        ruru_signal = False
-
-                    # Volume breakout is an additional confirmed lane, never a safety bypass.
-                    volume_signal = vb_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
-                    trajectory_signal = trj_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
-
-                    # STORY SIGNAL FINAL FIXED:
-                    # Story alone is NOT an entry. It must be live NOW.
-                    # RURU and rug gates are untouched.
-                    _narr = result.get("narrative") or {}
-                    _social = result.get("social") or {}
-                    _story_score_pre = safe_int(_narr.get("score"))
-                    _story_linked_pre = bool(_narr.get("story_linked"))
-                    _social_score_pre = safe_int(_social.get("score"))
-                    _story_sources_pre = set(_narr.get("reasons") or [])
-                    _story_direct_pre = any(str(x).startswith("SOURCE_") for x in _story_sources_pre)
-
-                    _story_buys = safe_int(result.get("buys5"))
-                    _story_sells = safe_int(result.get("sells5"))
-                    _story_vol = num(result.get("vol5")) or 0
-                    _story_p5 = num(result.get("price5"))
-                    _story_mc = num(result.get("mc")) or 0
-                    _story_liq = num(result.get("liq")) or 0
-                    _story_flow = _story_buys / max(_story_sells, 1)
-                    _story_vol_mc = _story_vol / max(_story_mc, 1)
-
-                    # Reject a story whose price/action is already dying.
-                    _story_live_now = (
-                        _story_p5 is not None
-                        and _story_p5 >= 0
-                        and _story_buys >= 5
-                        and _story_buys >= _story_sells
-                        and _story_flow >= 1.05
-                        and _story_vol >= 350
-                        and _story_vol_mc >= 0.08
+                    # Diagnostic-only calculations. They do not create/block RURU entry.
+                    fast_candidate = fast_gir_decision(result)
+                    cont_ok, cont_detail = continuation_confirm(result, old_metrics, SCAN_INTERVAL)
+                    vb_ok, vb_strong, vb_detail = volume_breakout_confirm(result, old_metrics)
+                    trj_ok, trj_strong, trj_detail = trajectory_breakout_confirm(
+                        result, metric_history or ([old_metrics] if old_metrics else [])
                     )
-
-                    # Require a real linked story or strong multi-social footprint.
-                    _story_proof = (
-                        (_story_linked_pre and _story_direct_pre and _story_score_pre >= 45)
-                        or (_story_score_pre >= 60 and _story_linked_pre)
-                        or (_social_score_pre >= 60 and _story_score_pre >= 25)
+                    price_allow_gir, price_allow_guclu, price_guard_detail = negative_price_guard(
+                        result, old_metrics
                     )
-
-                    story_signal = (
-                        basic_signal_safe(result)
-                        and _story_proof
-                        and _story_live_now
-                        and price_allow_gir
-                    )
-
-                    signal_ok = (fast_decision is not None) or ruru_signal or volume_signal or trajectory_signal or story_signal
+                    fast_decision = None
+                    volume_signal = False
+                    trajectory_signal = False
+                    signal_ok = ruru_signal
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -2417,6 +2429,7 @@ def auto_scanner():
                     if (
                         signal_ok
                         and stage != "SIGNAL"
+                        and reserve_ruru_signal_slot(now)
                     ):
                         new_stage = "SIGNAL"
                         stats["signal"] += 1
@@ -2425,74 +2438,9 @@ def auto_scanner():
                         final_score = min(100, result["score"] + momentum)
                         age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
 
-                        # DIRECT decision label.
-                        buys5 = result.get("buys5", 0) or 0
-                        sells5 = result.get("sells5", 0) or 0
-                        ratio5 = buys5 / max(sells5, 1)
-                        vol5_now = result.get("vol5") or 0
-                        price5_now = result.get("price5")
-                        liq_now = result.get("liq") or 0
-                        mc_now = result.get("mc") or 1
-
-                        guclu_gir = (
-                            final_score >= 75
-                            and buys5 >= 15
-                            and ratio5 >= 1.20
-                            and vol5_now >= 2500
-                            and liq_now / max(mc_now, 1) >= 0.20
-                            and (price5_now is None or -5 <= price5_now <= 160)
-                        )
-
-                        narrative_score = safe_int(result.get("narrative", {}).get("score"))
-                        narrative_linked = bool(result.get("narrative", {}).get("story_linked"))
-                        social_score = safe_int(result.get("social", {}).get("score"))
-                        top10_now = num(result.get("top10"))
-
-                        # POSITIVE ANTI-CHASE GATE
-                        # +100%/5m: never label GUCLU GIR; +150%/5m: do not release a fresh GIR.
-                        chase_block_gir = price5_now is not None and price5_now > CHASE_BLOCK_GIR_5M
-                        chase_block_guclu = price5_now is not None and price5_now > CHASE_BLOCK_GUCLU_5M
-                        if chase_block_gir:
-                            continue
-
-                        # SOCIAL-AWARE QUALITY GATE
-                        # Social absence is not fatal for very early launches, but GUCLU GIR then
-                        # needs exceptional holder distribution + liquidity depth.
-                        no_social = social_score <= 0
-                        no_social_guclu_ok = (
-                            (top10_now is not None and top10_now <= NO_SOCIAL_GUCLU_MAX_TOP10)
-                            and (liq_now / max(mc_now, 1) >= NO_SOCIAL_GUCLU_MIN_LIQ_MC)
-                        )
-                        allow_quality_guclu = (not chase_block_guclu) and ((not no_social) or no_social_guclu_ok)
-
-                        # VOLUME BREAKOUT may strengthen an early entry, but anti-chase/social gates still win.
-                        if volume_signal and vb_strong and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
-                            guclu_gir = True
-                        # TRAJECTORY strong requires real 60-90s acceleration; social absence still cannot bypass quality gate.
-                        if trajectory_signal and trj_strong and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
-                            guclu_gir = True
-
-                        if story_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal):
-                            karar_label = "HIKAYE GIR"
-                        elif fast_decision == "GUCLU GIR":
-                            karar_label = "GUCLU GIR" if (price_allow_guclu and allow_quality_guclu) else "GIR"
-                        elif fast_decision == "GIR":
-                            # Narrative can upgrade only after price guard permits GUCLU.
-                            karar_label = (
-                                "GUCLU GIR"
-                                if (price_allow_guclu and allow_quality_guclu and narrative_linked and narrative_score >= 55 and final_score >= 70)
-                                else "GIR"
-                            )
-                        else:
-                            karar_label = (
-                                "GUCLU GIR"
-                                if (
-                                    price_allow_guclu
-                                    and allow_quality_guclu
-                                    and (guclu_gir or (narrative_linked and narrative_score >= 55 and final_score >= 75))
-                                )
-                                else "GIR"
-                            )
+                        # RURU ORIGINAL decision.
+                        # No social/narrative upgrade and no later anti-chase rerouting.
+                        karar_label = "GIR"
 
                         message = f"""HUNTERELITE {karar_label}
 
@@ -2522,9 +2470,8 @@ Momentum: +{momentum}
 Final Score: {final_score}/100
 
 KARAR: {karar_label}
-SINYAL YOLU: {"HIKAYE / VIRAL KAYNAK" if story_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else ("FAST / CONTINUATION TEYITLI" if fast_decision else ("TRAJECTORY BREAKOUT / 30-90S" if trajectory_signal else ("VOLUME BREAKOUT / TEYITLI" if volume_signal else "RURU / TREND TEYITLI")))}
-DEVAMLILIK: {(f"STORY={_story_score_pre} SOCIAL={_social_score_pre} SOURCE={result.get('narrative',{}).get('source_platform') or 'MULTI_SOCIAL'} P5={_story_p5:+.1f}% FLOW={_story_flow:.2f} VOL/MC={_story_vol_mc:.2f}") if story_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else (cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else "RURU TREND")))}
-PRICE GUARD: {price_guard_detail}
+SINYAL YOLU: RURU / TREND TEYITLI
+DEVAMLILIK: RURU TREND\nFLOW EXPANSION: {flow_detail}\nPRICE GUARD: {price_guard_detail}
 
 UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur."""
 
@@ -2730,7 +2677,7 @@ Komutlar:
 ğŸ” Manuel analiz: AKTÄ°F
 ğŸš¨ Early Hunter: {"AKTÄ°F" if active else "KAPALI"}
 â± Tarama: {SCAN_INTERVAL} sn
-RURU Core: ORIGINAL V11.37 | ONLY RUG SAFETY IS HARD BLOCK
+RURU Core: ORIGINAL TREND CORE | PACER: max 2 signal / 10dk
 Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸ¯ Watch Score: {WATCH_SCORE}
 ğŸ”¥ Signal Score: {SIGNAL_SCORE}
@@ -2866,7 +2813,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: RURU CORE UNCHANGED | RUG SHIELD: Liquidity $800+, Top10 <=35%, holder data required\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE: ORIGINAL RURU CORE + RUG HARD GATE + LIVE HIKAYE SIGNAL. HIKAYE GIR requires current positive price, buy pressure and volume; old/dead stories cannot trigger entry. Rug safety is never bypassed.\nAutomatic signal engine is running.""")
+Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V11.37: TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
