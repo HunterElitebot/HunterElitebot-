@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE V11.35 ANTI-CHASE SOCIAL QUALITY"
+VERSION = "HUNTERELITE RURU CORE RUG ONLY FINAL"
 
 # FINAL PRODUCTION POLICY
 # - Story/narrative is a catalyst, never a safety bypass.
@@ -1354,8 +1354,8 @@ def basic_signal_safe(result):
     return True
 
 def crash_guard(result):
-    ok, _ = crash_guard_detail(result)
-    return ok
+    # RUG ONLY FINAL: price-history crash checks are informational, not a hard entry block.
+    return True
 
 
 def trend_confirmed(previous, current):
@@ -2274,7 +2274,7 @@ def auto_scanner():
                         elif crash_reason == "h24":
                             stats["h24_fail"] += 1
 
-                    safety_ok = crash_ok
+                    safety_ok = auth_ok
                     if safety_ok:
                         stats["safety_pass"] += 1
                         if source_name == "BIRDEYE":
@@ -2682,7 +2682,7 @@ Komutlar:
 ğŸ” Manuel analiz: AKTÄ°F
 ğŸš¨ Early Hunter: {"AKTÄ°F" if active else "KAPALI"}
 â± Tarama: {SCAN_INTERVAL} sn
-RURU Core: ORIGINAL V11.37 (UNCHANGED) + RUG SHIELD ONLY
+RURU Core: ORIGINAL V11.37 | ONLY RUG SAFETY IS HARD BLOCK
 Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸ¯ Watch Score: {WATCH_SCORE}
 ğŸ”¥ Signal Score: {SIGNAL_SCORE}
@@ -2818,7 +2818,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: RURU CORE UNCHANGED | RUG SHIELD: Liquidity $800+, Top10 <=35%, holder data required\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE: ORIGINAL RURU CORE + RUG SHIELD ONLY. Rug/Honeypot + Insider/Bundler + Mint/Freeze + Top10<=35 + Liquidity Guard. Runner logic not retuned.\nAutomatic signal engine is running.""")
+Auto Quality: RURU CORE UNCHANGED | RUG SHIELD: Liquidity $800+, Top10 <=35%, holder data required\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE: ORIGINAL RURU CORE + RUG ONLY HARD GATE. H1/H6/H24 price crash filters are diagnostic only; Rug/Honeypot + Insider/Bundler + Mint/Freeze + Top10<=35 + Liquidity Guard remain hard blocks.\nAutomatic signal engine is running.""")
 
 
 def startup():
