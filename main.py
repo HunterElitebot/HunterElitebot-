@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE FINAL"
+VERSION = "HUNTERELITE FINAL FIXED"
 
 # FINAL PRODUCTION POLICY
 # - Story/narrative is a catalyst, never a safety bypass.
@@ -2356,9 +2356,9 @@ def auto_scanner():
                     volume_signal = vb_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
                     trajectory_signal = trj_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
 
-                    # STORY SIGNAL FINAL:
-                    # RURU logic is untouched. This is a parallel narrative lane.
-                    # It may alert before trend/momentum confirmation, but NEVER bypasses rug safety.
+                    # STORY SIGNAL FINAL FIXED:
+                    # Story alone is NOT an entry. It must be live NOW.
+                    # RURU and rug gates are untouched.
                     _narr = result.get("narrative") or {}
                     _social = result.get("social") or {}
                     _story_score_pre = safe_int(_narr.get("score"))
@@ -2367,20 +2367,38 @@ def auto_scanner():
                     _story_sources_pre = set(_narr.get("reasons") or [])
                     _story_direct_pre = any(str(x).startswith("SOURCE_") for x in _story_sources_pre)
 
-                    # Strong direct story source OR multi-channel social footprint.
-                    # Basic activity is intentionally light so the alert can arrive early.
-                    _story_activity_ok = (
-                        safe_int(result.get("buys5")) >= 3
-                        and (num(result.get("vol5")) or 0) >= 250
+                    _story_buys = safe_int(result.get("buys5"))
+                    _story_sells = safe_int(result.get("sells5"))
+                    _story_vol = num(result.get("vol5")) or 0
+                    _story_p5 = num(result.get("price5"))
+                    _story_mc = num(result.get("mc")) or 0
+                    _story_liq = num(result.get("liq")) or 0
+                    _story_flow = _story_buys / max(_story_sells, 1)
+                    _story_vol_mc = _story_vol / max(_story_mc, 1)
+
+                    # Reject a story whose price/action is already dying.
+                    _story_live_now = (
+                        _story_p5 is not None
+                        and _story_p5 >= 0
+                        and _story_buys >= 5
+                        and _story_buys >= _story_sells
+                        and _story_flow >= 1.05
+                        and _story_vol >= 350
+                        and _story_vol_mc >= 0.08
                     )
+
+                    # Require a real linked story or strong multi-social footprint.
+                    _story_proof = (
+                        (_story_linked_pre and _story_direct_pre and _story_score_pre >= 45)
+                        or (_story_score_pre >= 60 and _story_linked_pre)
+                        or (_social_score_pre >= 60 and _story_score_pre >= 25)
+                    )
+
                     story_signal = (
                         basic_signal_safe(result)
-                        and _story_activity_ok
-                        and (
-                            (_story_linked_pre and _story_direct_pre and _story_score_pre >= 45)
-                            or (_story_score_pre >= 60)
-                            or (_social_score_pre >= 60 and _story_score_pre >= 20)
-                        )
+                        and _story_proof
+                        and _story_live_now
+                        and price_allow_gir
                     )
 
                     signal_ok = (fast_decision is not None) or ruru_signal or volume_signal or trajectory_signal or story_signal
@@ -2434,7 +2452,7 @@ def auto_scanner():
                         # +100%/5m: never label GUCLU GIR; +150%/5m: do not release a fresh GIR.
                         chase_block_gir = price5_now is not None and price5_now > CHASE_BLOCK_GIR_5M
                         chase_block_guclu = price5_now is not None and price5_now > CHASE_BLOCK_GUCLU_5M
-                        if chase_block_gir and not (story_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal)):
+                        if chase_block_gir:
                             continue
 
                         # SOCIAL-AWARE QUALITY GATE
@@ -2505,7 +2523,7 @@ Final Score: {final_score}/100
 
 KARAR: {karar_label}
 SINYAL YOLU: {"HIKAYE / VIRAL KAYNAK" if story_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else ("FAST / CONTINUATION TEYITLI" if fast_decision else ("TRAJECTORY BREAKOUT / 30-90S" if trajectory_signal else ("VOLUME BREAKOUT / TEYITLI" if volume_signal else "RURU / TREND TEYITLI")))}
-DEVAMLILIK: {(f"STORY={_story_score_pre} SOCIAL={_social_score_pre} SOURCE={result.get('narrative',{}).get('source_platform') or 'MULTI_SOCIAL'}") if story_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else (cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else "RURU TREND")))}
+DEVAMLILIK: {(f"STORY={_story_score_pre} SOCIAL={_social_score_pre} SOURCE={result.get('narrative',{}).get('source_platform') or 'MULTI_SOCIAL'} P5={_story_p5:+.1f}% FLOW={_story_flow:.2f} VOL/MC={_story_vol_mc:.2f}") if story_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else (cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else "RURU TREND")))}
 PRICE GUARD: {price_guard_detail}
 
 UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur."""
@@ -2848,7 +2866,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: RURU CORE UNCHANGED | RUG SHIELD: Liquidity $800+, Top10 <=35%, holder data required\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE: ORIGINAL RURU CORE + RUG ONLY HARD GATE + PARALLEL HIKAYE SIGNAL. Direct X/TikTok/Instagram/YouTube/Reddit story sources or strong multi-social footprint can trigger HIKAYE GIR early; rug safety is never bypassed.\nAutomatic signal engine is running.""")
+Auto Quality: RURU CORE UNCHANGED | RUG SHIELD: Liquidity $800+, Top10 <=35%, holder data required\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE: ORIGINAL RURU CORE + RUG HARD GATE + LIVE HIKAYE SIGNAL. HIKAYE GIR requires current positive price, buy pressure and volume; old/dead stories cannot trigger entry. Rug safety is never bypassed.\nAutomatic signal engine is running.""")
 
 
 def startup():
