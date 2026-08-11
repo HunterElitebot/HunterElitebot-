@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE RURU CORE RUG ONLY FINAL"
+VERSION = "HUNTERELITE FINAL"
 
 # FINAL PRODUCTION POLICY
 # - Story/narrative is a catalyst, never a safety bypass.
@@ -2355,7 +2355,35 @@ def auto_scanner():
                     # Volume breakout is an additional confirmed lane, never a safety bypass.
                     volume_signal = vb_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
                     trajectory_signal = trj_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
-                    signal_ok = (fast_decision is not None) or ruru_signal or volume_signal or trajectory_signal
+
+                    # STORY SIGNAL FINAL:
+                    # RURU logic is untouched. This is a parallel narrative lane.
+                    # It may alert before trend/momentum confirmation, but NEVER bypasses rug safety.
+                    _narr = result.get("narrative") or {}
+                    _social = result.get("social") or {}
+                    _story_score_pre = safe_int(_narr.get("score"))
+                    _story_linked_pre = bool(_narr.get("story_linked"))
+                    _social_score_pre = safe_int(_social.get("score"))
+                    _story_sources_pre = set(_narr.get("reasons") or [])
+                    _story_direct_pre = any(str(x).startswith("SOURCE_") for x in _story_sources_pre)
+
+                    # Strong direct story source OR multi-channel social footprint.
+                    # Basic activity is intentionally light so the alert can arrive early.
+                    _story_activity_ok = (
+                        safe_int(result.get("buys5")) >= 3
+                        and (num(result.get("vol5")) or 0) >= 250
+                    )
+                    story_signal = (
+                        basic_signal_safe(result)
+                        and _story_activity_ok
+                        and (
+                            (_story_linked_pre and _story_direct_pre and _story_score_pre >= 45)
+                            or (_story_score_pre >= 60)
+                            or (_social_score_pre >= 60 and _story_score_pre >= 20)
+                        )
+                    )
+
+                    signal_ok = (fast_decision is not None) or ruru_signal or volume_signal or trajectory_signal or story_signal
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -2406,7 +2434,7 @@ def auto_scanner():
                         # +100%/5m: never label GUCLU GIR; +150%/5m: do not release a fresh GIR.
                         chase_block_gir = price5_now is not None and price5_now > CHASE_BLOCK_GIR_5M
                         chase_block_guclu = price5_now is not None and price5_now > CHASE_BLOCK_GUCLU_5M
-                        if chase_block_gir:
+                        if chase_block_gir and not (story_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal)):
                             continue
 
                         # SOCIAL-AWARE QUALITY GATE
@@ -2426,7 +2454,9 @@ def auto_scanner():
                         if trajectory_signal and trj_strong and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
                             guclu_gir = True
 
-                        if fast_decision == "GUCLU GIR":
+                        if story_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal):
+                            karar_label = "HIKAYE GIR"
+                        elif fast_decision == "GUCLU GIR":
                             karar_label = "GUCLU GIR" if (price_allow_guclu and allow_quality_guclu) else "GIR"
                         elif fast_decision == "GIR":
                             # Narrative can upgrade only after price guard permits GUCLU.
@@ -2474,8 +2504,8 @@ Momentum: +{momentum}
 Final Score: {final_score}/100
 
 KARAR: {karar_label}
-SINYAL YOLU: {"FAST / CONTINUATION TEYITLI" if fast_decision else ("TRAJECTORY BREAKOUT / 30-90S" if trajectory_signal else ("VOLUME BREAKOUT / TEYITLI" if volume_signal else "RURU / TREND TEYITLI"))}
-DEVAMLILIK: {cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else "RURU TREND"))}
+SINYAL YOLU: {"HIKAYE / VIRAL KAYNAK" if story_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else ("FAST / CONTINUATION TEYITLI" if fast_decision else ("TRAJECTORY BREAKOUT / 30-90S" if trajectory_signal else ("VOLUME BREAKOUT / TEYITLI" if volume_signal else "RURU / TREND TEYITLI")))}
+DEVAMLILIK: {(f"STORY={_story_score_pre} SOCIAL={_social_score_pre} SOURCE={result.get('narrative',{}).get('source_platform') or 'MULTI_SOCIAL'}") if story_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else (cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else "RURU TREND")))}
 PRICE GUARD: {price_guard_detail}
 
 UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur."""
@@ -2818,7 +2848,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: RURU CORE UNCHANGED | RUG SHIELD: Liquidity $800+, Top10 <=35%, holder data required\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE: ORIGINAL RURU CORE + RUG ONLY HARD GATE. H1/H6/H24 price crash filters are diagnostic only; Rug/Honeypot + Insider/Bundler + Mint/Freeze + Top10<=35 + Liquidity Guard remain hard blocks.\nAutomatic signal engine is running.""")
+Auto Quality: RURU CORE UNCHANGED | RUG SHIELD: Liquidity $800+, Top10 <=35%, holder data required\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE: ORIGINAL RURU CORE + RUG ONLY HARD GATE + PARALLEL HIKAYE SIGNAL. Direct X/TikTok/Instagram/YouTube/Reddit story sources or strong multi-social footprint can trigger HIKAYE GIR early; rug safety is never bypassed.\nAutomatic signal engine is running.""")
 
 
 def startup():
