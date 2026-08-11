@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE V11.39 EARLY RUNNER GATE"
+VERSION = "HUNTERELITE V11.40 FINAL DATA GUARD"
 
 # FINAL PRODUCTION POLICY
 # - Story/narrative is a catalyst, never a safety bypass.
@@ -82,6 +82,10 @@ GLOBAL_MIN_BUY_DELTA = 1
 GLOBAL_MIN_VOL_DELTA = 50
 GLOBAL_MIN_MC_PROGRESS = 0.0
 GLOBAL_IDEAL_PRICE5_MAX = 60.0
+# V11.40 DATA INTEGRITY: never compare incompatible/stale snapshots.
+SNAPSHOT_MAX_AGE_SEC = 75.0
+MAX_VALID_MC_DELTA_PCT = 300.0
+MAX_VALID_LIQ_UP_PCT = 500.0
 # When no social channel is published, GUCLU GIR requires unusually clean on-chain structure.
 NO_SOCIAL_GUCLU_MAX_TOP10 = 10.0
 NO_SOCIAL_GUCLU_MIN_LIQ_MC = 0.80
@@ -1862,6 +1866,12 @@ def trajectory_breakout_confirm(result, history):
     if not snaps:
         return False, False, "TRJ_NO_HISTORY"
     base = snaps[0]
+    cur_src = result.get("_source"); base_src = base.get("_source")
+    cur_ts = num(result.get("_snapshot_ts")); base_ts = num(base.get("_snapshot_ts"))
+    if not cur_src or not base_src or cur_src != base_src:
+        return False, False, "TRJ_SOURCE_MISMATCH"
+    if cur_ts is None or base_ts is None or cur_ts <= base_ts or (cur_ts-base_ts) > (SNAPSHOT_MAX_AGE_SEC * TRJ_MAX_HISTORY):
+        return False, False, "TRJ_STALE_SNAPSHOT"
     mc = num(result.get("mc")); old_mc = num(base.get("mc"))
     vol = num(result.get("vol5"), 0) or 0; old_vol = num(base.get("vol5"), 0) or 0
     buys = safe_int(result.get("buys5")); old_buys = safe_int(base.get("buys5"))
@@ -1870,6 +1880,8 @@ def trajectory_breakout_confirm(result, history):
     if mc is None or old_mc is None or mc <= 0 or old_mc <= 0:
         return False, False, "TRJ_MC_MISSING"
     mc_pct = ((mc-old_mc)/old_mc)*100.0
+    if abs(mc_pct) > MAX_VALID_MC_DELTA_PCT:
+        return False, False, f"TRJ_MC_ANOMALY {mc_pct:+.1f}%"
     vol_delta = max(0.0, vol-old_vol)
     buy_delta = max(0, buys-old_buys); sell_delta=max(0, sells-old_sells)
     flow = buy_delta/max(sell_delta,1)
@@ -1905,6 +1917,14 @@ def global_entry_gate(result, previous):
     """
     if not result or not previous:
         return False, False, "GLOBAL_WAIT_SECOND_TICK"
+    cur_src = result.get("_source")
+    prev_src = previous.get("_source")
+    cur_ts = num(result.get("_snapshot_ts"))
+    prev_ts = num(previous.get("_snapshot_ts"))
+    if not cur_src or not prev_src or cur_src != prev_src:
+        return False, False, f"GLOBAL_SOURCE_MISMATCH {prev_src}->{cur_src}"
+    if cur_ts is None or prev_ts is None or cur_ts <= prev_ts or (cur_ts-prev_ts) > SNAPSHOT_MAX_AGE_SEC:
+        return False, False, "GLOBAL_STALE_SNAPSHOT"
     price5 = num(result.get("price5"))
     mc = num(result.get("mc")); old_mc = num(previous.get("mc"))
     liq = num(result.get("liq")); old_liq = num(previous.get("liq"))
@@ -1927,6 +1947,13 @@ def global_entry_gate(result, previous):
         if liq_drop > GLOBAL_MAX_LIQ_DROP_PCT:
             return False, False, f"GLOBAL_LIQ_UNSTABLE -{liq_drop:.1f}%"
     mc_pct = ((mc-old_mc)/old_mc)*100.0
+    if abs(mc_pct) > MAX_VALID_MC_DELTA_PCT:
+        return False, False, f"GLOBAL_MC_ANOMALY {mc_pct:+.1f}%"
+    if old_liq is None or old_liq <= 0:
+        return False, False, "GLOBAL_LIQ_NEEDS_2_TICKS"
+    liq_up = ((liq-old_liq)/old_liq)*100.0
+    if liq_up > MAX_VALID_LIQ_UP_PCT:
+        return False, False, f"GLOBAL_LIQ_ANOMALY +{liq_up:.1f}%"
     vol_delta = max(0.0, vol-old_vol)
     buy_delta = max(0, buys-old_buys); sell_delta=max(0, sells-old_sells)
     flow = buy_delta/max(sell_delta,1)
@@ -2204,6 +2231,10 @@ def auto_scanner():
 
                     report = rugcheck(ca)
                     result = calculate_score(pair, report)
+                    # Snapshot provenance is persisted with metrics so trajectory/delta
+                    # calculations never mix GECKO/DEX/BIRDEYE values.
+                    result["_source"] = source_name
+                    result["_snapshot_ts"] = time.time()
                     social = social_presence(pair)
                     result["social"] = social
                     result["narrative"] = narrative_viral(pair)
@@ -2407,7 +2438,7 @@ def auto_scanner():
                     volume_signal = vb_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
                     trajectory_signal = trj_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
 
-                    # V11.39 EARLY RUNNER GLOBAL ENTRY GATE.
+                    # V11.40 FINAL DATA GUARD + EARLY RUNNER GLOBAL ENTRY GATE.
                     global_allow_gir, global_allow_guclu, global_gate_detail = global_entry_gate(result, old_metrics)
                     if not global_allow_gir:
                         fast_decision = None
@@ -2743,7 +2774,7 @@ Komutlar:
 ğŸ” Manuel analiz: AKTÄ°F
 ğŸš¨ Early Hunter: {"AKTÄ°F" if active else "KAPALI"}
 â± Tarama: {SCAN_INTERVAL} sn
-RURU Core: V11.39 EARLY RUNNER GATE + TRAJECTORY + VOLUME BREAKOUT
+RURU Core: V11.40 FINAL DATA GUARD + EARLY RUNNER + TRAJECTORY + VOLUME BREAKOUT
 Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸ¯ Watch Score: {WATCH_SCORE}
 ğŸ”¥ Signal Score: {SIGNAL_SCORE}
@@ -2879,7 +2910,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V11.39: EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V11.40: FINAL DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
