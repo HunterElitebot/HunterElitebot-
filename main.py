@@ -10,8 +10,11 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE V11.41 FINAL RUNNER"
+VERSION = "HUNTERELITE V11.42 WIDE RUNNER"
 
+# V11.42 WIDE FUNNEL POLICY
+# - Widen discovery only: MC/liquidity intake expanded.
+# - Global entry/data/rug/holder/anti-chase gates stay unchanged.
 # FINAL PRODUCTION POLICY
 # - Story/narrative is a catalyst, never a safety bypass.
 # - Active downside cannot become GUCLU GIR because of story score.
@@ -29,10 +32,10 @@ POLLING_ENABLED = os.getenv("POLLING_ENABLED", "1").strip().lower() in ("1", "tr
 
 # AUTO QUALITY MODE: only 5K-10K market-cap candidates are promoted.
 # Manual CA analysis is independent from this band.
-MC_MIN = 3000
-MC_MAX = 12000
-EARLY_MC_MAX = 12000
-MIN_LIQUIDITY = 800
+MC_MIN = 2000
+MC_MAX = 20000
+EARLY_MC_MAX = 20000
+MIN_LIQUIDITY = 600
 
 # V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
 WATCH_SCORE = 47
@@ -2677,7 +2680,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.41 | total={stats.get('radar',0)} "
+                    f"RADAR V11.42 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2783,7 +2786,7 @@ Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸŸ¢ Birdeye API: {"BAÄLI" if BIRDEYE_API_KEY else "KEY YOK"}
 â± Birdeye yenileme: {BIRDEYE_POLL_INTERVAL} sn
 ğŸ’§ Min Likidite: {money(MIN_LIQUIDITY)}
-ğŸ“Š AUTO Market: $3Kâ€“$12K
+ğŸ“Š AUTO Market: $2Kâ€“$20K
 âœ… Quality Gate: buy>=5, hacim>=$500, buy/sell>=1.10, late-pump<=+180%\nğŸ“¡ /radar teÅŸhisi: AKTÄ°F\nğŸ§© Single Engine: AKTÄ°F""")
         return
 
@@ -2910,7 +2913,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V11.41: FINAL RUNNER + DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $2K-$20K, Liquidity $600+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V11.42: WIDE RUNNER + DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
