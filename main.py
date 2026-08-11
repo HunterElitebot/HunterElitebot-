@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE RURU CORE V11.38 FLOW EXPANSION"
+VERSION = "HUNTERELITE V11.34 RURU RESTORE"
 
 # FINAL PRODUCTION POLICY
 # - Story/narrative is a catalyst, never a safety bypass.
@@ -204,9 +204,9 @@ candidate_sources = {}
 discovery_seen_lock = threading.Lock()
 DISCOVERY_MEMORY_SECONDS = 21600
 RADAR_RAW_LIMIT = 240
-RADAR_TARGET = 80
+RADAR_TARGET = 40
 BIRDEYE_TARGET = 20
-GECKO_TARGET = 60
+GECKO_TARGET = 0
 DEX_TARGET = 20
 MAX_REPEAT_PER_SCAN = 20
 FRESH_PAIR_MAX_HOURS = 6.0
@@ -2392,12 +2392,9 @@ def auto_scanner():
                     # FAST/CONTINUATION, V11.36 Volume Breakout, V11.37 Trajectory,
                     # Negative Price Guard, Social/Narrative quality upgrades,
                     # and positive Anti-Chase.
-                    flow_ok, flow_strong, flow_detail = ruru_flow_expansion(result)
-
                     ruru_signal = (
                         seen_count >= TREND_CONFIRM_SCANS
                         and strong_signal(result, momentum, old_metrics)
-                        and flow_ok
                     )
 
                     # Diagnostic-only calculations. They do not create/block RURU entry.
@@ -2429,7 +2426,6 @@ def auto_scanner():
                     if (
                         signal_ok
                         and stage != "SIGNAL"
-                        and reserve_ruru_signal_slot(now)
                     ):
                         new_stage = "SIGNAL"
                         stats["signal"] += 1
@@ -2479,9 +2475,26 @@ UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur."""
                         watch_ok
                         and stage == "NEW"
                     ):
-                        # DIRECT GIR MODE: track silently; never send IZLE.
                         new_stage = "WATCH"
-                        message = None
+                        message = f"""HUNTERELITE IZLE
+
+{name} ({symbol})
+CA: {ca}
+
+Market Cap: {money(result["mc"])}
+Likidite: {money(result["liq"])}
+
+5dk: {result["buys5"]} buy / {result["sells5"]} sell
+5dk hacim: {money(result["vol5"])}
+5dk fiyat: {percent(result["price5"])}
+
+Top-10: {percent(result["top10"])}
+Score: {result["score"]}/100
+
+Potansiyel: IZLE
+KARAR: IZLE / ERKEN ADAY
+
+Momentum teyidi bekleniyor."""
 
                     # V11.34 LIQ GUARD:
                     # If a token that already signaled loses >=35% of pool liquidity
@@ -2677,12 +2690,12 @@ Komutlar:
 ğŸ” Manuel analiz: AKTÄ°F
 ğŸš¨ Early Hunter: {"AKTÄ°F" if active else "KAPALI"}
 â± Tarama: {SCAN_INTERVAL} sn
-RURU Core: ORIGINAL TREND CORE | PACER: max 2 signal / 10dk
+RURU Core: V11.34 RESTORE | IZLE + MOMENTUM TEYIDI
 Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸ¯ Watch Score: {WATCH_SCORE}
 ğŸ”¥ Signal Score: {SIGNAL_SCORE}
 ğŸ“ˆ Trend teyidi: {TREND_CONFIRM_SCANS} tarama / min momentum {MIN_MOMENTUM_SIGNAL}
-ğŸ“¡ Radar: GECKO + DEX + BIRDEYE BONUS
+ğŸ“¡ Radar: BIRDEYE + DEX
 ğŸŸ¢ Birdeye API: {"BAÄLI" if BIRDEYE_API_KEY else "KEY YOK"}
 â± Birdeye yenileme: {BIRDEYE_POLL_INTERVAL} sn
 ğŸ’§ Min Likidite: {money(MIN_LIQUIDITY)}
@@ -2806,14 +2819,14 @@ def startup_notify():
 
 Early Hunter: ACTIVE
 Scan: {SCAN_INTERVAL} sec
-Radar: GECKO + DEX + BIRDEYE BONUS
-Birdeye: {"KEY PRESENT / BONUS" if BIRDEYE_API_KEY else "KEY MISSING"}\nGecko: KEYLESS PRIMARY FALLBACK\nRadar Mix: Birdeye max 20 + Gecko fills + DEX max 20 / total max 80
+Radar: BIRDEYE + DEX
+Birdeye: {"KEY PRESENT / BONUS" if BIRDEYE_API_KEY else "KEY MISSING"}\nGecko: KEYLESS PRIMARY FALLBACK\nRadar Mix: Birdeye max 20 + DEX max 20 / total max 40
 Watch Score: {WATCH_SCORE}
 Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V11.37: TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nV11.34 RURU RESTORE: BIRDEYE 20 + DEX 20 + EARLY IZLE + TREND/MOMENTUM TEYIDI + RUG/HOLDER/LIQ SAFETY.\nAutomatic signal engine is running.""")
 
 
 def startup():
