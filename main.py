@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE V11.34 RURU RESTORE"
+VERSION = "HUNTERELITE V11.34 RURU RESTORE - BIRDEYE DEBUG"
 
 # FINAL PRODUCTION POLICY
 # - Story/narrative is a catalyst, never a safety bypass.
@@ -2696,7 +2696,7 @@ Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸ”¥ Signal Score: {SIGNAL_SCORE}
 ğŸ“ˆ Trend teyidi: {TREND_CONFIRM_SCANS} tarama / min momentum {MIN_MOMENTUM_SIGNAL}
 ğŸ“¡ Radar: BIRDEYE + DEX
-ğŸŸ¢ Birdeye API: {"BAÄLI" if BIRDEYE_API_KEY else "KEY YOK"}
+ğŸŸ¢ Birdeye API: {"BAÄLI" if BIRDEYE_API_KEY else "KEY YOK"}\nğŸ§ª Birdeye Debug: /radar iÃ§inde cache + error gÃ¶sterilir
 â± Birdeye yenileme: {BIRDEYE_POLL_INTERVAL} sn
 ğŸ’§ Min Likidite: {money(MIN_LIQUIDITY)}
 ğŸ“Š AUTO Market: $3Kâ€“$12K
@@ -2734,6 +2734,12 @@ GerÃ§ek aday taramasÄ± baÅŸladÄ±.""")
         updated = s.get("updated", 0)
         age = int(max(0, time.time() - updated)) if updated else None
         age_text = f"{age} sn Ã¶nce" if age is not None else "henÃ¼z ilk tur tamamlanmadÄ±"
+
+        with birdeye_lock:
+            be_err = birdeye_last_error or "-"
+            be_cache_count = len(birdeye_cache)
+            be_age = int(max(0, time.time() - birdeye_last_fetch)) if birdeye_last_fetch else None
+            be_age_text = f"{be_age}s" if be_age is not None else "-"
 
         send(chat_id, f"""ğŸ“¡ HUNTERELITE RADAR TEST
 
