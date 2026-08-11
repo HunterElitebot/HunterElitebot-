@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE FINAL V12.2 RUNNER DIAGNOSTIC"
+VERSION = "HUNTERELITE FINAL V12.4 RUNNER SOFT"
 
 # FINAL V12 RUNNER POLICY
 # - Widen discovery only: MC/liquidity intake expanded.
@@ -87,6 +87,8 @@ GLOBAL_MIN_MC_PROGRESS = 0.0
 GLOBAL_IDEAL_PRICE5_MAX = 60.0
 # V11.40 DATA INTEGRITY: never compare incompatible/stale snapshots.
 SNAPSHOT_MAX_AGE_SEC = 75.0
+RUNNER_SNAPSHOT_MAX_AGE_SEC = 300.0
+RUNNER_MIN_LIQ_MC = 0.12
 MAX_VALID_MC_DELTA_PCT = 300.0
 MAX_VALID_LIQ_UP_PCT = 500.0
 # When no social channel is published, GUCLU GIR requires unusually clean on-chain structure.
@@ -2058,8 +2060,8 @@ def final_runner_safety_gate(result, previous):
     prev_ts = num(previous.get("_snapshot_ts"))
     if not cur_src or not prev_src or cur_src != prev_src:
         return False, False, f"RUNNER_SOURCE_MISMATCH {prev_src}->{cur_src}"
-    if cur_ts is None or prev_ts is None or cur_ts <= prev_ts or (cur_ts-prev_ts) > SNAPSHOT_MAX_AGE_SEC:
-        return False, False, "RUNNER_STALE_SNAPSHOT"
+    if cur_ts is None or prev_ts is None or cur_ts <= prev_ts or (cur_ts-prev_ts) > RUNNER_SNAPSHOT_MAX_AGE_SEC:
+        return False, False, f"RUNNER_STALE_SNAPSHOT age={(cur_ts-prev_ts) if cur_ts is not None and prev_ts is not None else -1:.0f}s"
 
     price5 = num(result.get("price5"))
     mc = num(result.get("mc")); old_mc = num(previous.get("mc"))
@@ -2077,7 +2079,7 @@ def final_runner_safety_gate(result, previous):
         return False, False, f"RUNNER_TOP10 {top10:.1f}%"
 
     liq_mc = liq / mc
-    if liq_mc < GLOBAL_MIN_LIQ_MC:
+    if liq_mc < RUNNER_MIN_LIQ_MC:
         return False, False, f"RUNNER_LIQ/MC {liq_mc:.2f}"
     if old_liq is None or old_liq <= 0:
         return False, False, "RUNNER_LIQ_NEEDS_2_TICKS"
@@ -2369,7 +2371,7 @@ def auto_scanner():
     "liq_pass": 0, "liq_missing": 0, "gecko_liq_ok": 0, "gecko_liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
     "momentum_pass": 0,
-    "runner_mom": 0, "runner_score6": 0, "runner_hard_safe": 0, "runner_final": 0,
+    "runner_mom": 0, "runner_score5": 0, "runner_hard_safe": 0, "runner_final": 0,
     "runner_blocks": {}, "runner_samples": [],
             }
 
@@ -2631,8 +2633,8 @@ def auto_scanner():
                     # V12.2 diagnostic only: no trading threshold changes.
                     if momentum_ok:
                         stats["runner_mom"] += 1
-                        if runner_score >= 6:
-                            stats["runner_score6"] += 1
+                        if runner_score >= 5:
+                            stats["runner_score5"] += 1
                         if runner_safety_gir:
                             stats["runner_hard_safe"] += 1
 
@@ -2640,7 +2642,7 @@ def auto_scanner():
                         if not runner_safety_gir:
                             _runner_reasons.append(runner_safety_detail.split()[0])
                         if runner_score < 6:
-                            _runner_reasons.append("SCORE_LT6")
+                            _runner_reasons.append("SCORE_LT5")
                         if not basic_signal_safe(result):
                             _runner_reasons.append("BASIC_SAFE")
                         if not crash_guard(result):
@@ -2665,7 +2667,7 @@ def auto_scanner():
                     final_runner_signal = (
                         runner_safety_gir
                         and momentum_ok
-                        and runner_score >= 6
+                        and runner_score >= 5
                         and basic_signal_safe(result)
                         and crash_guard(result)
                         and price_allow_gir
@@ -2764,7 +2766,7 @@ def auto_scanner():
                         # TRAJECTORY strong requires real 60-90s acceleration; social absence still cannot bypass quality gate.
                         if trajectory_signal and trj_strong and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
                             guclu_gir = True
-                        if final_runner_signal and runner_score >= 10 and runner_safety_guclu and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
+                        if final_runner_signal and runner_score >= 9 and runner_safety_guclu and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
                             guclu_gir = True
 
                         if fast_decision == "GUCLU GIR":
@@ -2927,7 +2929,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V12 | total={stats.get('radar',0)} "
+                    f"RADAR V12.4 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2966,7 +2968,7 @@ Yeni giris icin uygun degil."""
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} FAST={stats.get('fast_signal',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
                     f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"
-                    f"RUNNER DIAG: MOM={stats.get('runner_mom',0)} SCORE6={stats.get('runner_score6',0)} HARD_SAFE={stats.get('runner_hard_safe',0)} FINAL={stats.get('runner_final',0)}\n"
+                    f"RUNNER DIAG: MOM={stats.get('runner_mom',0)} SCORE5={stats.get('runner_score5',0)} HARD_SAFE={stats.get('runner_hard_safe',0)} FINAL={stats.get('runner_final',0)}\n"
                     f"RUNNER BLOCKS: {stats.get('runner_blocks',{})}\n"
                     f"RUNNER SAMPLES: {stats.get('runner_samples',[])}\n"
                     f"H1 SMART: limit={MAX_SIGNAL_DROP_1H:.0f}% fails={stats.get('h1_fail_values',[])}"
@@ -3163,7 +3165,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $2K-$20K, Liquidity $600+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V12.2: RUNNER DIAGNOSTIC + RUNNER UNLOCK + HARD SAFETY + LIVE SOCIAL/PROFILE + WIDE RUNNER + DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $2K-$20K, Liquidity $600+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V12.4: RUNNER SOFT + FRESHNESS FIX + RUNNER DIAGNOSTIC + RUNNER UNLOCK + HARD SAFETY + LIVE SOCIAL/PROFILE + WIDE RUNNER + DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
