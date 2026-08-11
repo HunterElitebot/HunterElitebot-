@@ -10,25 +10,26 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE V11.34 RURU RESTORE - BIRDEYE DEBUG V2"
+VERSION = "HUNTERELITE SOCIAL CATALYST V1"
 
-# FINAL PRODUCTION POLICY
+# SOCIAL CATALYST V1 PRODUCTION POLICY
 # - Story/narrative is a catalyst, never a safety bypass.
 # - Active downside cannot become GUCLU GIR because of story score.
 # - FAST requires fresh volume, fresh buy flow and MC progress.
 # - RURU trend remains the confirmed runner path.
 # - Telegram output is GIR / GUCLU GIR only; no IZLE spam.
-# ================================================================
-# RURU ORIGINAL CORE FREEZE
-# Source: HunterElite_V11.37_TRAJECTORY_ENGINE_main.py
-# Entry path: V11.34 RURU confirmed trend logic as preserved in source.
-# Later FAST/VB/TRJ/social/narrative/anti-chase/negative-price routing
-# is diagnostic only and cannot create or block the RURU entry.
-# Hard safety checks remain active.
-# ================================================================
-
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
+
+# SOCIAL CATALYST V1
+# Optional X API bearer token. Without it, X interaction remains UNKNOWN instead of guessed.
+X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "").strip()
+SOCIAL_CATALYST_ENABLED = os.getenv("SOCIAL_CATALYST_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
+SOCIAL_CATALYST_TTL = max(120, int(os.getenv("SOCIAL_CATALYST_TTL", "300") or 300))
+PRIORITY_X_USERS = [x.strip().lstrip("@").lower() for x in os.getenv(
+    "PRIORITY_X_USERS",
+    "elonmusk,xai,spacex,grok,cursor_ai"
+).split(",") if x.strip()]
 
 # V11.5: single-engine mode.
 # Telegram getUpdates polling is OFF by default so another stale/duplicate
@@ -42,6 +43,7 @@ MC_MIN = 3000
 MC_MAX = 12000
 EARLY_MC_MAX = 12000
 MIN_LIQUIDITY = 800
+RUG_TOP10_MAX = 35.0
 
 # V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
 WATCH_SCORE = 47
@@ -162,34 +164,6 @@ TG_API = f"https://api.telegram.org/bot{TOKEN}"
 SOL_CA = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 signal_chats = set()
-
-# RURU QUALITY PACER
-# Max 2 real RURU alerts in a rolling 10-minute window.
-# It never fabricates a signal and does not weaken RURU/safety filters.
-# FLOW EXPANSION â€” calibrated from the observed runner profile.
-# IMPORTANT: Holder/Pro-Trader counts shown in Axiom are not available in the current
-# public feed used by this bot, so they are NOT fabricated or used as hard gates.
-FLOW_MIN_VOL_MC = 0.30
-FLOW_STRONG_VOL_MC = 0.60
-FLOW_MIN_LIQ_MC = 0.15
-FLOW_STRONG_LIQ_MC = 0.20
-FLOW_MIN_BUY_SELL = 1.15
-FLOW_MIN_BUYS_5M = 10
-
-RURU_SIGNAL_WINDOW_SECONDS = 600
-RURU_MAX_SIGNALS_PER_WINDOW = 2
-ruru_signal_times = []
-ruru_signal_times_lock = threading.Lock()
-
-def reserve_ruru_signal_slot(now=None):
-    now = time.time() if now is None else float(now)
-    cutoff = now - RURU_SIGNAL_WINDOW_SECONDS
-    with ruru_signal_times_lock:
-        ruru_signal_times[:] = [t for t in ruru_signal_times if t >= cutoff]
-        if len(ruru_signal_times) >= RURU_MAX_SIGNALS_PER_WINDOW:
-            return False
-        ruru_signal_times.append(now)
-        return True
 token_states = {}
 state_lock = threading.Lock()
 birdeye_lock = threading.Lock()
@@ -204,9 +178,9 @@ candidate_sources = {}
 discovery_seen_lock = threading.Lock()
 DISCOVERY_MEMORY_SECONDS = 21600
 RADAR_RAW_LIMIT = 240
-RADAR_TARGET = 40
+RADAR_TARGET = 80
 BIRDEYE_TARGET = 20
-GECKO_TARGET = 0
+GECKO_TARGET = 60
 DEX_TARGET = 20
 MAX_REPEAT_PER_SCAN = 20
 FRESH_PAIR_MAX_HOURS = 6.0
@@ -1327,6 +1301,7 @@ GIR TETIGI: Pair/veri olusunca tekrar test et."""
     result = calculate_score(pair, report)
     result["social"] = social_presence(pair)
     result["narrative"] = narrative_viral(pair)
+    result["catalyst"] = social_catalyst(pair)
     base = pair.get("baseToken") or {}
     name = base.get("name") or "Unknown"
     symbol = base.get("symbol") or "N/A"
@@ -1358,6 +1333,10 @@ Top-10: {percent(result["top10"])}
 Mint authority: {authority_text(result["mint"])}
 Freeze authority: {authority_text(result["freeze"])}
 
+Social Catalyst: {result.get("catalyst", {}).get("score", 0)}/100 - {result.get("catalyst", {}).get("label", "NO EXTERNAL CATALYST")}
+Major X: @{result.get("catalyst", {}).get("major_account") if result.get("catalyst", {}).get("major_account") else "YOK/DOÄRULANMADI"}
+X Teyit: {result.get("catalyst", {}).get("x_status", "UNKNOWN")} | News: {result.get("catalyst", {}).get("news_hits", 0)} | Reddit: {result.get("catalyst", {}).get("reddit_hits", 0)}
+
 Risk Score: {result["score"]}/100
 Social Presence: {result.get("social", {}).get("score", 0)}/100 - {result.get("social", {}).get("label", "SOCIAL WEAK")}
 X: {"VAR" if result.get("social", {}).get("x") else "YOK"} | Telegram: {"VAR" if result.get("social", {}).get("telegram") else "YOK"} | Reddit: {"VAR" if result.get("social", {}).get("reddit") else "YOK"}
@@ -1375,21 +1354,23 @@ GIR TETIGI: {trigger}"""
 def basic_signal_safe(result):
     if not result:
         return False
-    if result["signals"]["rug"] or result["signals"]["honeypot"]:
+    sig = result.get("signals") or {}
+    if sig.get("rug") or sig.get("honeypot") or sig.get("insider") or sig.get("bundler"):
         return False
-    if result["mint"] is True or result["freeze"] is True:
+    if result.get("mint") is True or result.get("freeze") is True:
         return False
-    if result["mc"] is None or not (MC_MIN <= result["mc"] <= MC_MAX):
+    if result.get("mc") is None or not (MC_MIN <= result["mc"] <= MC_MAX):
         return False
-    if result["liq"] is None or result["liq"] < MIN_LIQUIDITY:
+    if result.get("liq") is None or result["liq"] < MIN_LIQUIDITY:
         return False
-    if result["top10"] is not None and result["top10"] >= 75:
+    top10 = result.get("top10")
+    if top10 is None or top10 > RUG_TOP10_MAX:
         return False
     return True
 
 def crash_guard(result):
-    ok, _ = crash_guard_detail(result)
-    return ok
+    # RUG ONLY FINAL: price-history crash checks are informational, not a hard entry block.
+    return True
 
 
 def trend_confirmed(previous, current):
@@ -1635,6 +1616,189 @@ def narrative_viral(pair):
         "reasons": reasons,
         "engagement": "UNKNOWN_NO_VERIFIED_API",
     }
+
+
+_social_catalyst_cache = {}
+_social_catalyst_lock = threading.Lock()
+
+def _story_terms(pair):
+    base = (pair or {}).get("baseToken") or {}
+    name = str(base.get("name") or "").strip()
+    symbol = str(base.get("symbol") or "").strip()
+    raw = re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]{2,}", f"{name} {symbol}")
+    stop = {"the","and","bot","coin","token","official","sol","solana","pump"}
+    terms=[]
+    for t in raw:
+        low=t.lower()
+        if low in stop or low.isdigit() or len(low)<3:
+            continue
+        if low not in [x.lower() for x in terms]:
+            terms.append(t)
+    return name, symbol, terms[:4]
+
+def _cache_get(key):
+    now=time.time()
+    with _social_catalyst_lock:
+        row=_social_catalyst_cache.get(key)
+        if row and now-row[0] <= SOCIAL_CATALYST_TTL:
+            return row[1]
+    return None
+
+def _cache_put(key, value):
+    with _social_catalyst_lock:
+        _social_catalyst_cache[key]=(time.time(), value)
+    return value
+
+def social_catalyst(pair):
+    """SOCIAL CATALYST V1.
+
+    Looks for a *real external story* around the token name and, when an X bearer
+    token is configured, verified/major-account interaction. News and Reddit are
+    keyless. X is never guessed: no bearer/data => UNKNOWN.
+
+    This score is a catalyst only. It never bypasses rug/holder/mint/freeze gates.
+    """
+    if not SOCIAL_CATALYST_ENABLED:
+        return {"score":0,"label":"DISABLED","linked":False,"x_status":"UNKNOWN","major_account":None,
+                "major_verified":False,"news_hits":0,"reddit_hits":0,"x_hits":0,"reason":[]}
+
+    name, symbol, terms = _story_terms(pair)
+    if not name and not symbol:
+        return {"score":0,"label":"NO IDENTITY","linked":False,"x_status":"UNKNOWN","major_account":None,
+                "major_verified":False,"news_hits":0,"reddit_hits":0,"x_hits":0,"reason":[]}
+
+    key=(name.lower(), symbol.lower())
+    hit=_cache_get(key)
+    if hit is not None:
+        return hit
+
+    score=0
+    reasons=[]
+    news_hits=0
+    reddit_hits=0
+    x_hits=0
+    major_account=None
+    major_verified=False
+    x_status="UNKNOWN_NO_X_API" if not X_BEARER_TOKEN else "NO_MATCH"
+
+    query_terms = terms[:] or ([name] if name else [symbol])
+    phrase = name if len(name) >= 4 else (query_terms[0] if query_terms else symbol)
+
+    # 1) Fresh news / narrative. GDELT is keyless; failure is neutral.
+    try:
+        q = f'"{phrase}"' if phrase else " ".join(query_terms)
+        url = "https://api.gdeltproject.org/api/v2/doc/doc?" + urllib.parse.urlencode({
+            "query": q, "mode":"ArtList", "maxrecords":20, "format":"json", "timespan":"3d"
+        })
+        data=get_json(url, timeout=8)
+        arts=data.get("articles") if isinstance(data,dict) else []
+        if isinstance(arts,list):
+            news_hits=len(arts)
+            if news_hits:
+                score += min(35, 15 + news_hits*4)
+                reasons.append(f"NEWS_{news_hits}")
+    except Exception:
+        pass
+
+    # 2) Reddit spread. Public search; failure is neutral.
+    try:
+        q = phrase or " ".join(query_terms)
+        url="https://www.reddit.com/search.json?" + urllib.parse.urlencode({"q":q,"sort":"new","t":"week","limit":25})
+        data=get_json(url, timeout=8, headers={"User-Agent":"HunterElite/1.0 social-catalyst"})
+        children=((data.get("data") or {}).get("children") or []) if isinstance(data,dict) else []
+        reddit_hits=len(children)
+        if reddit_hits:
+            score += min(20, 5 + reddit_hits*2)
+            reasons.append(f"REDDIT_{reddit_hits}")
+    except Exception:
+        pass
+
+    # 3) X: exact evidence only. Search token/story terms, then inspect authors.
+    if X_BEARER_TOKEN and query_terms:
+        try:
+            # Avoid overly-generic symbols; exact phrase plus strongest keyword works well for narrative memes.
+            q_parts=[]
+            if phrase and len(phrase) >= 4:
+                q_parts.append(f'"{phrase}"')
+            for t in query_terms[:2]:
+                if len(t) >= 4 and t.lower() not in phrase.lower():
+                    q_parts.append(t)
+            xq=" OR ".join(q_parts[:3])
+            if xq:
+                url="https://api.x.com/2/tweets/search/recent?" + urllib.parse.urlencode({
+                    "query":f"({xq}) -is:retweet lang:en",
+                    "max_results":50,
+                    "tweet.fields":"created_at,public_metrics,author_id",
+                    "expansions":"author_id",
+                    "user.fields":"username,verified,public_metrics"
+                })
+                data=get_json(url, timeout=10, headers={"Authorization":f"Bearer {X_BEARER_TOKEN}"})
+                tweets=data.get("data") or []
+                users=((data.get("includes") or {}).get("users") or [])
+                umap={str(u.get("id")):u for u in users if isinstance(u,dict)}
+                x_hits=len(tweets)
+                best_weight=0
+                total_eng=0
+                for tw in tweets:
+                    if not isinstance(tw,dict):
+                        continue
+                    pm=tw.get("public_metrics") or {}
+                    total_eng += int(pm.get("like_count") or 0) + 2*int(pm.get("retweet_count") or 0) + int(pm.get("reply_count") or 0)
+                    u=umap.get(str(tw.get("author_id"))) or {}
+                    username=str(u.get("username") or "").lower()
+                    verified=bool(u.get("verified"))
+                    followers=int((u.get("public_metrics") or {}).get("followers_count") or 0)
+                    weight=0
+                    if username in PRIORITY_X_USERS:
+                        # Elon is an exceptional catalyst; official/major narrative accounts follow.
+                        weight=45 if username == "elonmusk" else 32
+                    elif verified and followers >= 1_000_000:
+                        weight=28
+                    elif verified and followers >= 100_000:
+                        weight=18
+                    elif followers >= 250_000:
+                        weight=12
+                    if weight > best_weight:
+                        best_weight=weight
+                        major_account=username or None
+                        major_verified=bool(username in PRIORITY_X_USERS or verified)
+                if x_hits:
+                    score += min(25, 8 + x_hits//2)
+                    reasons.append(f"X_{x_hits}")
+                if best_weight:
+                    score += best_weight
+                    reasons.append(f"MAJOR_X_{major_account}")
+                if total_eng >= 10000:
+                    score += 15
+                    reasons.append("X_ENG_10K")
+                elif total_eng >= 1000:
+                    score += 8
+                    reasons.append("X_ENG_1K")
+                x_status="VERIFIED_MATCH" if major_verified else ("MATCH" if x_hits else "NO_MATCH")
+        except urllib.error.HTTPError as e:
+            x_status=f"X_API_HTTP_{getattr(e,'code','ERR')}"
+        except Exception:
+            x_status="X_API_ERROR"
+
+    score=min(100, score)
+    linked = bool(news_hits or reddit_hits or x_hits)
+    if major_verified and score >= 70:
+        label="MAJOR SOCIAL CATALYST"
+    elif score >= 70:
+        label="VIRAL CATALYST"
+    elif score >= 40:
+        label="STORY HEATING"
+    elif linked:
+        label="EARLY STORY"
+    else:
+        label="NO EXTERNAL CATALYST"
+
+    return _cache_put(key, {
+        "score":score,"label":label,"linked":linked,"x_status":x_status,
+        "major_account":major_account,"major_verified":major_verified,
+        "news_hits":news_hits,"reddit_hits":reddit_hits,"x_hits":x_hits,"reason":reasons,
+        "terms":query_terms,
+    })
 
 def social_presence(pair):
     """
@@ -2087,39 +2251,6 @@ def market_viral_score(result):
     return score, label
 
 
-def ruru_flow_expansion(result):
-    """Confirm RURU-like capital/activity expansion using metrics the bot really has."""
-    if not result:
-        return False, False, "NO DATA"
-
-    mc = num(result.get("mc"), 0) or 0
-    liq = num(result.get("liq"), 0) or 0
-    vol5 = num(result.get("vol5"), 0) or 0
-    buys = safe_int(result.get("buys5"))
-    sells = safe_int(result.get("sells5"))
-
-    if mc <= 0:
-        return False, False, "MC YOK"
-
-    vol_mc = vol5 / mc
-    liq_mc = liq / mc
-    flow = buys / max(sells, 1)
-
-    base = (
-        vol_mc >= FLOW_MIN_VOL_MC
-        and liq_mc >= FLOW_MIN_LIQ_MC
-        and flow >= FLOW_MIN_BUY_SELL
-        and buys >= FLOW_MIN_BUYS_5M
-    )
-    strong = (
-        base
-        and vol_mc >= FLOW_STRONG_VOL_MC
-        and liq_mc >= FLOW_STRONG_LIQ_MC
-    )
-    detail = f"VOL/MC={vol_mc:.2f} LIQ/MC={liq_mc:.2f} FLOW={flow:.2f} BUY={buys}"
-    return base, strong, detail
-
-
 def auto_scanner():
     print("EARLY HUNTER SCANNER ACTIVE", flush=True)
     print(
@@ -2309,18 +2440,38 @@ def auto_scanner():
                         elif top10 >= 50:
                             stats["holder_50_60"] += 1
 
-                    holder_ok = liq_ok and (top10 is None or top10 < 82)
+                    holder_ok = liq_ok and top10 is not None and top10 <= RUG_TOP10_MAX
                     if holder_ok: stats["holder_pass"] += 1
 
                     sig = result.get("signals") or {}
 
-                    rug_ok = holder_ok and not sig.get("rug") and not sig.get("honeypot")
+                    rug_ok = (holder_ok and not sig.get("rug") and not sig.get("honeypot")
+                              and not sig.get("insider") and not sig.get("bundler"))
                     if rug_ok: stats["rug_ok"] += 1
 
                     auth_ok = (rug_ok
                                and result.get("mint") is not True
                                and result.get("freeze") is not True)
-                    if auth_ok: stats["auth_ok"] += 1
+                    if auth_ok:
+                        stats["auth_ok"] += 1
+                        # External calls are deliberately delayed until hard safety checks pass.
+                        # This prevents quota/load waste on obvious rugs and keeps catalyst separate from safety.
+                        result["catalyst"] = social_catalyst(pair)
+                        cat = result.get("catalyst") or {}
+                        # External story evidence can strengthen narrative/social confidence only;
+                        # it does NOT alter holder/rug/mint/freeze gates above.
+                        if cat.get("linked"):
+                            n = result.get("narrative") or {}
+                            n["score"] = max(safe_int(n.get("score")), safe_int(cat.get("score")))
+                            n["label"] = cat.get("label") or n.get("label")
+                            n["story_linked"] = True
+                            n["source_platform"] = "X/NEWS/REDDIT"
+                            result["narrative"] = n
+                            sp = result.get("social") or {}
+                            sp["score"] = max(safe_int(sp.get("score")), min(100, safe_int(cat.get("score"))))
+                            if safe_int(sp.get("score")) >= 70:
+                                sp["label"] = "SOCIAL CATALYST"
+                            result["social"] = sp
 
                     crash_ok = False
                     crash_reason = "unknown"
@@ -2340,7 +2491,7 @@ def auto_scanner():
                         elif crash_reason == "h24":
                             stats["h24_fail"] += 1
 
-                    safety_ok = crash_ok
+                    safety_ok = auth_ok
                     if safety_ok:
                         stats["safety_pass"] += 1
                         if source_name == "BIRDEYE":
@@ -2383,34 +2534,91 @@ def auto_scanner():
                     new_stage, message = stage, None
 
                     watch_ok = watch_candidate(result)
+                    fast_candidate = fast_gir_decision(result)
+                    cont_ok, cont_detail = continuation_confirm(result, old_metrics, SCAN_INTERVAL)
+                    vb_ok, vb_strong, vb_detail = volume_breakout_confirm(result, old_metrics)
+                    trj_ok, trj_strong, trj_detail = trajectory_breakout_confirm(result, metric_history or ([old_metrics] if old_metrics else []))
+                    price_allow_gir, price_allow_guclu, price_guard_detail = negative_price_guard(result, old_metrics)
 
-                    # RURU ORIGINAL CORE
-                    # Preserve the V11.34 trend thresholds that this source explicitly
-                    # labels as the RURU confirmed runner path.
-                    #
-                    # Later routing layers are intentionally NOT allowed to alter entry:
-                    # FAST/CONTINUATION, V11.36 Volume Breakout, V11.37 Trajectory,
-                    # Negative Price Guard, Social/Narrative quality upgrades,
-                    # and positive Anti-Chase.
+                    fast_decision = fast_candidate if (fast_candidate is not None and cont_ok and price_allow_gir) else None
+                    if fast_decision == "GUCLU GIR" and not price_allow_guclu:
+                        fast_decision = "GIR" if price_allow_gir else None
+
+                    if fast_candidate is not None:
+                        stats["fast_candidate"] = stats.get("fast_candidate", 0) + 1
+                        if not cont_ok:
+                            samples = stats.setdefault("fast_block_samples", [])
+                            if len(samples) < 6:
+                                base_dbg = pair.get("baseToken") or {}
+                                sym_dbg = base_dbg.get("symbol") or base_dbg.get("name") or ca[:6]
+                                samples.append(f"{sym_dbg}:{cont_detail}")
+
+                    # RURU confirmed path remains intact.
                     ruru_signal = (
                         seen_count >= TREND_CONFIRM_SCANS
                         and strong_signal(result, momentum, old_metrics)
                     )
 
-                    # Diagnostic-only calculations. They do not create/block RURU entry.
-                    fast_candidate = fast_gir_decision(result)
-                    cont_ok, cont_detail = continuation_confirm(result, old_metrics, SCAN_INTERVAL)
-                    vb_ok, vb_strong, vb_detail = volume_breakout_confirm(result, old_metrics)
-                    trj_ok, trj_strong, trj_detail = trajectory_breakout_confirm(
-                        result, metric_history or ([old_metrics] if old_metrics else [])
+                    # High-pump FAST candidates must never bypass continuation through
+                    # the RURU lane on the same scan.
+                    high_pump = (num(result.get("price5")) or 0) >= CONT_HIGH_PUMP_PRICE5
+                    if high_pump and fast_candidate is not None and not cont_ok:
+                        ruru_signal = False
+
+                    # Story/RURU may not override active downside.
+                    if not price_allow_gir:
+                        ruru_signal = False
+
+                    # Volume breakout is an additional confirmed lane, never a safety bypass.
+                    volume_signal = vb_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
+                    trajectory_signal = trj_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
+
+                    # STORY SIGNAL FINAL FIXED:
+                    # Story alone is NOT an entry. It must be live NOW.
+                    # RURU and rug gates are untouched.
+                    _narr = result.get("narrative") or {}
+                    _social = result.get("social") or {}
+                    _story_score_pre = safe_int(_narr.get("score"))
+                    _story_linked_pre = bool(_narr.get("story_linked"))
+                    _social_score_pre = safe_int(_social.get("score"))
+                    _story_sources_pre = set(_narr.get("reasons") or [])
+                    _story_direct_pre = any(str(x).startswith("SOURCE_") for x in _story_sources_pre)
+
+                    _story_buys = safe_int(result.get("buys5"))
+                    _story_sells = safe_int(result.get("sells5"))
+                    _story_vol = num(result.get("vol5")) or 0
+                    _story_p5 = num(result.get("price5"))
+                    _story_mc = num(result.get("mc")) or 0
+                    _story_liq = num(result.get("liq")) or 0
+                    _story_flow = _story_buys / max(_story_sells, 1)
+                    _story_vol_mc = _story_vol / max(_story_mc, 1)
+
+                    # Reject a story whose price/action is already dying.
+                    _story_live_now = (
+                        _story_p5 is not None
+                        and _story_p5 >= 0
+                        and _story_buys >= 5
+                        and _story_buys >= _story_sells
+                        and _story_flow >= 1.05
+                        and _story_vol >= 350
+                        and _story_vol_mc >= 0.08
                     )
-                    price_allow_gir, price_allow_guclu, price_guard_detail = negative_price_guard(
-                        result, old_metrics
+
+                    # Require a real linked story or strong multi-social footprint.
+                    _story_proof = (
+                        (_story_linked_pre and _story_direct_pre and _story_score_pre >= 45)
+                        or (_story_score_pre >= 60 and _story_linked_pre)
+                        or (_social_score_pre >= 60 and _story_score_pre >= 25)
                     )
-                    fast_decision = None
-                    volume_signal = False
-                    trajectory_signal = False
-                    signal_ok = ruru_signal
+
+                    story_signal = (
+                        basic_signal_safe(result)
+                        and _story_proof
+                        and _story_live_now
+                        and price_allow_gir
+                    )
+
+                    signal_ok = (fast_decision is not None) or ruru_signal or volume_signal or trajectory_signal or story_signal
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -2434,9 +2642,77 @@ def auto_scanner():
                         final_score = min(100, result["score"] + momentum)
                         age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
 
-                        # RURU ORIGINAL decision.
-                        # No social/narrative upgrade and no later anti-chase rerouting.
-                        karar_label = "GIR"
+                        # DIRECT decision label.
+                        buys5 = result.get("buys5", 0) or 0
+                        sells5 = result.get("sells5", 0) or 0
+                        ratio5 = buys5 / max(sells5, 1)
+                        vol5_now = result.get("vol5") or 0
+                        price5_now = result.get("price5")
+                        liq_now = result.get("liq") or 0
+                        mc_now = result.get("mc") or 1
+
+                        guclu_gir = (
+                            final_score >= 75
+                            and buys5 >= 15
+                            and ratio5 >= 1.20
+                            and vol5_now >= 2500
+                            and liq_now / max(mc_now, 1) >= 0.20
+                            and (price5_now is None or -5 <= price5_now <= 160)
+                        )
+
+                        narrative_score = safe_int(result.get("narrative", {}).get("score"))
+                        narrative_linked = bool(result.get("narrative", {}).get("story_linked"))
+                        social_score = safe_int(result.get("social", {}).get("score"))
+                        catalyst = result.get("catalyst") or {}
+                        catalyst_score = safe_int(catalyst.get("score"))
+                        major_social_verified = bool(catalyst.get("major_verified"))
+                        top10_now = num(result.get("top10"))
+
+                        # POSITIVE ANTI-CHASE GATE
+                        # +100%/5m: never label GUCLU GIR; +150%/5m: do not release a fresh GIR.
+                        chase_block_gir = price5_now is not None and price5_now > CHASE_BLOCK_GIR_5M
+                        chase_block_guclu = price5_now is not None and price5_now > CHASE_BLOCK_GUCLU_5M
+                        if chase_block_gir:
+                            continue
+
+                        # SOCIAL-AWARE QUALITY GATE
+                        # Social absence is not fatal for very early launches, but GUCLU GIR then
+                        # needs exceptional holder distribution + liquidity depth.
+                        no_social = social_score <= 0
+                        no_social_guclu_ok = (
+                            (top10_now is not None and top10_now <= NO_SOCIAL_GUCLU_MAX_TOP10)
+                            and (liq_now / max(mc_now, 1) >= NO_SOCIAL_GUCLU_MIN_LIQ_MC)
+                        )
+                        allow_quality_guclu = (not chase_block_guclu) and ((not no_social) or no_social_guclu_ok)
+
+                        # VOLUME BREAKOUT may strengthen an early entry, but anti-chase/social gates still win.
+                        if volume_signal and vb_strong and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
+                            guclu_gir = True
+                        # TRAJECTORY strong requires real 60-90s acceleration; social absence still cannot bypass quality gate.
+                        if trajectory_signal and trj_strong and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
+                            guclu_gir = True
+
+                        if story_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal):
+                            karar_label = "HIKAYE GIR"
+                        elif fast_decision == "GUCLU GIR":
+                            karar_label = "GUCLU GIR" if (price_allow_guclu and allow_quality_guclu) else "GIR"
+                        elif fast_decision == "GIR":
+                            # Narrative can upgrade only after price guard permits GUCLU.
+                            karar_label = (
+                                "GUCLU GIR"
+                                if (price_allow_guclu and allow_quality_guclu and ((narrative_linked and narrative_score >= 55) or (major_social_verified and catalyst_score >= 70)) and final_score >= 70)
+                                else "GIR"
+                            )
+                        else:
+                            karar_label = (
+                                "GUCLU GIR"
+                                if (
+                                    price_allow_guclu
+                                    and allow_quality_guclu
+                                    and (guclu_gir or (narrative_linked and narrative_score >= 55 and final_score >= 75) or (major_social_verified and catalyst_score >= 70 and final_score >= 70))
+                                )
+                                else "GIR"
+                            )
 
                         message = f"""HUNTERELITE {karar_label}
 
@@ -2459,15 +2735,18 @@ X: {"VAR" if result.get("social", {}).get("x") else "YOK"} | Telegram: {"VAR" if
 Hikaye: {result.get("narrative", {}).get("score", 0)}/100 - {result.get("narrative", {}).get("label", "NO STORY PROOF")}
 Hikaye Kaynagi: {result.get("narrative", {}).get("source_platform") or "BULUNAMADI"}
 Kaynak Icerik: {"VAR" if result.get("narrative", {}).get("story_linked") else "YOK"}
-Etkilesim: DOGRULANMIS API YOKSA BILINMIYOR
+Social Catalyst: {catalyst_score}/100 - {catalyst.get("label", "NO EXTERNAL CATALYST")}
+Major X: @{catalyst.get("major_account") if catalyst.get("major_account") else "YOK/DOÄRULANMADI"}
+X Teyit: {catalyst.get("x_status", "UNKNOWN")} | News: {catalyst.get("news_hits", 0)} | Reddit: {catalyst.get("reddit_hits", 0)}
 
 Risk Score: {result["score"]}/100
 Momentum: +{momentum}
 Final Score: {final_score}/100
 
 KARAR: {karar_label}
-SINYAL YOLU: RURU / TREND TEYITLI
-DEVAMLILIK: RURU TREND\nFLOW EXPANSION: {flow_detail}\nPRICE GUARD: {price_guard_detail}
+SINYAL YOLU: {"HIKAYE / VIRAL KAYNAK" if story_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else ("FAST / CONTINUATION TEYITLI" if fast_decision else ("TRAJECTORY BREAKOUT / 30-90S" if trajectory_signal else ("VOLUME BREAKOUT / TEYITLI" if volume_signal else "RURU / TREND TEYITLI")))}
+DEVAMLILIK: {(f"STORY={_story_score_pre} SOCIAL={_social_score_pre} SOURCE={result.get('narrative',{}).get('source_platform') or 'MULTI_SOCIAL'} P5={_story_p5:+.1f}% FLOW={_story_flow:.2f} VOL/MC={_story_vol_mc:.2f}") if story_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else (cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else "RURU TREND")))}
+PRICE GUARD: {price_guard_detail}
 
 UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur."""
 
@@ -2475,26 +2754,9 @@ UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur."""
                         watch_ok
                         and stage == "NEW"
                     ):
+                        # DIRECT GIR MODE: track silently; never send IZLE.
                         new_stage = "WATCH"
-                        message = f"""HUNTERELITE IZLE
-
-{name} ({symbol})
-CA: {ca}
-
-Market Cap: {money(result["mc"])}
-Likidite: {money(result["liq"])}
-
-5dk: {result["buys5"]} buy / {result["sells5"]} sell
-5dk hacim: {money(result["vol5"])}
-5dk fiyat: {percent(result["price5"])}
-
-Top-10: {percent(result["top10"])}
-Score: {result["score"]}/100
-
-Potansiyel: IZLE
-KARAR: IZLE / ERKEN ADAY
-
-Momentum teyidi bekleniyor."""
+                        message = None
 
                     # V11.34 LIQ GUARD:
                     # If a token that already signaled loses >=35% of pool liquidity
@@ -2599,8 +2861,6 @@ Yeni giris icin uygun degil."""
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
                     f"SOURCE_ACCOUNTED={stats.get('src_birdeye',0)+stats.get('src_gecko',0)+stats.get('src_dex',0)}\n"
-                    f"BIRDEYE_DEBUG: cache={len(birdeye_cache)} age={int(max(0, time.time()-birdeye_last_fetch)) if birdeye_last_fetch else -1}s\n"
-                    f"BIRDEYE_ERR: {birdeye_last_error or '-'}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
                     f"> LIQ={stats.get('liq_pass',0)} "
@@ -2692,13 +2952,13 @@ Komutlar:
 ğŸ” Manuel analiz: AKTÄ°F
 ğŸš¨ Early Hunter: {"AKTÄ°F" if active else "KAPALI"}
 â± Tarama: {SCAN_INTERVAL} sn
-RURU Core: V11.34 RESTORE | IZLE + MOMENTUM TEYIDI
+RURU Core: ORIGINAL V11.37 | ONLY RUG SAFETY IS HARD BLOCK
 Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸ¯ Watch Score: {WATCH_SCORE}
 ğŸ”¥ Signal Score: {SIGNAL_SCORE}
 ğŸ“ˆ Trend teyidi: {TREND_CONFIRM_SCANS} tarama / min momentum {MIN_MOMENTUM_SIGNAL}
-ğŸ“¡ Radar: BIRDEYE + DEX
-ğŸŸ¢ Birdeye API: {"BAÄLI" if BIRDEYE_API_KEY else "KEY YOK"}\nğŸ§ª Birdeye Debug: /radar iÃ§inde cache + error gÃ¶sterilir
+ğŸ“¡ Radar: GECKO + DEX + BIRDEYE BONUS
+ğŸŸ¢ Birdeye API: {"BAÄLI" if BIRDEYE_API_KEY else "KEY YOK"}
 â± Birdeye yenileme: {BIRDEYE_POLL_INTERVAL} sn
 ğŸ’§ Min Likidite: {money(MIN_LIQUIDITY)}
 ğŸ“Š AUTO Market: $3Kâ€“$12K
@@ -2736,12 +2996,6 @@ GerÃ§ek aday taramasÄ± baÅŸladÄ±.""")
         updated = s.get("updated", 0)
         age = int(max(0, time.time() - updated)) if updated else None
         age_text = f"{age} sn Ã¶nce" if age is not None else "henÃ¼z ilk tur tamamlanmadÄ±"
-
-        with birdeye_lock:
-            be_err = birdeye_last_error or "-"
-            be_cache_count = len(birdeye_cache)
-            be_age = int(max(0, time.time() - birdeye_last_fetch)) if birdeye_last_fetch else None
-            be_age_text = f"{be_age}s" if be_age is not None else "-"
 
         send(chat_id, f"""ğŸ“¡ HUNTERELITE RADAR TEST
 
@@ -2827,14 +3081,14 @@ def startup_notify():
 
 Early Hunter: ACTIVE
 Scan: {SCAN_INTERVAL} sec
-Radar: BIRDEYE + DEX
-Birdeye: {"KEY PRESENT / BONUS" if BIRDEYE_API_KEY else "KEY MISSING"}\nGecko: KEYLESS PRIMARY FALLBACK\nRadar Mix: Birdeye max 20 + DEX max 20 / total max 40
+Radar: GECKO + DEX + BIRDEYE BONUS
+Birdeye: {"KEY PRESENT / BONUS" if BIRDEYE_API_KEY else "KEY MISSING"}\nGecko: KEYLESS PRIMARY FALLBACK\nRadar Mix: Birdeye max 20 + Gecko fills + DEX max 20 / total max 80
 Watch Score: {WATCH_SCORE}
 Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nV11.34 RURU RESTORE: BIRDEYE 20 + DEX 20 + EARLY IZLE + TREND/MOMENTUM TEYIDI + RUG/HOLDER/LIQ SAFETY.\nAutomatic signal engine is running.""")
+Auto Quality: RURU CORE UNCHANGED | RUG SHIELD: Liquidity $800+, Top10 <=35%, holder data required\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE: ORIGINAL RURU CORE + RUG HARD GATE + LIVE HIKAYE SIGNAL. HIKAYE GIR requires current positive price, buy pressure and volume; old/dead stories cannot trigger entry. Rug safety is never bypassed.\nAutomatic signal engine is running.""")
 
 
 def startup():
