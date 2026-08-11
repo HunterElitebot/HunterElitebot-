@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE V11.34 RURU RESTORE - BIRDEYE DEBUG"
+VERSION = "HUNTERELITE V11.34 RURU RESTORE - BIRDEYE DEBUG V2"
 
 # FINAL PRODUCTION POLICY
 # - Story/narrative is a catalyst, never a safety bypass.
@@ -2599,6 +2599,8 @@ Yeni giris icin uygun degil."""
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
                     f"SOURCE_ACCOUNTED={stats.get('src_birdeye',0)+stats.get('src_gecko',0)+stats.get('src_dex',0)}\n"
+                    f"BIRDEYE_DEBUG: cache={len(birdeye_cache)} age={int(max(0, time.time()-birdeye_last_fetch)) if birdeye_last_fetch else -1}s\n"
+                    f"BIRDEYE_ERR: {birdeye_last_error or '-'}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
                     f"> LIQ={stats.get('liq_pass',0)} "
