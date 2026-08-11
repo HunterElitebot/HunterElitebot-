@@ -95,6 +95,22 @@ CONT_MIN_FLOW_RATIO = 1.10
 CONT_HIGH_PUMP_PRICE5 = 80.0
 CONT_HIGH_PUMP_MIN_MC_PCT = 2.0
 
+# V11.37 TRAJECTORY / ACCELERATION ENGINE
+# The edge over static Axiom filters: compare 30/60/90s snapshots and detect acceleration.
+TRJ_MIN_TICKS = 2
+TRJ_STRONG_TICKS = 3
+TRJ_MIN_MC_PCT = 4.0
+TRJ_STRONG_MC_PCT = 9.0
+TRJ_MIN_VOL_DELTA = 500
+TRJ_STRONG_VOL_DELTA = 1400
+TRJ_MIN_BUY_DELTA = 4
+TRJ_STRONG_BUY_DELTA = 10
+TRJ_MIN_FLOW = 1.12
+TRJ_STRONG_FLOW = 1.28
+TRJ_MIN_VOL_MC = 0.22
+TRJ_STALL_MC_PCT = 1.0
+TRJ_MAX_HISTORY = 3
+
 # V11.36 VOLUME BREAKOUT ENGINE
 # Detect early volume expansion that is actually translating into price/MC progress.
 VB_MIN_VOL_MC = 0.35
@@ -1827,6 +1843,50 @@ def volume_breakout_confirm(result, previous):
     return ok, strong, f"VB VOL/MC={vol_mc:.2f} VOL+{vol_delta:.0f} BUY+{buy_delta} SELL+{sell_delta} FLOW={flow:.2f} MC={mc_pct:+.1f}%"
 
 
+
+def trajectory_breakout_confirm(result, history):
+    """V11.37: detect 30-90s acceleration that a static screener cannot see."""
+    if not result or not history:
+        return False, False, "TRJ_FIRST_TICK"
+    snaps = [x for x in history[-TRJ_MAX_HISTORY:] if isinstance(x, dict)]
+    if not snaps:
+        return False, False, "TRJ_NO_HISTORY"
+    base = snaps[0]
+    mc = num(result.get("mc")); old_mc = num(base.get("mc"))
+    vol = num(result.get("vol5"), 0) or 0; old_vol = num(base.get("vol5"), 0) or 0
+    buys = safe_int(result.get("buys5")); old_buys = safe_int(base.get("buys5"))
+    sells = safe_int(result.get("sells5")); old_sells = safe_int(base.get("sells5"))
+    price5 = num(result.get("price5"))
+    if mc is None or old_mc is None or mc <= 0 or old_mc <= 0:
+        return False, False, "TRJ_MC_MISSING"
+    mc_pct = ((mc-old_mc)/old_mc)*100.0
+    vol_delta = max(0.0, vol-old_vol)
+    buy_delta = max(0, buys-old_buys); sell_delta=max(0, sells-old_sells)
+    flow = buy_delta/max(sell_delta,1)
+    vol_mc = vol/mc
+    # acceleration: newest 30s leg should not be weaker than the older leg on both MC and buys
+    last = snaps[-1]
+    last_mc = num(last.get("mc")); last_buys=safe_int(last.get("buys5")); last_vol=num(last.get("vol5"),0) or 0
+    leg_mc = ((mc-last_mc)/last_mc)*100.0 if last_mc and last_mc>0 else 0.0
+    leg_buy = max(0, buys-last_buys); leg_vol=max(0.0,vol-last_vol)
+    ticks = min(len(snaps)+1, TRJ_MAX_HISTORY+1)
+    # reject turnover without progress, seller-dominated expansion, or chase zone
+    if mc_pct < TRJ_STALL_MC_PCT and vol_delta >= TRJ_MIN_VOL_DELTA:
+        return False, False, f"TRJ_STALL MC={mc_pct:+.1f}% VOL+{vol_delta:.0f}"
+    if flow < TRJ_MIN_FLOW:
+        return False, False, f"TRJ_FLOW {flow:.2f}"
+    if price5 is not None and price5 > CHASE_BLOCK_GIR_5M:
+        return False, False, f"TRJ_CHASE {price5:+.1f}%"
+    ok=(ticks>=TRJ_MIN_TICKS and mc_pct>=TRJ_MIN_MC_PCT and vol_delta>=TRJ_MIN_VOL_DELTA and
+        buy_delta>=TRJ_MIN_BUY_DELTA and flow>=TRJ_MIN_FLOW and vol_mc>=TRJ_MIN_VOL_MC and
+        leg_mc>0 and leg_buy>0 and leg_vol>0)
+    strong=(ok and ticks>=TRJ_STRONG_TICKS and mc_pct>=TRJ_STRONG_MC_PCT and
+        vol_delta>=TRJ_STRONG_VOL_DELTA and buy_delta>=TRJ_STRONG_BUY_DELTA and
+        flow>=TRJ_STRONG_FLOW and (price5 is None or price5<=CHASE_BLOCK_GUCLU_5M))
+    return ok,strong,(f"TRJ {ticks}T MC={mc_pct:+.1f}% VOL+{vol_delta:.0f} BUY+{buy_delta} "
+        f"SELL+{sell_delta} FLOW={flow:.2f} LAST_MC={leg_mc:+.1f}% LAST_BUY+{leg_buy}")
+
+
 def strong_signal(result, momentum, previous=None):
     if not basic_signal_safe(result):
         return False
@@ -2237,6 +2297,7 @@ def auto_scanner():
                         previous = token_states.get(ca)
 
                     old_metrics = previous.get("metrics") if previous else None
+                    metric_history = previous.get("history", []) if previous else []
                     liq_drain_safe, liq_drop_pct, liq_drain_level = liquidity_drain_detail(old_metrics, result)
                     result["liq_drop_pct"] = liq_drop_pct
                     result["liq_drain_level"] = liq_drain_level
@@ -2255,6 +2316,7 @@ def auto_scanner():
                     fast_candidate = fast_gir_decision(result)
                     cont_ok, cont_detail = continuation_confirm(result, old_metrics, SCAN_INTERVAL)
                     vb_ok, vb_strong, vb_detail = volume_breakout_confirm(result, old_metrics)
+                    trj_ok, trj_strong, trj_detail = trajectory_breakout_confirm(result, metric_history or ([old_metrics] if old_metrics else []))
                     price_allow_gir, price_allow_guclu, price_guard_detail = negative_price_guard(result, old_metrics)
 
                     fast_decision = fast_candidate if (fast_candidate is not None and cont_ok and price_allow_gir) else None
@@ -2288,7 +2350,8 @@ def auto_scanner():
 
                     # Volume breakout is an additional confirmed lane, never a safety bypass.
                     volume_signal = vb_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
-                    signal_ok = (fast_decision is not None) or ruru_signal or volume_signal
+                    trajectory_signal = trj_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
+                    signal_ok = (fast_decision is not None) or ruru_signal or volume_signal or trajectory_signal
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -2355,6 +2418,9 @@ def auto_scanner():
                         # VOLUME BREAKOUT may strengthen an early entry, but anti-chase/social gates still win.
                         if volume_signal and vb_strong and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
                             guclu_gir = True
+                        # TRAJECTORY strong requires real 60-90s acceleration; social absence still cannot bypass quality gate.
+                        if trajectory_signal and trj_strong and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
+                            guclu_gir = True
 
                         if fast_decision == "GUCLU GIR":
                             karar_label = "GUCLU GIR" if (price_allow_guclu and allow_quality_guclu) else "GIR"
@@ -2404,8 +2470,8 @@ Momentum: +{momentum}
 Final Score: {final_score}/100
 
 KARAR: {karar_label}
-SINYAL YOLU: {"FAST / CONTINUATION TEYITLI" if fast_decision else ("VOLUME BREAKOUT / TEYITLI" if volume_signal else "RURU / TREND TEYITLI")}
-DEVAMLILIK: {cont_detail if fast_decision else (vb_detail if volume_signal else "RURU TREND")}
+SINYAL YOLU: {"FAST / CONTINUATION TEYITLI" if fast_decision else ("TRAJECTORY BREAKOUT / 30-90S" if trajectory_signal else ("VOLUME BREAKOUT / TEYITLI" if volume_signal else "RURU / TREND TEYITLI"))}
+DEVAMLILIK: {cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else "RURU TREND"))}
 PRICE GUARD: {price_guard_detail}
 
 UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur."""
@@ -2466,8 +2532,13 @@ Yeni giris icin uygun degil."""
                         last_sent = now
 
                     with state_lock:
+                        new_history = list(metric_history or [])
+                        if old_metrics:
+                            new_history.append(old_metrics)
+                        new_history = new_history[-TRJ_MAX_HISTORY:]
                         token_states[ca] = {
                             "metrics": result,
+                            "history": new_history,
                             "stage": new_stage,
                             "last_sent": last_sent,
                             "seen": now,
@@ -2607,7 +2678,7 @@ Komutlar:
 ğŸ” Manuel analiz: AKTÄ°F
 ğŸš¨ Early Hunter: {"AKTÄ°F" if active else "KAPALI"}
 â± Tarama: {SCAN_INTERVAL} sn
-RURU Core: V11.36 VOLUME BREAKOUT + V11.34 CORE
+RURU Core: V11.37 TRAJECTORY + V11.36 VOLUME BREAKOUT + V11.34 CORE
 Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸ¯ Watch Score: {WATCH_SCORE}
 ğŸ”¥ Signal Score: {SIGNAL_SCORE}
@@ -2743,7 +2814,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V11.36: RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V11.37: TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
