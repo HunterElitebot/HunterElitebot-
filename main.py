@@ -10,9 +10,9 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE V11.43 FINAL ENTRY"
+VERSION = "HUNTERELITE FINAL V12 RUNNER"
 
-# V11.43 FINAL ENTRY POLICY
+# FINAL V12 RUNNER POLICY
 # - Widen discovery only: MC/liquidity intake expanded.
 # - Global entry/data/rug/holder/anti-chase gates stay unchanged.
 # FINAL PRODUCTION POLICY
@@ -181,6 +181,7 @@ radar_stats_lock = threading.Lock()
 last_diag_send = 0.0
 discovery_seen = {}
 candidate_sources = {}
+dex_signal_meta = {}
 discovery_seen_lock = threading.Lock()
 DISCOVERY_MEMORY_SECONDS = 21600
 RADAR_RAW_LIMIT = 240
@@ -663,6 +664,74 @@ def gecko_cached_liquidity(ca):
         return None
 
 
+def _dex_meta_add(ca, item, kind):
+    """Collect free DEX Screener profile/boost/CTO metadata as a catalyst signal."""
+    if not ca or not isinstance(item, dict):
+        return
+    meta = dex_signal_meta.setdefault(ca, {"links": [], "description": "", "boost": 0.0, "cto": False})
+    desc = str(item.get("description") or "").strip()
+    if desc and len(desc) > len(meta.get("description") or ""):
+        meta["description"] = desc[:1200]
+    for link in (item.get("links") or []):
+        if isinstance(link, dict) and link.get("url"):
+            row = {"url": str(link.get("url")), "type": str(link.get("type") or ""), "label": str(link.get("label") or "")}
+            if row not in meta["links"]:
+                meta["links"].append(row)
+    if kind == "boost":
+        try:
+            meta["boost"] = max(float(meta.get("boost") or 0), float(item.get("amount") or 0), float(item.get("totalAmount") or 0))
+        except Exception:
+            pass
+    if kind == "cto" or bool(item.get("cto")):
+        meta["cto"] = True
+
+
+def enrich_pair_with_dex_meta(pair, ca):
+    """Merge latest DEX profile links into pair.info without trusting them as safety proof."""
+    if not isinstance(pair, dict):
+        return pair
+    meta = dex_signal_meta.get(ca) or {}
+    if not meta:
+        return pair
+    info = pair.setdefault("info", {})
+    socials = info.setdefault("socials", [])
+    websites = info.setdefault("websites", [])
+    known = {str(x.get("url")) for x in socials + websites if isinstance(x, dict) and x.get("url")}
+    for link in meta.get("links") or []:
+        url = str(link.get("url") or "").strip()
+        if not url or url in known:
+            continue
+        low = url.lower(); typ = str(link.get("type") or "").lower(); label = str(link.get("label") or "")
+        if typ in ("twitter", "telegram", "reddit") or "x.com/" in low or "twitter.com/" in low or "t.me/" in low or "reddit.com/" in low:
+            socials.append({"type": typ or ("twitter" if ("x.com/" in low or "twitter.com/" in low) else "telegram" if "t.me/" in low else "reddit"), "url": url})
+        else:
+            websites.append({"label": label or "Website", "url": url})
+        known.add(url)
+    pair["_dex_meta"] = meta
+    return pair
+
+
+def dex_catalyst_score(pair):
+    """Small catalyst score. Paid boosts never bypass safety and have a capped weight."""
+    meta = (pair or {}).get("_dex_meta") or {}
+    score = 0
+    if meta.get("description"):
+        score += 2
+    links = meta.get("links") or []
+    kinds = set()
+    for x in links:
+        blob = (str(x.get("type") or "") + " " + str(x.get("url") or "")).lower()
+        if "x.com/" in blob or "twitter" in blob: kinds.add("x")
+        if "t.me/" in blob or "telegram" in blob: kinds.add("tg")
+        if "reddit" in blob: kinds.add("reddit")
+        if "http" in blob and not any(q in blob for q in ("x.com/","twitter","t.me/","reddit")): kinds.add("web")
+    score += min(4, len(kinds))
+    if meta.get("cto"): score += 2
+    # Boost is paid visibility, useful as buzz only; cap to 2 points.
+    if float(meta.get("boost") or 0) > 0: score += 1
+    if float(meta.get("boost") or 0) >= 50: score += 1
+    return min(score, 10)
+
 def discovery_candidates():
     endpoints = [
         "https://api.dexscreener.com/token-profiles/latest/v1",
@@ -672,6 +741,7 @@ def discovery_candidates():
     ]
 
     candidate_sources.clear()
+    dex_signal_meta.clear()
 
     # 1) Birdeye: bonus feed when quota works.
     birdeye_found, used = [], set()
@@ -696,12 +766,14 @@ def discovery_candidates():
             data = get_json(url)
             if not isinstance(data, list):
                 continue
+            kind = "boost" if "boost" in url else ("cto" if "community-takeovers" in url else "profile")
             for item in data:
                 if str(item.get("chainId", "")).lower() != "solana":
                     continue
                 ca = str(item.get("tokenAddress", "")).strip()
                 if not (ca and SOL_CA.match(ca)):
                     continue
+                _dex_meta_add(ca, item, kind)
                 if ca in used:
                     continue
                 used.add(ca)
@@ -1972,6 +2044,43 @@ def global_entry_gate(result, previous):
     return True, allow_guclu, (f"GLOBAL_OK P5={price5 if price5 is not None else 0:+.1f}% "
         f"LIQÎ”=-{liq_drop:.1f}% VOL+{vol_delta:.0f} BUY+{buy_delta} SELL+{sell_delta} FLOW={flow:.2f} MC={mc_pct:+.1f}%")
 
+def final_runner_score(result):
+    """Runner rank from current market structure + off-chain catalyst.
+    Fresh acceleration is still enforced separately by global_entry_gate().
+    """
+    if not result:
+        return 0, "RUNNER_NO_DATA"
+    mc = num(result.get("mc")) or 0
+    liq = num(result.get("liq")) or 0
+    vol = num(result.get("vol5")) or 0
+    buys = safe_int(result.get("buys5")); sells = safe_int(result.get("sells5"))
+    p5 = num(result.get("price5"))
+    top10 = num(result.get("top10"))
+    ratio = buys / max(sells, 1)
+    score = 0
+    # Market structure: reward participation, not a single vertical candle.
+    if mc > 0 and liq / mc >= 0.20: score += 1
+    if mc > 0 and liq / mc >= 0.50: score += 1
+    if mc > 0 and vol / mc >= 0.15: score += 1
+    if mc > 0 and vol / mc >= 0.45: score += 1
+    if buys >= 12: score += 1
+    if buys >= 30: score += 1
+    if ratio >= 1.10: score += 1
+    if ratio >= 1.35: score += 1
+    if p5 is None or -3 <= p5 <= 45: score += 2
+    elif p5 <= 70: score += 1
+    if top10 is None or top10 <= 25: score += 1
+    if top10 is not None and top10 <= 12: score += 1
+    social = safe_int((result.get("social") or {}).get("score"))
+    story = safe_int((result.get("narrative") or {}).get("score"))
+    catalyst = safe_int(result.get("dex_catalyst"))
+    if social >= 25: score += 1
+    if social >= 50: score += 1
+    if story >= 50: score += 2
+    elif story >= 25: score += 1
+    score += min(2, catalyst // 3)
+    return min(score, 16), f"RUNNER_SCORE={min(score,16)}/16 R={ratio:.2f} VOL/MC={(vol/mc if mc else 0):.2f} LIQ/MC={(liq/mc if mc else 0):.2f} SOCIAL={social} STORY={story} CAT={catalyst}"
+
 def strong_signal(result, momentum, previous=None):
     if not basic_signal_safe(result):
         return False
@@ -2217,6 +2326,7 @@ def auto_scanner():
                     if pair is None:
                         stats["pair_yok"] += 1
                         continue
+                    pair = enrich_pair_with_dex_meta(pair, ca)
 
                     # V11.13: a token can be "new to the bot" without being newly launched.
                     # Only genuinely fresh pairs enter the early-entry pipeline.
@@ -2241,6 +2351,7 @@ def auto_scanner():
                     social = social_presence(pair)
                     result["social"] = social
                     result["narrative"] = narrative_viral(pair)
+                    result["dex_catalyst"] = dex_catalyst_score(pair)
                     stats["processed"] += 1
 
                     viral_score, viral_label = market_viral_score(result)
@@ -2446,6 +2557,10 @@ def auto_scanner():
                     # This removes the redundant second confirmation that was killing real runners,
                     # while preserving source/stale/liq/anomalous-MC/anti-chase protections.
                     global_allow_gir, global_allow_guclu, global_gate_detail = global_entry_gate(result, old_metrics)
+                    runner_score, runner_detail = final_runner_score(result)
+                    result["runner_score"] = runner_score
+                    # FINAL lane: fresh acceleration + safe structure can enter even if legacy trend bins lag.
+                    final_runner_signal = global_allow_gir and runner_score >= 7
                     early_runner_signal = (
                         momentum_ok
                         and basic_signal_safe(result)
@@ -2458,12 +2573,14 @@ def auto_scanner():
                         volume_signal = False
                         trajectory_signal = False
                         early_runner_signal = False
+                        final_runner_signal = False
                     signal_ok = global_allow_gir and (
                         (fast_decision is not None)
                         or ruru_signal
                         or volume_signal
                         or trajectory_signal
                         or early_runner_signal
+                        or final_runner_signal
                     )
 
                     if ca not in cancelled_this_scan and (not watch_ok):
@@ -2535,6 +2652,8 @@ def auto_scanner():
                         # TRAJECTORY strong requires real 60-90s acceleration; social absence still cannot bypass quality gate.
                         if trajectory_signal and trj_strong and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
                             guclu_gir = True
+                        if final_runner_signal and runner_score >= 11 and global_allow_guclu and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
+                            guclu_gir = True
 
                         if fast_decision == "GUCLU GIR":
                             karar_label = "GUCLU GIR" if (price_allow_guclu and allow_quality_guclu) else "GIR"
@@ -2584,8 +2703,8 @@ Momentum: +{momentum}
 Final Score: {final_score}/100
 
 KARAR: {karar_label}
-SINYAL YOLU: {"FAST / CONTINUATION TEYITLI" if fast_decision else ("TRAJECTORY BREAKOUT / 30-90S" if trajectory_signal else ("VOLUME BREAKOUT / TEYITLI" if volume_signal else ("EARLY RUNNER / TREND+MOMENTUM" if early_runner_signal and not ruru_signal else "RURU / TREND TEYITLI")))}
-DEVAMLILIK: {cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else (global_gate_detail if early_runner_signal and not ruru_signal else "RURU TREND")))}
+SINYAL YOLU: {"FINAL RUNNER / LIVE+SOCIAL" if final_runner_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else ("FAST / CONTINUATION TEYITLI" if fast_decision else ("TRAJECTORY BREAKOUT / 30-90S" if trajectory_signal else ("VOLUME BREAKOUT / TEYITLI" if volume_signal else ("EARLY RUNNER / TREND+MOMENTUM" if early_runner_signal and not ruru_signal else "RURU / TREND TEYITLI"))))}
+DEVAMLILIK: {(global_gate_detail + " | " + runner_detail) if final_runner_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else (cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else (global_gate_detail if early_runner_signal and not ruru_signal else "RURU TREND"))))}
 PRICE GUARD: {price_guard_detail}
 GLOBAL GATE: {global_gate_detail}
 
@@ -2696,7 +2815,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.43 | total={stats.get('radar',0)} "
+                    f"RADAR V12 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2929,7 +3048,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $2K-$20K, Liquidity $600+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V11.43: FINAL ENTRY + WIDE RUNNER + DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $2K-$20K, Liquidity $600+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V12: FINAL RUNNER INTELLIGENCE + LIVE SOCIAL/PROFILE + WIDE RUNNER + DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
