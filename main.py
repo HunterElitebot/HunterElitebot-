@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE FINAL V12 RUNNER"
+VERSION = "HUNTERELITE FINAL V12.1 RUNNER UNLOCK"
 
 # FINAL V12 RUNNER POLICY
 # - Widen discovery only: MC/liquidity intake expanded.
@@ -2044,6 +2044,71 @@ def global_entry_gate(result, previous):
     return True, allow_guclu, (f"GLOBAL_OK P5={price5 if price5 is not None else 0:+.1f}% "
         f"LIQÎ”=-{liq_drop:.1f}% VOL+{vol_delta:.0f} BUY+{buy_delta} SELL+{sell_delta} FLOW={flow:.2f} MC={mc_pct:+.1f}%")
 
+
+def final_runner_safety_gate(result, previous):
+    """FINAL RUNNER hard safety gate.
+    Keeps data integrity, liquidity stability, holder safety and anti-chase as hard blocks.
+    A single quiet 30s flow tick cannot kill an otherwise confirmed runner.
+    """
+    if not result or not previous:
+        return False, False, "RUNNER_WAIT_SECOND_TICK"
+    cur_src = result.get("_source")
+    prev_src = previous.get("_source")
+    cur_ts = num(result.get("_snapshot_ts"))
+    prev_ts = num(previous.get("_snapshot_ts"))
+    if not cur_src or not prev_src or cur_src != prev_src:
+        return False, False, f"RUNNER_SOURCE_MISMATCH {prev_src}->{cur_src}"
+    if cur_ts is None or prev_ts is None or cur_ts <= prev_ts or (cur_ts-prev_ts) > SNAPSHOT_MAX_AGE_SEC:
+        return False, False, "RUNNER_STALE_SNAPSHOT"
+
+    price5 = num(result.get("price5"))
+    mc = num(result.get("mc")); old_mc = num(previous.get("mc"))
+    liq = num(result.get("liq")); old_liq = num(previous.get("liq"))
+    top10 = num(result.get("top10"))
+    vol = num(result.get("vol5"), 0) or 0; old_vol = num(previous.get("vol5"), 0) or 0
+    buys = safe_int(result.get("buys5")); old_buys = safe_int(previous.get("buys5"))
+    sells = safe_int(result.get("sells5")); old_sells = safe_int(previous.get("sells5"))
+
+    if mc is None or old_mc is None or mc <= 0 or old_mc <= 0 or liq is None or liq <= 0:
+        return False, False, "RUNNER_DATA_MISSING"
+    if price5 is not None and price5 > CHASE_BLOCK_GIR_5M:
+        return False, False, f"RUNNER_CHASE price5={price5:+.1f}%"
+    if top10 is not None and top10 > GLOBAL_MAX_TOP10_GIR:
+        return False, False, f"RUNNER_TOP10 {top10:.1f}%"
+
+    liq_mc = liq / mc
+    if liq_mc < GLOBAL_MIN_LIQ_MC:
+        return False, False, f"RUNNER_LIQ/MC {liq_mc:.2f}"
+    if old_liq is None or old_liq <= 0:
+        return False, False, "RUNNER_LIQ_NEEDS_2_TICKS"
+
+    liq_drop = max(0.0, (old_liq-liq)/old_liq*100.0)
+    if liq_drop > GLOBAL_MAX_LIQ_DROP_PCT:
+        return False, False, f"RUNNER_LIQ_UNSTABLE -{liq_drop:.1f}%"
+
+    liq_up = ((liq-old_liq)/old_liq)*100.0
+    if liq_up > MAX_VALID_LIQ_UP_PCT:
+        return False, False, f"RUNNER_LIQ_ANOMALY +{liq_up:.1f}%"
+
+    mc_pct = ((mc-old_mc)/old_mc)*100.0
+    if abs(mc_pct) > MAX_VALID_MC_DELTA_PCT:
+        return False, False, f"RUNNER_MC_ANOMALY {mc_pct:+.1f}%"
+
+    vol_delta = max(0.0, vol-old_vol)
+    buy_delta = max(0, buys-old_buys)
+    sell_delta = max(0, sells-old_sells)
+    flow = buy_delta/max(sell_delta, 1)
+
+    allow_guclu = not (price5 is not None and price5 > CHASE_BLOCK_GUCLU_5M)
+    if top10 is not None and top10 > GLOBAL_MAX_TOP10_GUCLU:
+        allow_guclu = False
+
+    return True, allow_guclu, (
+        f"RUNNER_SAFE P5={price5 if price5 is not None else 0:+.1f}% "
+        f"LIQÎ”=-{liq_drop:.1f}% VOL+{vol_delta:.0f} BUY+{buy_delta} "
+        f"SELL+{sell_delta} FLOW={flow:.2f} MC={mc_pct:+.1f}%"
+    )
+
 def final_runner_score(result):
     """Runner rank from current market structure + off-chain catalyst.
     Fresh acceleration is still enforced separately by global_entry_gate().
@@ -2557,10 +2622,21 @@ def auto_scanner():
                     # This removes the redundant second confirmation that was killing real runners,
                     # while preserving source/stale/liq/anomalous-MC/anti-chase protections.
                     global_allow_gir, global_allow_guclu, global_gate_detail = global_entry_gate(result, old_metrics)
+                    runner_safety_gir, runner_safety_guclu, runner_safety_detail = final_runner_safety_gate(result, old_metrics)
                     runner_score, runner_detail = final_runner_score(result)
                     result["runner_score"] = runner_score
-                    # FINAL lane: fresh acceleration + safe structure can enter even if legacy trend bins lag.
-                    final_runner_signal = global_allow_gir and runner_score >= 7
+
+                    # FINAL V12.1 RUNNER UNLOCK:
+                    # Legacy lanes keep strict 30s acceleration.
+                    # Final runner lane requires hard safety + confirmed momentum + runner structure.
+                    final_runner_signal = (
+                        runner_safety_gir
+                        and momentum_ok
+                        and runner_score >= 6
+                        and basic_signal_safe(result)
+                        and crash_guard(result)
+                        and price_allow_gir
+                    )
                     early_runner_signal = (
                         momentum_ok
                         and basic_signal_safe(result)
@@ -2573,15 +2649,15 @@ def auto_scanner():
                         volume_signal = False
                         trajectory_signal = False
                         early_runner_signal = False
-                        final_runner_signal = False
-                    signal_ok = global_allow_gir and (
+
+                    legacy_signal_ok = global_allow_gir and (
                         (fast_decision is not None)
                         or ruru_signal
                         or volume_signal
                         or trajectory_signal
                         or early_runner_signal
-                        or final_runner_signal
                     )
+                    signal_ok = legacy_signal_ok or final_runner_signal
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -2652,7 +2728,7 @@ def auto_scanner():
                         # TRAJECTORY strong requires real 60-90s acceleration; social absence still cannot bypass quality gate.
                         if trajectory_signal and trj_strong and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
                             guclu_gir = True
-                        if final_runner_signal and runner_score >= 11 and global_allow_guclu and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
+                        if final_runner_signal and runner_score >= 10 and runner_safety_guclu and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
                             guclu_gir = True
 
                         if fast_decision == "GUCLU GIR":
@@ -2704,9 +2780,9 @@ Final Score: {final_score}/100
 
 KARAR: {karar_label}
 SINYAL YOLU: {"FINAL RUNNER / LIVE+SOCIAL" if final_runner_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else ("FAST / CONTINUATION TEYITLI" if fast_decision else ("TRAJECTORY BREAKOUT / 30-90S" if trajectory_signal else ("VOLUME BREAKOUT / TEYITLI" if volume_signal else ("EARLY RUNNER / TREND+MOMENTUM" if early_runner_signal and not ruru_signal else "RURU / TREND TEYITLI"))))}
-DEVAMLILIK: {(global_gate_detail + " | " + runner_detail) if final_runner_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else (cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else (global_gate_detail if early_runner_signal and not ruru_signal else "RURU TREND"))))}
+DEVAMLILIK: {(runner_safety_detail + " | " + runner_detail) if final_runner_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else (cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else (global_gate_detail if early_runner_signal and not ruru_signal else "RURU TREND"))))}
 PRICE GUARD: {price_guard_detail}
-GLOBAL GATE: {global_gate_detail}
+GLOBAL GATE: {(runner_safety_detail if final_runner_signal and not legacy_signal_ok else global_gate_detail)}
 
 UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur."""
 
@@ -3048,7 +3124,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $2K-$20K, Liquidity $600+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V12: FINAL RUNNER INTELLIGENCE + LIVE SOCIAL/PROFILE + WIDE RUNNER + DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $2K-$20K, Liquidity $600+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V12.1: RUNNER UNLOCK + HARD SAFETY + LIVE SOCIAL/PROFILE + WIDE RUNNER + DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
