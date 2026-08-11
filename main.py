@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE V11.40 FINAL DATA GUARD"
+VERSION = "HUNTERELITE V11.41 FINAL RUNNER"
 
 # FINAL PRODUCTION POLICY
 # - Story/narrative is a catalyst, never a safety bypass.
@@ -99,7 +99,7 @@ FAST_GUCLU_MIN_LIQ_MC_RATIO = 0.22
 # CONTINUATION GUARD
 # FAST candidates are remembered first; signal is released only after a later scan
 # confirms that new buying is still pushing the market forward.
-CONT_MIN_SECONDS = 20
+CONT_MIN_SECONDS = 10
 CONT_MAX_SECONDS = 120
 CONT_MIN_VOL_DELTA = 250
 CONT_MIN_BUY_DELTA = 2
@@ -146,9 +146,9 @@ NEG_PRICE_BLOCK_GIR_5M = -8.0
 NEG_PRICE_RECOVERY_MC_PCT = 2.0
 NEG_PRICE_RECOVERY_FLOW = 1.20
 
-SIGNAL_MIN_BUYS_5M = 8
-SIGNAL_MIN_BUY_SELL_RATIO = 1.10
-SIGNAL_MIN_VOL_5M = 1000
+SIGNAL_MIN_BUYS_5M = 6
+SIGNAL_MIN_BUY_SELL_RATIO = 1.05
+SIGNAL_MIN_VOL_5M = 700
 MIN_VOL_GROWTH = 1.00
 
 # Liquidity Drain Guard
@@ -2677,7 +2677,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.39 | total={stats.get('radar',0)} "
+                    f"RADAR V11.41 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2774,7 +2774,7 @@ Komutlar:
 ğŸ” Manuel analiz: AKTÄ°F
 ğŸš¨ Early Hunter: {"AKTÄ°F" if active else "KAPALI"}
 â± Tarama: {SCAN_INTERVAL} sn
-RURU Core: V11.40 FINAL DATA GUARD + EARLY RUNNER + TRAJECTORY + VOLUME BREAKOUT
+RURU Core: V11.41 FINAL RUNNER + DATA GUARD + TRAJECTORY + VOLUME BREAKOUT
 Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸ¯ Watch Score: {WATCH_SCORE}
 ğŸ”¥ Signal Score: {SIGNAL_SCORE}
@@ -2910,7 +2910,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V11.40: FINAL DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V11.41: FINAL RUNNER + DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
