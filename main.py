@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE V11.38 GLOBAL GATE"
+VERSION = "HUNTERELITE V11.39 EARLY RUNNER GATE"
 
 # FINAL PRODUCTION POLICY
 # - Story/narrative is a catalyst, never a safety bypass.
@@ -73,14 +73,14 @@ FAST_GIR_MAX_PRICE5 = 150.0
 CHASE_BLOCK_GUCLU_5M = 70.0
 CHASE_BLOCK_GIR_5M = 100.0
 # GLOBAL ENTRY GATE: every automatic lane must pass this final gate.
-GLOBAL_MAX_TOP10_GIR = 32.0
+GLOBAL_MAX_TOP10_GIR = 35.0
 GLOBAL_MAX_TOP10_GUCLU = 18.0
-GLOBAL_MAX_LIQ_DROP_PCT = 12.0
-GLOBAL_MIN_LIQ_MC = 0.20
-GLOBAL_MIN_FLOW = 1.08
-GLOBAL_MIN_BUY_DELTA = 2
-GLOBAL_MIN_VOL_DELTA = 200
-GLOBAL_MIN_MC_PROGRESS = 0.5
+GLOBAL_MAX_LIQ_DROP_PCT = 20.0
+GLOBAL_MIN_LIQ_MC = 0.15
+GLOBAL_MIN_FLOW = 0.90
+GLOBAL_MIN_BUY_DELTA = 1
+GLOBAL_MIN_VOL_DELTA = 50
+GLOBAL_MIN_MC_PROGRESS = 0.0
 GLOBAL_IDEAL_PRICE5_MAX = 60.0
 # When no social channel is published, GUCLU GIR requires unusually clean on-chain structure.
 NO_SOCIAL_GUCLU_MAX_TOP10 = 10.0
@@ -1899,7 +1899,7 @@ def trajectory_breakout_confirm(result, history):
 
 
 def global_entry_gate(result, previous):
-    """V11.38: one non-bypassable gate for FAST/RURU/VOLUME/TRAJECTORY.
+    """V11.39: safety-first early-runner gate for FAST/RURU/VOLUME/TRAJECTORY.
     Reject chase, unstable liquidity, weak fresh flow, and poor holder structure.
     Returns (allow_gir, allow_guclu, detail).
     """
@@ -2407,7 +2407,7 @@ def auto_scanner():
                     volume_signal = vb_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
                     trajectory_signal = trj_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
 
-                    # V11.38 NON-BYPASSABLE GLOBAL ENTRY GATE.
+                    # V11.39 EARLY RUNNER GLOBAL ENTRY GATE.
                     global_allow_gir, global_allow_guclu, global_gate_detail = global_entry_gate(result, old_metrics)
                     if not global_allow_gir:
                         fast_decision = None
@@ -2646,7 +2646,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.38 | total={stats.get('radar',0)} "
+                    f"RADAR V11.39 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2743,7 +2743,7 @@ Komutlar:
 ğŸ” Manuel analiz: AKTÄ°F
 ğŸš¨ Early Hunter: {"AKTÄ°F" if active else "KAPALI"}
 â± Tarama: {SCAN_INTERVAL} sn
-RURU Core: V11.38 GLOBAL GATE + TRAJECTORY + VOLUME BREAKOUT
+RURU Core: V11.39 EARLY RUNNER GATE + TRAJECTORY + VOLUME BREAKOUT
 Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸ¯ Watch Score: {WATCH_SCORE}
 ğŸ”¥ Signal Score: {SIGNAL_SCORE}
@@ -2879,7 +2879,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V11.38: GLOBAL ENTRY GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $3K-$12K, Liquidity $800+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V11.39: EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
