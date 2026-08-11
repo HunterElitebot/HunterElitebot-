@@ -10,9 +10,9 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE V11.42 WIDE RUNNER"
+VERSION = "HUNTERELITE V11.43 FINAL ENTRY"
 
-# V11.42 WIDE FUNNEL POLICY
+# V11.43 FINAL ENTRY POLICY
 # - Widen discovery only: MC/liquidity intake expanded.
 # - Global entry/data/rug/holder/anti-chase gates stay unchanged.
 # FINAL PRODUCTION POLICY
@@ -2441,14 +2441,30 @@ def auto_scanner():
                     volume_signal = vb_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
                     trajectory_signal = trj_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
 
-                    # V11.40 FINAL DATA GUARD + EARLY RUNNER GLOBAL ENTRY GATE.
+                    # V11.43 FINAL ENTRY: once a token is SAFE + ACTIVE + TREND + MOMENTUM,
+                    # two fresh snapshots and the Data Guard are enough for a normal GIR.
+                    # This removes the redundant second confirmation that was killing real runners,
+                    # while preserving source/stale/liq/anomalous-MC/anti-chase protections.
                     global_allow_gir, global_allow_guclu, global_gate_detail = global_entry_gate(result, old_metrics)
+                    early_runner_signal = (
+                        momentum_ok
+                        and basic_signal_safe(result)
+                        and crash_guard(result)
+                        and price_allow_gir
+                    )
                     if not global_allow_gir:
                         fast_decision = None
                         ruru_signal = False
                         volume_signal = False
                         trajectory_signal = False
-                    signal_ok = global_allow_gir and ((fast_decision is not None) or ruru_signal or volume_signal or trajectory_signal)
+                        early_runner_signal = False
+                    signal_ok = global_allow_gir and (
+                        (fast_decision is not None)
+                        or ruru_signal
+                        or volume_signal
+                        or trajectory_signal
+                        or early_runner_signal
+                    )
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -2568,8 +2584,8 @@ Momentum: +{momentum}
 Final Score: {final_score}/100
 
 KARAR: {karar_label}
-SINYAL YOLU: {"FAST / CONTINUATION TEYITLI" if fast_decision else ("TRAJECTORY BREAKOUT / 30-90S" if trajectory_signal else ("VOLUME BREAKOUT / TEYITLI" if volume_signal else "RURU / TREND TEYITLI"))}
-DEVAMLILIK: {cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else "RURU TREND"))}
+SINYAL YOLU: {"FAST / CONTINUATION TEYITLI" if fast_decision else ("TRAJECTORY BREAKOUT / 30-90S" if trajectory_signal else ("VOLUME BREAKOUT / TEYITLI" if volume_signal else ("EARLY RUNNER / TREND+MOMENTUM" if early_runner_signal and not ruru_signal else "RURU / TREND TEYITLI")))}
+DEVAMLILIK: {cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else (global_gate_detail if early_runner_signal and not ruru_signal else "RURU TREND")))}
 PRICE GUARD: {price_guard_detail}
 GLOBAL GATE: {global_gate_detail}
 
@@ -2680,7 +2696,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.42 | total={stats.get('radar',0)} "
+                    f"RADAR V11.43 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2913,7 +2929,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $2K-$20K, Liquidity $600+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V11.42: WIDE RUNNER + DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $2K-$20K, Liquidity $600+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V11.43: FINAL ENTRY + WIDE RUNNER + DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
