@@ -10,11 +10,8 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE FINAL V12.4 RUNNER SOFT"
+VERSION = "HUNTERELITE V11.35 ANTI-CHASE SOCIAL QUALITY"
 
-# FINAL V12 RUNNER POLICY
-# - Widen discovery only: MC/liquidity intake expanded.
-# - Global entry/data/rug/holder/anti-chase gates stay unchanged.
 # FINAL PRODUCTION POLICY
 # - Story/narrative is a catalyst, never a safety bypass.
 # - Active downside cannot become GUCLU GIR because of story score.
@@ -32,10 +29,11 @@ POLLING_ENABLED = os.getenv("POLLING_ENABLED", "1").strip().lower() in ("1", "tr
 
 # AUTO QUALITY MODE: only 5K-10K market-cap candidates are promoted.
 # Manual CA analysis is independent from this band.
-MC_MIN = 2000
-MC_MAX = 20000
-EARLY_MC_MAX = 20000
-MIN_LIQUIDITY = 600
+MC_MIN = 3000
+MC_MAX = 12000
+EARLY_MC_MAX = 12000
+MIN_LIQUIDITY = 800
+RUG_TOP10_MAX = 35.0
 
 # V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
 WATCH_SCORE = 47
@@ -73,24 +71,8 @@ FAST_GIR_MIN_LIQ_MC_RATIO = 0.18
 FAST_GIR_MIN_PRICE5 = -5.0
 FAST_GIR_MAX_PRICE5 = 150.0
 # POSITIVE ANTI-CHASE: do not call a parabolic move a fresh entry.
-CHASE_BLOCK_GUCLU_5M = 70.0
-CHASE_BLOCK_GIR_5M = 100.0
-# GLOBAL ENTRY GATE: every automatic lane must pass this final gate.
-GLOBAL_MAX_TOP10_GIR = 35.0
-GLOBAL_MAX_TOP10_GUCLU = 18.0
-GLOBAL_MAX_LIQ_DROP_PCT = 20.0
-GLOBAL_MIN_LIQ_MC = 0.15
-GLOBAL_MIN_FLOW = 0.90
-GLOBAL_MIN_BUY_DELTA = 1
-GLOBAL_MIN_VOL_DELTA = 50
-GLOBAL_MIN_MC_PROGRESS = 0.0
-GLOBAL_IDEAL_PRICE5_MAX = 60.0
-# V11.40 DATA INTEGRITY: never compare incompatible/stale snapshots.
-SNAPSHOT_MAX_AGE_SEC = 75.0
-RUNNER_SNAPSHOT_MAX_AGE_SEC = 300.0
-RUNNER_MIN_LIQ_MC = 0.12
-MAX_VALID_MC_DELTA_PCT = 300.0
-MAX_VALID_LIQ_UP_PCT = 500.0
+CHASE_BLOCK_GUCLU_5M = 100.0
+CHASE_BLOCK_GIR_5M = 150.0
 # When no social channel is published, GUCLU GIR requires unusually clean on-chain structure.
 NO_SOCIAL_GUCLU_MAX_TOP10 = 10.0
 NO_SOCIAL_GUCLU_MIN_LIQ_MC = 0.80
@@ -104,7 +86,7 @@ FAST_GUCLU_MIN_LIQ_MC_RATIO = 0.22
 # CONTINUATION GUARD
 # FAST candidates are remembered first; signal is released only after a later scan
 # confirms that new buying is still pushing the market forward.
-CONT_MIN_SECONDS = 10
+CONT_MIN_SECONDS = 20
 CONT_MAX_SECONDS = 120
 CONT_MIN_VOL_DELTA = 250
 CONT_MIN_BUY_DELTA = 2
@@ -151,9 +133,9 @@ NEG_PRICE_BLOCK_GIR_5M = -8.0
 NEG_PRICE_RECOVERY_MC_PCT = 2.0
 NEG_PRICE_RECOVERY_FLOW = 1.20
 
-SIGNAL_MIN_BUYS_5M = 6
-SIGNAL_MIN_BUY_SELL_RATIO = 1.05
-SIGNAL_MIN_VOL_5M = 700
+SIGNAL_MIN_BUYS_5M = 8
+SIGNAL_MIN_BUY_SELL_RATIO = 1.10
+SIGNAL_MIN_VOL_5M = 1000
 MIN_VOL_GROWTH = 1.00
 
 # Liquidity Drain Guard
@@ -183,7 +165,6 @@ radar_stats_lock = threading.Lock()
 last_diag_send = 0.0
 discovery_seen = {}
 candidate_sources = {}
-dex_signal_meta = {}
 discovery_seen_lock = threading.Lock()
 DISCOVERY_MEMORY_SECONDS = 21600
 RADAR_RAW_LIMIT = 240
@@ -666,74 +647,6 @@ def gecko_cached_liquidity(ca):
         return None
 
 
-def _dex_meta_add(ca, item, kind):
-    """Collect free DEX Screener profile/boost/CTO metadata as a catalyst signal."""
-    if not ca or not isinstance(item, dict):
-        return
-    meta = dex_signal_meta.setdefault(ca, {"links": [], "description": "", "boost": 0.0, "cto": False})
-    desc = str(item.get("description") or "").strip()
-    if desc and len(desc) > len(meta.get("description") or ""):
-        meta["description"] = desc[:1200]
-    for link in (item.get("links") or []):
-        if isinstance(link, dict) and link.get("url"):
-            row = {"url": str(link.get("url")), "type": str(link.get("type") or ""), "label": str(link.get("label") or "")}
-            if row not in meta["links"]:
-                meta["links"].append(row)
-    if kind == "boost":
-        try:
-            meta["boost"] = max(float(meta.get("boost") or 0), float(item.get("amount") or 0), float(item.get("totalAmount") or 0))
-        except Exception:
-            pass
-    if kind == "cto" or bool(item.get("cto")):
-        meta["cto"] = True
-
-
-def enrich_pair_with_dex_meta(pair, ca):
-    """Merge latest DEX profile links into pair.info without trusting them as safety proof."""
-    if not isinstance(pair, dict):
-        return pair
-    meta = dex_signal_meta.get(ca) or {}
-    if not meta:
-        return pair
-    info = pair.setdefault("info", {})
-    socials = info.setdefault("socials", [])
-    websites = info.setdefault("websites", [])
-    known = {str(x.get("url")) for x in socials + websites if isinstance(x, dict) and x.get("url")}
-    for link in meta.get("links") or []:
-        url = str(link.get("url") or "").strip()
-        if not url or url in known:
-            continue
-        low = url.lower(); typ = str(link.get("type") or "").lower(); label = str(link.get("label") or "")
-        if typ in ("twitter", "telegram", "reddit") or "x.com/" in low or "twitter.com/" in low or "t.me/" in low or "reddit.com/" in low:
-            socials.append({"type": typ or ("twitter" if ("x.com/" in low or "twitter.com/" in low) else "telegram" if "t.me/" in low else "reddit"), "url": url})
-        else:
-            websites.append({"label": label or "Website", "url": url})
-        known.add(url)
-    pair["_dex_meta"] = meta
-    return pair
-
-
-def dex_catalyst_score(pair):
-    """Small catalyst score. Paid boosts never bypass safety and have a capped weight."""
-    meta = (pair or {}).get("_dex_meta") or {}
-    score = 0
-    if meta.get("description"):
-        score += 2
-    links = meta.get("links") or []
-    kinds = set()
-    for x in links:
-        blob = (str(x.get("type") or "") + " " + str(x.get("url") or "")).lower()
-        if "x.com/" in blob or "twitter" in blob: kinds.add("x")
-        if "t.me/" in blob or "telegram" in blob: kinds.add("tg")
-        if "reddit" in blob: kinds.add("reddit")
-        if "http" in blob and not any(q in blob for q in ("x.com/","twitter","t.me/","reddit")): kinds.add("web")
-    score += min(4, len(kinds))
-    if meta.get("cto"): score += 2
-    # Boost is paid visibility, useful as buzz only; cap to 2 points.
-    if float(meta.get("boost") or 0) > 0: score += 1
-    if float(meta.get("boost") or 0) >= 50: score += 1
-    return min(score, 10)
-
 def discovery_candidates():
     endpoints = [
         "https://api.dexscreener.com/token-profiles/latest/v1",
@@ -743,7 +656,6 @@ def discovery_candidates():
     ]
 
     candidate_sources.clear()
-    dex_signal_meta.clear()
 
     # 1) Birdeye: bonus feed when quota works.
     birdeye_found, used = [], set()
@@ -768,14 +680,12 @@ def discovery_candidates():
             data = get_json(url)
             if not isinstance(data, list):
                 continue
-            kind = "boost" if "boost" in url else ("cto" if "community-takeovers" in url else "profile")
             for item in data:
                 if str(item.get("chainId", "")).lower() != "solana":
                     continue
                 ca = str(item.get("tokenAddress", "")).strip()
                 if not (ca and SOL_CA.match(ca)):
                     continue
-                _dex_meta_add(ca, item, kind)
                 if ca in used:
                     continue
                 used.add(ca)
@@ -1429,15 +1339,17 @@ GIR TETIGI: {trigger}"""
 def basic_signal_safe(result):
     if not result:
         return False
-    if result["signals"]["rug"] or result["signals"]["honeypot"]:
+    sig = result.get("signals") or {}
+    if sig.get("rug") or sig.get("honeypot") or sig.get("insider") or sig.get("bundler"):
         return False
-    if result["mint"] is True or result["freeze"] is True:
+    if result.get("mint") is True or result.get("freeze") is True:
         return False
-    if result["mc"] is None or not (MC_MIN <= result["mc"] <= MC_MAX):
+    if result.get("mc") is None or not (MC_MIN <= result["mc"] <= MC_MAX):
         return False
-    if result["liq"] is None or result["liq"] < MIN_LIQUIDITY:
+    if result.get("liq") is None or result["liq"] < MIN_LIQUIDITY:
         return False
-    if result["top10"] is not None and result["top10"] >= 75:
+    top10 = result.get("top10")
+    if top10 is None or top10 > RUG_TOP10_MAX:
         return False
     return True
 
@@ -1943,12 +1855,6 @@ def trajectory_breakout_confirm(result, history):
     if not snaps:
         return False, False, "TRJ_NO_HISTORY"
     base = snaps[0]
-    cur_src = result.get("_source"); base_src = base.get("_source")
-    cur_ts = num(result.get("_snapshot_ts")); base_ts = num(base.get("_snapshot_ts"))
-    if not cur_src or not base_src or cur_src != base_src:
-        return False, False, "TRJ_SOURCE_MISMATCH"
-    if cur_ts is None or base_ts is None or cur_ts <= base_ts or (cur_ts-base_ts) > (SNAPSHOT_MAX_AGE_SEC * TRJ_MAX_HISTORY):
-        return False, False, "TRJ_STALE_SNAPSHOT"
     mc = num(result.get("mc")); old_mc = num(base.get("mc"))
     vol = num(result.get("vol5"), 0) or 0; old_vol = num(base.get("vol5"), 0) or 0
     buys = safe_int(result.get("buys5")); old_buys = safe_int(base.get("buys5"))
@@ -1957,8 +1863,6 @@ def trajectory_breakout_confirm(result, history):
     if mc is None or old_mc is None or mc <= 0 or old_mc <= 0:
         return False, False, "TRJ_MC_MISSING"
     mc_pct = ((mc-old_mc)/old_mc)*100.0
-    if abs(mc_pct) > MAX_VALID_MC_DELTA_PCT:
-        return False, False, f"TRJ_MC_ANOMALY {mc_pct:+.1f}%"
     vol_delta = max(0.0, vol-old_vol)
     buy_delta = max(0, buys-old_buys); sell_delta=max(0, sells-old_sells)
     flow = buy_delta/max(sell_delta,1)
@@ -1985,168 +1889,6 @@ def trajectory_breakout_confirm(result, history):
     return ok,strong,(f"TRJ {ticks}T MC={mc_pct:+.1f}% VOL+{vol_delta:.0f} BUY+{buy_delta} "
         f"SELL+{sell_delta} FLOW={flow:.2f} LAST_MC={leg_mc:+.1f}% LAST_BUY+{leg_buy}")
 
-
-
-def global_entry_gate(result, previous):
-    """V11.39: safety-first early-runner gate for FAST/RURU/VOLUME/TRAJECTORY.
-    Reject chase, unstable liquidity, weak fresh flow, and poor holder structure.
-    Returns (allow_gir, allow_guclu, detail).
-    """
-    if not result or not previous:
-        return False, False, "GLOBAL_WAIT_SECOND_TICK"
-    cur_src = result.get("_source")
-    prev_src = previous.get("_source")
-    cur_ts = num(result.get("_snapshot_ts"))
-    prev_ts = num(previous.get("_snapshot_ts"))
-    if not cur_src or not prev_src or cur_src != prev_src:
-        return False, False, f"GLOBAL_SOURCE_MISMATCH {prev_src}->{cur_src}"
-    if cur_ts is None or prev_ts is None or cur_ts <= prev_ts or (cur_ts-prev_ts) > SNAPSHOT_MAX_AGE_SEC:
-        return False, False, "GLOBAL_STALE_SNAPSHOT"
-    price5 = num(result.get("price5"))
-    mc = num(result.get("mc")); old_mc = num(previous.get("mc"))
-    liq = num(result.get("liq")); old_liq = num(previous.get("liq"))
-    top10 = num(result.get("top10"))
-    vol = num(result.get("vol5"), 0) or 0; old_vol = num(previous.get("vol5"), 0) or 0
-    buys = safe_int(result.get("buys5")); old_buys = safe_int(previous.get("buys5"))
-    sells = safe_int(result.get("sells5")); old_sells = safe_int(previous.get("sells5"))
-    if mc is None or old_mc is None or mc <= 0 or old_mc <= 0 or liq is None or liq <= 0:
-        return False, False, "GLOBAL_DATA_MISSING"
-    if price5 is not None and price5 > CHASE_BLOCK_GIR_5M:
-        return False, False, f"GLOBAL_CHASE price5={price5:+.1f}%"
-    if top10 is not None and top10 > GLOBAL_MAX_TOP10_GIR:
-        return False, False, f"GLOBAL_TOP10 {top10:.1f}%"
-    liq_mc = liq / mc
-    if liq_mc < GLOBAL_MIN_LIQ_MC:
-        return False, False, f"GLOBAL_LIQ/MC {liq_mc:.2f}"
-    liq_drop = 0.0
-    if old_liq is not None and old_liq > 0:
-        liq_drop = max(0.0, (old_liq-liq)/old_liq*100.0)
-        if liq_drop > GLOBAL_MAX_LIQ_DROP_PCT:
-            return False, False, f"GLOBAL_LIQ_UNSTABLE -{liq_drop:.1f}%"
-    mc_pct = ((mc-old_mc)/old_mc)*100.0
-    if abs(mc_pct) > MAX_VALID_MC_DELTA_PCT:
-        return False, False, f"GLOBAL_MC_ANOMALY {mc_pct:+.1f}%"
-    if old_liq is None or old_liq <= 0:
-        return False, False, "GLOBAL_LIQ_NEEDS_2_TICKS"
-    liq_up = ((liq-old_liq)/old_liq)*100.0
-    if liq_up > MAX_VALID_LIQ_UP_PCT:
-        return False, False, f"GLOBAL_LIQ_ANOMALY +{liq_up:.1f}%"
-    vol_delta = max(0.0, vol-old_vol)
-    buy_delta = max(0, buys-old_buys); sell_delta=max(0, sells-old_sells)
-    flow = buy_delta/max(sell_delta,1)
-    if vol_delta < GLOBAL_MIN_VOL_DELTA or buy_delta < GLOBAL_MIN_BUY_DELTA:
-        return False, False, f"GLOBAL_NO_ACCEL VOL+{vol_delta:.0f} BUY+{buy_delta}"
-    if flow < GLOBAL_MIN_FLOW:
-        return False, False, f"GLOBAL_FLOW {flow:.2f}"
-    if mc_pct < GLOBAL_MIN_MC_PROGRESS:
-        return False, False, f"GLOBAL_NO_MC_PROGRESS {mc_pct:+.1f}%"
-    allow_guclu = not (price5 is not None and price5 > CHASE_BLOCK_GUCLU_5M)
-    if top10 is not None and top10 > GLOBAL_MAX_TOP10_GUCLU:
-        allow_guclu = False
-    return True, allow_guclu, (f"GLOBAL_OK P5={price5 if price5 is not None else 0:+.1f}% "
-        f"LIQÎ”=-{liq_drop:.1f}% VOL+{vol_delta:.0f} BUY+{buy_delta} SELL+{sell_delta} FLOW={flow:.2f} MC={mc_pct:+.1f}%")
-
-
-def final_runner_safety_gate(result, previous):
-    """FINAL RUNNER hard safety gate.
-    Keeps data integrity, liquidity stability, holder safety and anti-chase as hard blocks.
-    A single quiet 30s flow tick cannot kill an otherwise confirmed runner.
-    """
-    if not result or not previous:
-        return False, False, "RUNNER_WAIT_SECOND_TICK"
-    cur_src = result.get("_source")
-    prev_src = previous.get("_source")
-    cur_ts = num(result.get("_snapshot_ts"))
-    prev_ts = num(previous.get("_snapshot_ts"))
-    if not cur_src or not prev_src or cur_src != prev_src:
-        return False, False, f"RUNNER_SOURCE_MISMATCH {prev_src}->{cur_src}"
-    if cur_ts is None or prev_ts is None or cur_ts <= prev_ts or (cur_ts-prev_ts) > RUNNER_SNAPSHOT_MAX_AGE_SEC:
-        return False, False, f"RUNNER_STALE_SNAPSHOT age={(cur_ts-prev_ts) if cur_ts is not None and prev_ts is not None else -1:.0f}s"
-
-    price5 = num(result.get("price5"))
-    mc = num(result.get("mc")); old_mc = num(previous.get("mc"))
-    liq = num(result.get("liq")); old_liq = num(previous.get("liq"))
-    top10 = num(result.get("top10"))
-    vol = num(result.get("vol5"), 0) or 0; old_vol = num(previous.get("vol5"), 0) or 0
-    buys = safe_int(result.get("buys5")); old_buys = safe_int(previous.get("buys5"))
-    sells = safe_int(result.get("sells5")); old_sells = safe_int(previous.get("sells5"))
-
-    if mc is None or old_mc is None or mc <= 0 or old_mc <= 0 or liq is None or liq <= 0:
-        return False, False, "RUNNER_DATA_MISSING"
-    if price5 is not None and price5 > CHASE_BLOCK_GIR_5M:
-        return False, False, f"RUNNER_CHASE price5={price5:+.1f}%"
-    if top10 is not None and top10 > GLOBAL_MAX_TOP10_GIR:
-        return False, False, f"RUNNER_TOP10 {top10:.1f}%"
-
-    liq_mc = liq / mc
-    if liq_mc < RUNNER_MIN_LIQ_MC:
-        return False, False, f"RUNNER_LIQ/MC {liq_mc:.2f}"
-    if old_liq is None or old_liq <= 0:
-        return False, False, "RUNNER_LIQ_NEEDS_2_TICKS"
-
-    liq_drop = max(0.0, (old_liq-liq)/old_liq*100.0)
-    if liq_drop > GLOBAL_MAX_LIQ_DROP_PCT:
-        return False, False, f"RUNNER_LIQ_UNSTABLE -{liq_drop:.1f}%"
-
-    liq_up = ((liq-old_liq)/old_liq)*100.0
-    if liq_up > MAX_VALID_LIQ_UP_PCT:
-        return False, False, f"RUNNER_LIQ_ANOMALY +{liq_up:.1f}%"
-
-    mc_pct = ((mc-old_mc)/old_mc)*100.0
-    if abs(mc_pct) > MAX_VALID_MC_DELTA_PCT:
-        return False, False, f"RUNNER_MC_ANOMALY {mc_pct:+.1f}%"
-
-    vol_delta = max(0.0, vol-old_vol)
-    buy_delta = max(0, buys-old_buys)
-    sell_delta = max(0, sells-old_sells)
-    flow = buy_delta/max(sell_delta, 1)
-
-    allow_guclu = not (price5 is not None and price5 > CHASE_BLOCK_GUCLU_5M)
-    if top10 is not None and top10 > GLOBAL_MAX_TOP10_GUCLU:
-        allow_guclu = False
-
-    return True, allow_guclu, (
-        f"RUNNER_SAFE P5={price5 if price5 is not None else 0:+.1f}% "
-        f"LIQÎ”=-{liq_drop:.1f}% VOL+{vol_delta:.0f} BUY+{buy_delta} "
-        f"SELL+{sell_delta} FLOW={flow:.2f} MC={mc_pct:+.1f}%"
-    )
-
-def final_runner_score(result):
-    """Runner rank from current market structure + off-chain catalyst.
-    Fresh acceleration is still enforced separately by global_entry_gate().
-    """
-    if not result:
-        return 0, "RUNNER_NO_DATA"
-    mc = num(result.get("mc")) or 0
-    liq = num(result.get("liq")) or 0
-    vol = num(result.get("vol5")) or 0
-    buys = safe_int(result.get("buys5")); sells = safe_int(result.get("sells5"))
-    p5 = num(result.get("price5"))
-    top10 = num(result.get("top10"))
-    ratio = buys / max(sells, 1)
-    score = 0
-    # Market structure: reward participation, not a single vertical candle.
-    if mc > 0 and liq / mc >= 0.20: score += 1
-    if mc > 0 and liq / mc >= 0.50: score += 1
-    if mc > 0 and vol / mc >= 0.15: score += 1
-    if mc > 0 and vol / mc >= 0.45: score += 1
-    if buys >= 12: score += 1
-    if buys >= 30: score += 1
-    if ratio >= 1.10: score += 1
-    if ratio >= 1.35: score += 1
-    if p5 is None or -3 <= p5 <= 45: score += 2
-    elif p5 <= 70: score += 1
-    if top10 is None or top10 <= 25: score += 1
-    if top10 is not None and top10 <= 12: score += 1
-    social = safe_int((result.get("social") or {}).get("score"))
-    story = safe_int((result.get("narrative") or {}).get("score"))
-    catalyst = safe_int(result.get("dex_catalyst"))
-    if social >= 25: score += 1
-    if social >= 50: score += 1
-    if story >= 50: score += 2
-    elif story >= 25: score += 1
-    score += min(2, catalyst // 3)
-    return min(score, 16), f"RUNNER_SCORE={min(score,16)}/16 R={ratio:.2f} VOL/MC={(vol/mc if mc else 0):.2f} LIQ/MC={(liq/mc if mc else 0):.2f} SOCIAL={social} STORY={story} CAT={catalyst}"
 
 def strong_signal(result, momentum, previous=None):
     if not basic_signal_safe(result):
@@ -2371,8 +2113,6 @@ def auto_scanner():
     "liq_pass": 0, "liq_missing": 0, "gecko_liq_ok": 0, "gecko_liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
     "momentum_pass": 0,
-    "runner_mom": 0, "runner_score5": 0, "runner_hard_safe": 0, "runner_final": 0,
-    "runner_blocks": {}, "runner_samples": [],
             }
 
             stats["unique_new"] = unique_new
@@ -2395,7 +2135,6 @@ def auto_scanner():
                     if pair is None:
                         stats["pair_yok"] += 1
                         continue
-                    pair = enrich_pair_with_dex_meta(pair, ca)
 
                     # V11.13: a token can be "new to the bot" without being newly launched.
                     # Only genuinely fresh pairs enter the early-entry pipeline.
@@ -2413,14 +2152,9 @@ def auto_scanner():
 
                     report = rugcheck(ca)
                     result = calculate_score(pair, report)
-                    # Snapshot provenance is persisted with metrics so trajectory/delta
-                    # calculations never mix GECKO/DEX/BIRDEYE values.
-                    result["_source"] = source_name
-                    result["_snapshot_ts"] = time.time()
                     social = social_presence(pair)
                     result["social"] = social
                     result["narrative"] = narrative_viral(pair)
-                    result["dex_catalyst"] = dex_catalyst_score(pair)
                     stats["processed"] += 1
 
                     viral_score, viral_label = market_viral_score(result)
@@ -2508,12 +2242,13 @@ def auto_scanner():
                         elif top10 >= 50:
                             stats["holder_50_60"] += 1
 
-                    holder_ok = liq_ok and (top10 is None or top10 < 82)
+                    holder_ok = liq_ok and top10 is not None and top10 <= RUG_TOP10_MAX
                     if holder_ok: stats["holder_pass"] += 1
 
                     sig = result.get("signals") or {}
 
-                    rug_ok = holder_ok and not sig.get("rug") and not sig.get("honeypot")
+                    rug_ok = (holder_ok and not sig.get("rug") and not sig.get("honeypot")
+                              and not sig.get("insider") and not sig.get("bundler"))
                     if rug_ok: stats["rug_ok"] += 1
 
                     auth_ok = (rug_ok
@@ -2620,82 +2355,7 @@ def auto_scanner():
                     # Volume breakout is an additional confirmed lane, never a safety bypass.
                     volume_signal = vb_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
                     trajectory_signal = trj_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
-
-                    # V11.43 FINAL ENTRY: once a token is SAFE + ACTIVE + TREND + MOMENTUM,
-                    # two fresh snapshots and the Data Guard are enough for a normal GIR.
-                    # This removes the redundant second confirmation that was killing real runners,
-                    # while preserving source/stale/liq/anomalous-MC/anti-chase protections.
-                    global_allow_gir, global_allow_guclu, global_gate_detail = global_entry_gate(result, old_metrics)
-                    runner_safety_gir, runner_safety_guclu, runner_safety_detail = final_runner_safety_gate(result, old_metrics)
-                    runner_score, runner_detail = final_runner_score(result)
-                    result["runner_score"] = runner_score
-
-                    # V12.2 diagnostic only: no trading threshold changes.
-                    if momentum_ok:
-                        stats["runner_mom"] += 1
-                        if runner_score >= 5:
-                            stats["runner_score5"] += 1
-                        if runner_safety_gir:
-                            stats["runner_hard_safe"] += 1
-
-                        _runner_reasons = []
-                        if not runner_safety_gir:
-                            _runner_reasons.append(runner_safety_detail.split()[0])
-                        if runner_score < 6:
-                            _runner_reasons.append("SCORE_LT5")
-                        if not basic_signal_safe(result):
-                            _runner_reasons.append("BASIC_SAFE")
-                        if not crash_guard(result):
-                            _runner_reasons.append("CRASH")
-                        if not price_allow_gir:
-                            _runner_reasons.append("PRICE")
-                        if not _runner_reasons:
-                            _runner_reasons.append("PASS")
-                        for _rr in _runner_reasons:
-                            stats["runner_blocks"][_rr] = stats["runner_blocks"].get(_rr, 0) + 1
-                        if len(stats["runner_samples"]) < 5:
-                            _base = pair.get("baseToken") or {}
-                            _sym = _base.get("symbol") or _base.get("name") or ca[:6]
-                            stats["runner_samples"].append(
-                                f"{_sym}:RS={runner_score} SAFETY={'Y' if runner_safety_gir else 'N'} "
-                                f"BLOCK={'+'.join(_runner_reasons)}"
-                            )
-
-                    # FINAL V12.1 RUNNER UNLOCK:
-                    # Legacy lanes keep strict 30s acceleration.
-                    # Final runner lane requires hard safety + confirmed momentum + runner structure.
-                    final_runner_signal = (
-                        runner_safety_gir
-                        and momentum_ok
-                        and runner_score >= 5
-                        and basic_signal_safe(result)
-                        and crash_guard(result)
-                        and price_allow_gir
-                    )
-                    if final_runner_signal:
-                        stats["runner_final"] += 1
-
-                    early_runner_signal = (
-                        momentum_ok
-                        and basic_signal_safe(result)
-                        and crash_guard(result)
-                        and price_allow_gir
-                    )
-                    if not global_allow_gir:
-                        fast_decision = None
-                        ruru_signal = False
-                        volume_signal = False
-                        trajectory_signal = False
-                        early_runner_signal = False
-
-                    legacy_signal_ok = global_allow_gir and (
-                        (fast_decision is not None)
-                        or ruru_signal
-                        or volume_signal
-                        or trajectory_signal
-                        or early_runner_signal
-                    )
-                    signal_ok = legacy_signal_ok or final_runner_signal
+                    signal_ok = (fast_decision is not None) or ruru_signal or volume_signal or trajectory_signal
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -2734,8 +2394,7 @@ def auto_scanner():
                             and ratio5 >= 1.20
                             and vol5_now >= 2500
                             and liq_now / max(mc_now, 1) >= 0.20
-                            and (price5_now is None or -5 <= price5_now <= CHASE_BLOCK_GUCLU_5M)
-                            and global_allow_guclu
+                            and (price5_now is None or -5 <= price5_now <= 160)
                         )
 
                         narrative_score = safe_int(result.get("narrative", {}).get("score"))
@@ -2748,7 +2407,7 @@ def auto_scanner():
                         chase_block_gir = price5_now is not None and price5_now > CHASE_BLOCK_GIR_5M
                         chase_block_guclu = price5_now is not None and price5_now > CHASE_BLOCK_GUCLU_5M
                         if chase_block_gir:
-                            guclu_gir = False
+                            continue
 
                         # SOCIAL-AWARE QUALITY GATE
                         # Social absence is not fatal for very early launches, but GUCLU GIR then
@@ -2758,15 +2417,13 @@ def auto_scanner():
                             (top10_now is not None and top10_now <= NO_SOCIAL_GUCLU_MAX_TOP10)
                             and (liq_now / max(mc_now, 1) >= NO_SOCIAL_GUCLU_MIN_LIQ_MC)
                         )
-                        allow_quality_guclu = global_allow_guclu and (not chase_block_guclu) and ((not no_social) or no_social_guclu_ok)
+                        allow_quality_guclu = (not chase_block_guclu) and ((not no_social) or no_social_guclu_ok)
 
                         # VOLUME BREAKOUT may strengthen an early entry, but anti-chase/social gates still win.
                         if volume_signal and vb_strong and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
                             guclu_gir = True
                         # TRAJECTORY strong requires real 60-90s acceleration; social absence still cannot bypass quality gate.
                         if trajectory_signal and trj_strong and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
-                            guclu_gir = True
-                        if final_runner_signal and runner_score >= 9 and runner_safety_guclu and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
                             guclu_gir = True
 
                         if fast_decision == "GUCLU GIR":
@@ -2817,10 +2474,9 @@ Momentum: +{momentum}
 Final Score: {final_score}/100
 
 KARAR: {karar_label}
-SINYAL YOLU: {"FINAL RUNNER / LIVE+SOCIAL" if final_runner_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else ("FAST / CONTINUATION TEYITLI" if fast_decision else ("TRAJECTORY BREAKOUT / 30-90S" if trajectory_signal else ("VOLUME BREAKOUT / TEYITLI" if volume_signal else ("EARLY RUNNER / TREND+MOMENTUM" if early_runner_signal and not ruru_signal else "RURU / TREND TEYITLI"))))}
-DEVAMLILIK: {(runner_safety_detail + " | " + runner_detail) if final_runner_signal and not (fast_decision or trajectory_signal or volume_signal or ruru_signal) else (cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else (global_gate_detail if early_runner_signal and not ruru_signal else "RURU TREND"))))}
+SINYAL YOLU: {"FAST / CONTINUATION TEYITLI" if fast_decision else ("TRAJECTORY BREAKOUT / 30-90S" if trajectory_signal else ("VOLUME BREAKOUT / TEYITLI" if volume_signal else "RURU / TREND TEYITLI"))}
+DEVAMLILIK: {cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else "RURU TREND"))}
 PRICE GUARD: {price_guard_detail}
-GLOBAL GATE: {(runner_safety_detail if final_runner_signal and not legacy_signal_ok else global_gate_detail)}
 
 UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur."""
 
@@ -2929,7 +2585,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V12.4 | total={stats.get('radar',0)} "
+                    f"RADAR V11.34 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2968,9 +2624,6 @@ Yeni giris icin uygun degil."""
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} FAST={stats.get('fast_signal',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
                     f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"
-                    f"RUNNER DIAG: MOM={stats.get('runner_mom',0)} SCORE5={stats.get('runner_score5',0)} HARD_SAFE={stats.get('runner_hard_safe',0)} FINAL={stats.get('runner_final',0)}\n"
-                    f"RUNNER BLOCKS: {stats.get('runner_blocks',{})}\n"
-                    f"RUNNER SAMPLES: {stats.get('runner_samples',[])}\n"
                     f"H1 SMART: limit={MAX_SIGNAL_DROP_1H:.0f}% fails={stats.get('h1_fail_values',[])}"
                 )
                 for chat_id in list(signal_chats):
@@ -3029,7 +2682,7 @@ Komutlar:
 ğŸ” Manuel analiz: AKTÄ°F
 ğŸš¨ Early Hunter: {"AKTÄ°F" if active else "KAPALI"}
 â± Tarama: {SCAN_INTERVAL} sn
-RURU Core: V11.41 FINAL RUNNER + DATA GUARD + TRAJECTORY + VOLUME BREAKOUT
+RURU Core: ORIGINAL V11.37 (UNCHANGED) + RUG SHIELD ONLY
 Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸ¯ Watch Score: {WATCH_SCORE}
 ğŸ”¥ Signal Score: {SIGNAL_SCORE}
@@ -3038,7 +2691,7 @@ Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸŸ¢ Birdeye API: {"BAÄLI" if BIRDEYE_API_KEY else "KEY YOK"}
 â± Birdeye yenileme: {BIRDEYE_POLL_INTERVAL} sn
 ğŸ’§ Min Likidite: {money(MIN_LIQUIDITY)}
-ğŸ“Š AUTO Market: $2Kâ€“$20K
+ğŸ“Š AUTO Market: $3Kâ€“$12K
 âœ… Quality Gate: buy>=5, hacim>=$500, buy/sell>=1.10, late-pump<=+180%\nğŸ“¡ /radar teÅŸhisi: AKTÄ°F\nğŸ§© Single Engine: AKTÄ°F""")
         return
 
@@ -3165,7 +2818,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $2K-$20K, Liquidity $600+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V12.4: RUNNER SOFT + FRESHNESS FIX + RUNNER DIAGNOSTIC + RUNNER UNLOCK + HARD SAFETY + LIVE SOCIAL/PROFILE + WIDE RUNNER + DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: RURU CORE UNCHANGED | RUG SHIELD: Liquidity $800+, Top10 <=35%, holder data required\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE: ORIGINAL RURU CORE + RUG SHIELD ONLY. Rug/Honeypot + Insider/Bundler + Mint/Freeze + Top10<=35 + Liquidity Guard. Runner logic not retuned.\nAutomatic signal engine is running.""")
 
 
 def startup():
