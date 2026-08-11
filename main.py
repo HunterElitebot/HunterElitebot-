@@ -70,8 +70,18 @@ FAST_GIR_MIN_LIQ_MC_RATIO = 0.18
 FAST_GIR_MIN_PRICE5 = -5.0
 FAST_GIR_MAX_PRICE5 = 150.0
 # POSITIVE ANTI-CHASE: do not call a parabolic move a fresh entry.
-CHASE_BLOCK_GUCLU_5M = 100.0
-CHASE_BLOCK_GIR_5M = 150.0
+CHASE_BLOCK_GUCLU_5M = 70.0
+CHASE_BLOCK_GIR_5M = 100.0
+# GLOBAL ENTRY GATE: every automatic lane must pass this final gate.
+GLOBAL_MAX_TOP10_GIR = 32.0
+GLOBAL_MAX_TOP10_GUCLU = 18.0
+GLOBAL_MAX_LIQ_DROP_PCT = 12.0
+GLOBAL_MIN_LIQ_MC = 0.20
+GLOBAL_MIN_FLOW = 1.08
+GLOBAL_MIN_BUY_DELTA = 2
+GLOBAL_MIN_VOL_DELTA = 200
+GLOBAL_MIN_MC_PROGRESS = 0.5
+GLOBAL_IDEAL_PRICE5_MAX = 60.0
 # When no social channel is published, GUCLU GIR requires unusually clean on-chain structure.
 NO_SOCIAL_GUCLU_MAX_TOP10 = 10.0
 NO_SOCIAL_GUCLU_MIN_LIQ_MC = 0.80
@@ -1887,6 +1897,51 @@ def trajectory_breakout_confirm(result, history):
         f"SELL+{sell_delta} FLOW={flow:.2f} LAST_MC={leg_mc:+.1f}% LAST_BUY+{leg_buy}")
 
 
+
+def global_entry_gate(result, previous):
+    """V11.38: one non-bypassable gate for FAST/RURU/VOLUME/TRAJECTORY.
+    Reject chase, unstable liquidity, weak fresh flow, and poor holder structure.
+    Returns (allow_gir, allow_guclu, detail).
+    """
+    if not result or not previous:
+        return False, False, "GLOBAL_WAIT_SECOND_TICK"
+    price5 = num(result.get("price5"))
+    mc = num(result.get("mc")); old_mc = num(previous.get("mc"))
+    liq = num(result.get("liq")); old_liq = num(previous.get("liq"))
+    top10 = num(result.get("top10"))
+    vol = num(result.get("vol5"), 0) or 0; old_vol = num(previous.get("vol5"), 0) or 0
+    buys = safe_int(result.get("buys5")); old_buys = safe_int(previous.get("buys5"))
+    sells = safe_int(result.get("sells5")); old_sells = safe_int(previous.get("sells5"))
+    if mc is None or old_mc is None or mc <= 0 or old_mc <= 0 or liq is None or liq <= 0:
+        return False, False, "GLOBAL_DATA_MISSING"
+    if price5 is not None and price5 > CHASE_BLOCK_GIR_5M:
+        return False, False, f"GLOBAL_CHASE price5={price5:+.1f}%"
+    if top10 is not None and top10 > GLOBAL_MAX_TOP10_GIR:
+        return False, False, f"GLOBAL_TOP10 {top10:.1f}%"
+    liq_mc = liq / mc
+    if liq_mc < GLOBAL_MIN_LIQ_MC:
+        return False, False, f"GLOBAL_LIQ/MC {liq_mc:.2f}"
+    liq_drop = 0.0
+    if old_liq is not None and old_liq > 0:
+        liq_drop = max(0.0, (old_liq-liq)/old_liq*100.0)
+        if liq_drop > GLOBAL_MAX_LIQ_DROP_PCT:
+            return False, False, f"GLOBAL_LIQ_UNSTABLE -{liq_drop:.1f}%"
+    mc_pct = ((mc-old_mc)/old_mc)*100.0
+    vol_delta = max(0.0, vol-old_vol)
+    buy_delta = max(0, buys-old_buys); sell_delta=max(0, sells-old_sells)
+    flow = buy_delta/max(sell_delta,1)
+    if vol_delta < GLOBAL_MIN_VOL_DELTA or buy_delta < GLOBAL_MIN_BUY_DELTA:
+        return False, False, f"GLOBAL_NO_ACCEL VOL+{vol_delta:.0f} BUY+{buy_delta}"
+    if flow < GLOBAL_MIN_FLOW:
+        return False, False, f"GLOBAL_FLOW {flow:.2f}"
+    if mc_pct < GLOBAL_MIN_MC_PROGRESS:
+        return False, False, f"GLOBAL_NO_MC_PROGRESS {mc_pct:+.1f}%"
+    allow_guclu = not (price5 is not None and price5 > CHASE_BLOCK_GUCLU_5M)
+    if top10 is not None and top10 > GLOBAL_MAX_TOP10_GUCLU:
+        allow_guclu = False
+    return True, allow_guclu, (f"GLOBAL_OK P5={price5 if price5 is not None else 0:+.1f}% "
+        f"LIQÎ”=-{liq_drop:.1f}% VOL+{vol_delta:.0f} BUY+{buy_delta} SELL+{sell_delta} FLOW={flow:.2f} MC={mc_pct:+.1f}%")
+
 def strong_signal(result, momentum, previous=None):
     if not basic_signal_safe(result):
         return False
@@ -2351,7 +2406,15 @@ def auto_scanner():
                     # Volume breakout is an additional confirmed lane, never a safety bypass.
                     volume_signal = vb_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
                     trajectory_signal = trj_ok and basic_signal_safe(result) and crash_guard(result) and price_allow_gir
-                    signal_ok = (fast_decision is not None) or ruru_signal or volume_signal or trajectory_signal
+
+                    # V11.38 NON-BYPASSABLE GLOBAL ENTRY GATE.
+                    global_allow_gir, global_allow_guclu, global_gate_detail = global_entry_gate(result, old_metrics)
+                    if not global_allow_gir:
+                        fast_decision = None
+                        ruru_signal = False
+                        volume_signal = False
+                        trajectory_signal = False
+                    signal_ok = global_allow_gir and ((fast_decision is not None) or ruru_signal or volume_signal or trajectory_signal)
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -2390,7 +2453,8 @@ def auto_scanner():
                             and ratio5 >= 1.20
                             and vol5_now >= 2500
                             and liq_now / max(mc_now, 1) >= 0.20
-                            and (price5_now is None or -5 <= price5_now <= 160)
+                            and (price5_now is None or -5 <= price5_now <= CHASE_BLOCK_GUCLU_5M)
+                            and global_allow_guclu
                         )
 
                         narrative_score = safe_int(result.get("narrative", {}).get("score"))
@@ -2403,7 +2467,7 @@ def auto_scanner():
                         chase_block_gir = price5_now is not None and price5_now > CHASE_BLOCK_GIR_5M
                         chase_block_guclu = price5_now is not None and price5_now > CHASE_BLOCK_GUCLU_5M
                         if chase_block_gir:
-                            continue
+                            guclu_gir = False
 
                         # SOCIAL-AWARE QUALITY GATE
                         # Social absence is not fatal for very early launches, but GUCLU GIR then
@@ -2413,7 +2477,7 @@ def auto_scanner():
                             (top10_now is not None and top10_now <= NO_SOCIAL_GUCLU_MAX_TOP10)
                             and (liq_now / max(mc_now, 1) >= NO_SOCIAL_GUCLU_MIN_LIQ_MC)
                         )
-                        allow_quality_guclu = (not chase_block_guclu) and ((not no_social) or no_social_guclu_ok)
+                        allow_quality_guclu = global_allow_guclu and (not chase_block_guclu) and ((not no_social) or no_social_guclu_ok)
 
                         # VOLUME BREAKOUT may strengthen an early entry, but anti-chase/social gates still win.
                         if volume_signal and vb_strong and allow_quality_guclu and price_allow_guclu and not chase_block_guclu:
@@ -2473,6 +2537,7 @@ KARAR: {karar_label}
 SINYAL YOLU: {"FAST / CONTINUATION TEYITLI" if fast_decision else ("TRAJECTORY BREAKOUT / 30-90S" if trajectory_signal else ("VOLUME BREAKOUT / TEYITLI" if volume_signal else "RURU / TREND TEYITLI"))}
 DEVAMLILIK: {cont_detail if fast_decision else (trj_detail if trajectory_signal else (vb_detail if volume_signal else "RURU TREND"))}
 PRICE GUARD: {price_guard_detail}
+GLOBAL GATE: {global_gate_detail}
 
 UYARI: Kazanc garanti degildir; Axiom'da son kontrol zorunludur."""
 
@@ -2581,7 +2646,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.34 | total={stats.get('radar',0)} "
+                    f"RADAR V11.38 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
