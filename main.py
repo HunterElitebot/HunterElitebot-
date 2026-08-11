@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "HUNTERELITE FINAL V12.1 RUNNER UNLOCK"
+VERSION = "HUNTERELITE FINAL V12.2 RUNNER DIAGNOSTIC"
 
 # FINAL V12 RUNNER POLICY
 # - Widen discovery only: MC/liquidity intake expanded.
@@ -2369,6 +2369,8 @@ def auto_scanner():
     "liq_pass": 0, "liq_missing": 0, "gecko_liq_ok": 0, "gecko_liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
     "momentum_pass": 0,
+    "runner_mom": 0, "runner_score6": 0, "runner_hard_safe": 0, "runner_final": 0,
+    "runner_blocks": {}, "runner_samples": [],
             }
 
             stats["unique_new"] = unique_new
@@ -2626,6 +2628,37 @@ def auto_scanner():
                     runner_score, runner_detail = final_runner_score(result)
                     result["runner_score"] = runner_score
 
+                    # V12.2 diagnostic only: no trading threshold changes.
+                    if momentum_ok:
+                        stats["runner_mom"] += 1
+                        if runner_score >= 6:
+                            stats["runner_score6"] += 1
+                        if runner_safety_gir:
+                            stats["runner_hard_safe"] += 1
+
+                        _runner_reasons = []
+                        if not runner_safety_gir:
+                            _runner_reasons.append(runner_safety_detail.split()[0])
+                        if runner_score < 6:
+                            _runner_reasons.append("SCORE_LT6")
+                        if not basic_signal_safe(result):
+                            _runner_reasons.append("BASIC_SAFE")
+                        if not crash_guard(result):
+                            _runner_reasons.append("CRASH")
+                        if not price_allow_gir:
+                            _runner_reasons.append("PRICE")
+                        if not _runner_reasons:
+                            _runner_reasons.append("PASS")
+                        for _rr in _runner_reasons:
+                            stats["runner_blocks"][_rr] = stats["runner_blocks"].get(_rr, 0) + 1
+                        if len(stats["runner_samples"]) < 5:
+                            _base = pair.get("baseToken") or {}
+                            _sym = _base.get("symbol") or _base.get("name") or ca[:6]
+                            stats["runner_samples"].append(
+                                f"{_sym}:RS={runner_score} SAFETY={'Y' if runner_safety_gir else 'N'} "
+                                f"BLOCK={'+'.join(_runner_reasons)}"
+                            )
+
                     # FINAL V12.1 RUNNER UNLOCK:
                     # Legacy lanes keep strict 30s acceleration.
                     # Final runner lane requires hard safety + confirmed momentum + runner structure.
@@ -2637,6 +2670,9 @@ def auto_scanner():
                         and crash_guard(result)
                         and price_allow_gir
                     )
+                    if final_runner_signal:
+                        stats["runner_final"] += 1
+
                     early_runner_signal = (
                         momentum_ok
                         and basic_signal_safe(result)
@@ -2930,6 +2966,9 @@ Yeni giris icin uygun degil."""
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} FAST={stats.get('fast_signal',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
                     f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"
+                    f"RUNNER DIAG: MOM={stats.get('runner_mom',0)} SCORE6={stats.get('runner_score6',0)} HARD_SAFE={stats.get('runner_hard_safe',0)} FINAL={stats.get('runner_final',0)}\n"
+                    f"RUNNER BLOCKS: {stats.get('runner_blocks',{})}\n"
+                    f"RUNNER SAMPLES: {stats.get('runner_samples',[])}\n"
                     f"H1 SMART: limit={MAX_SIGNAL_DROP_1H:.0f}% fails={stats.get('h1_fail_values',[])}"
                 )
                 for chat_id in list(signal_chats):
@@ -3124,7 +3163,7 @@ Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Auto Quality: MC $2K-$20K, Liquidity $600+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V12.1: RUNNER UNLOCK + HARD SAFETY + LIVE SOCIAL/PROFILE + WIDE RUNNER + DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
+Auto Quality: MC $2K-$20K, Liquidity $600+, Top10 safety active\nHard rug/honeypot and authority checks remain active.\n\nFINAL ENGINE V12.2: RUNNER DIAGNOSTIC + RUNNER UNLOCK + HARD SAFETY + LIVE SOCIAL/PROFILE + WIDE RUNNER + DATA GUARD + EARLY RUNNER GATE + SHADOW WATCH + LIQUIDITY STABILITY + TRAJECTORY 30-90S + ACCELERATION + RURU TREND + STORY HUNTER + VOLUME BREAKOUT + VOLUME CONTINUATION + ANTI-CHASE + NEGATIVE PRICE GUARD + RUG/HOLDER/LIQ SAFETY + MANUAL + AXIOM: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
