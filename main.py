@@ -2,7 +2,7 @@ import os, json, time, threading, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION='HUNTERELITE CREATOR HUNTER V2 INSTANT ALERT'
+VERSION='HUNTERELITE CREATOR HUNTER V2.2 LIVE-ONLY'
 TOKEN=os.getenv('TOKEN','').strip()
 SIGNAL_CHAT_ID=os.getenv('SIGNAL_CHAT_ID','').strip()
 RPC=os.getenv('SOLANA_RPC_URL','https://api.mainnet-beta.solana.com').strip()
@@ -19,6 +19,7 @@ SEEDS={
 extra=[x.strip() for x in os.getenv('CREATOR_WALLETS','').split(',') if x.strip()]
 for w in extra: SEEDS.setdefault(w,{'label':'ENV creator','source':'manual'})
 lock=threading.Lock(); state={'creators':{},'seen_sigs':{},'candidates':{},'alerts':[]}
+STARTED_AT=int(time.time())
 
 def load():
  global state
@@ -43,11 +44,25 @@ def rpc(method,params):
  if x.get('error'): raise RuntimeError(x['error'])
  return x.get('result')
 
-def tg(text):
+def tg(text, reply_markup=None):
  if not TOKEN or not SIGNAL_CHAT_ID: print(text,flush=True); return
  url=f'https://api.telegram.org/bot{TOKEN}/sendMessage'
  body={'chat_id':SIGNAL_CHAT_ID,'text':text[:4000],'disable_web_page_preview':True}
+ if reply_markup is not None: body['reply_markup']=reply_markup
  http_json(url,'POST',body,15)
+
+def send_creator_alert(meta, wallet, mint):
+ # 1) Short alert. Keep CA out of the crowded detail block.
+ tg(f"🚨 CREATOR YENI TOKEN CIKARDI\n\nCreator: {meta.get('label','TRACKED')}\nWallet: {wallet}\nDetected: ON-CHAIN / NEW CREATE\nScan: {SCAN}s")
+ # 2) CA-only message: long-press -> Copy works cleanly on mobile.
+ tg(mint)
+ # 3) One-tap actions. Telegram Bot API copy_text button copies the exact CA.
+ axiom=f"https://axiom.trade/t/{mint}/@215162?chain=sol"
+ markup={'inline_keyboard':[[
+   {'text':'📋 CA KOPYALA','copy_text':{'text':mint}},
+   {'text':"🚀 AXIOM'DA AC",'url':axiom}
+ ]]}
+ tg('⚡ ANLIK CREATOR ALARMI', markup)
 
 def sigs(addr,limit=12): return rpc('getSignaturesForAddress',[addr,{'limit':limit,'commitment':'confirmed'}]) or []
 def tx(sig): return rpc('getTransaction',[sig,{'encoding':'jsonParsed','maxSupportedTransactionVersion':0,'commitment':'confirmed'}])
@@ -87,29 +102,55 @@ def bootstrap_creator(w):
  if arr: state['seen_sigs'][w]=arr[0]['signature']
 
 def watch_creators():
- # Ignore historical transactions on first boot; alert only launches after watcher starts.
+ # LIVE-ONLY baseline: ALWAYS reset each creator to its newest signature at process start.
+ # This deliberately ignores every historical transaction, including stale state from V2/V2.1.
  for w in list(state['creators']):
-  if w not in state['seen_sigs']:
-   try: bootstrap_creator(w)
-   except Exception as e: print('BOOT',w,repr(e),flush=True)
+  try:
+   bootstrap_creator(w)
+   print('BASELINE', w, state['seen_sigs'].get(w,'NONE'), flush=True)
+  except Exception as e:
+   print('BOOT',w,repr(e),flush=True)
  save()
  while True:
   for w,meta in list(state['creators'].items()):
    try:
-    arr=sigs(w,15); last=state['seen_sigs'].get(w); fresh=[]
+    arr=sigs(w,15); last=state['seen_sigs'].get(w)
+    # If RPC had no baseline, establish one silently. Never backfill.
+    if not last:
+     if arr: state['seen_sigs'][w]=arr[0]['signature']; save()
+     continue
+    fresh=[]
+    found_baseline=False
     for s in arr:
-     if s['signature']==last: break
+     if s['signature']==last:
+      found_baseline=True
+      break
      fresh.append(s)
+    # If baseline fell outside the window, do NOT treat the page as new history.
+    # Re-baseline silently to newest and wait for the next truly new signature.
+    if arr and not found_baseline:
+     state['seen_sigs'][w]=arr[0]['signature']; save()
+     print('REBASELINE',w,'history skipped',flush=True)
+     continue
     if arr: state['seen_sigs'][w]=arr[0]['signature']
     for s in reversed(fresh):
      if s.get('err') is not None: continue
-     info=pump_create_info(tx(s['signature']),w)
+     # Signature must itself be newer than this process startup.
+     bt=int(s.get('blockTime') or 0)
+     if bt and bt < STARTED_AT-10: continue
+     t=tx(s['signature'])
+     tx_bt=int((t or {}).get('blockTime') or bt or 0)
+     if tx_bt and tx_bt < STARTED_AT-10: continue
+     info=pump_create_info(t,w)
      if info:
-      mint=info['mint']; key=w+':'+mint
+      mint=info['mint']
+      # Never announce the known source/winner token as a new launch.
+      if mint == meta.get('source'): continue
+      key=w+':'+mint
       if key in state['alerts']: continue
       state['alerts'].append(key); state['alerts']=state['alerts'][-500:]
-      tg(f"🚨 CREATOR YENI TOKEN CIKARDI\n\nCreator: {meta.get('label','TRACKED')}\nWallet: {w}\nNew CA: {mint}\n\nSource winner: {meta.get('source','-')}\nDetected: ON-CHAIN / NEW CREATE\nScan: {SCAN}s\n\n⚡ ANLIK CREATOR ALARMI")
-      print('ALERT',w,mint,flush=True)
+      send_creator_alert(meta, w, mint)
+      print('LIVE ALERT',w,mint,flush=True)
     save()
    except Exception as e: print('WATCH ERROR',w,repr(e),flush=True)
    time.sleep(0.7)
