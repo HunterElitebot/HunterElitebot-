@@ -70,7 +70,9 @@ MIN_VOL_GROWTH = 1.00
 # This layer only blocks/cancels when liquidity collapses between scans.
 LIQ_DRAIN_GUARD_ENABLED = True
 LIQ_DRAIN_WARN_PCT = 20.0
-LIQ_DRAIN_HARD_PCT = 35.0
+LIQ_DRAIN_HARD_PCT = 25.0
+LIQ_CONFIRM_MIN_SCANS = 2
+LIQ_CONFIRM_MAX_DROP_PCT = 12.0
 
 STATE_FILE = "/tmp/hunterelite_v11_2_state.json"
 
@@ -2021,9 +2023,21 @@ def auto_scanner():
                     last_sent = previous.get("last_sent", 0) if previous else 0
                     new_stage, message = stage, None
 
-                    watch_ok = watch_candidate(result)
+                    # V11.36.3 LIQ HARD GATE: never publish WATCH/SIGNAL from a first liquidity snapshot.
+                    # Require a second consecutive scan and block if liquidity falls >12% between them.
+                    liq_confirmed = False
+                    if old_metrics is not None:
+                        old_liq_confirm = num(old_metrics.get("liq"))
+                        new_liq_confirm = num(result.get("liq"))
+                        if old_liq_confirm is not None and new_liq_confirm is not None and old_liq_confirm >= MIN_LIQUIDITY and new_liq_confirm >= MIN_LIQUIDITY:
+                            confirm_drop = max(0.0, (old_liq_confirm - new_liq_confirm) / old_liq_confirm * 100.0) if old_liq_confirm > 0 else 100.0
+                            liq_confirmed = confirm_drop <= LIQ_CONFIRM_MAX_DROP_PCT
+                    result["liq_confirmed"] = liq_confirmed
+
+                    watch_ok = watch_candidate(result) and seen_count >= LIQ_CONFIRM_MIN_SCANS and liq_confirmed
                     signal_ok = (
-                        seen_count >= TREND_CONFIRM_SCANS
+                        seen_count >= max(TREND_CONFIRM_SCANS, LIQ_CONFIRM_MIN_SCANS)
+                        and liq_confirmed
                         and strong_signal(result, momentum, old_metrics)
                     )
 
