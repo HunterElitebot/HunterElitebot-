@@ -15,7 +15,7 @@ except Exception:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.36.1 RURU LIVE WS FIX"
+VERSION = "V11.36.2 RURU PAIR PIPELINE FIX"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
@@ -311,7 +311,17 @@ def dex_pairs(ca):
     return []
 
 def best_pair(ca):
+    # DexScreener token endpoint is eventually consistent for brand-new launches.
+    # Try the normal lookup first, then the search endpoint so candidates discovered
+    # by Gecko/Raydium/Meteora are not discarded before scoring.
     pairs = dex_pairs(ca)
+    if not pairs:
+        try:
+            data = get_json("https://api.dexscreener.com/latest/dex/search?" + urllib.parse.urlencode({"q": ca}), timeout=10)
+            rows = (data or {}).get("pairs") or [] if isinstance(data, dict) else []
+            pairs = [p for p in rows if str(p.get("chainId", "")).lower() == "solana" and ca in (str((p.get("baseToken") or {}).get("address","")), str((p.get("quoteToken") or {}).get("address","")))]
+        except Exception as e:
+            print("DEX SEARCH FALLBACK ERROR:", ca, repr(e), flush=True)
     if not pairs:
         return None
     return max(pairs, key=lambda p: num((p.get("liquidity") or {}).get("usd"), 0))
