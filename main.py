@@ -15,7 +15,7 @@ except Exception:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.36.8 SOCIAL WEB FALLBACK"
+VERSION = "V11.37.1 RELAXED PIPELINE FIX"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
@@ -1550,7 +1550,7 @@ def potential_label(result, momentum=0):
         return "â›” YETKÄ° RÄ°SKÄ°"
     if result["liq"] is None or result["liq"] < MIN_LIQUIDITY:
         return "ğŸ”´ ZAYIF"
-    if result["top10"] is not None and result["top10"] >= 75:
+    if result["top10"] is not None and result["top10"] >= 90:
         return "ğŸ”´ DAÄILIM RÄ°SKÄ°"
 
     score = result["score"] + momentum
@@ -2371,7 +2371,7 @@ def filter_fail_reason(result, previous=None, momentum=0, for_signal=False):
         return "liq_fail"
 
     top10 = result.get("top10")
-    if top10 is not None and top10 >= 75:
+    if top10 is not None and top10 >= 90:
         return "holder_fail"
 
     if not crash_guard(result):
@@ -2648,7 +2648,7 @@ def auto_scanner():
                         elif top10 >= 50:
                             stats["holder_50_60"] += 1
 
-                    holder_ok = liq_ok and (top10 is None or top10 < 75)
+                    holder_ok = liq_ok and (top10 is None or top10 < 90)
                     if holder_ok: stats["holder_pass"] += 1
 
                     sig = result.get("signals") or {}
@@ -3161,7 +3161,7 @@ Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 Solana WS: {"CONNECTED/STARTING" if SOLANA_WS_URL else "MISSING"}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 <75%\nHard rug/honeypot and authority checks remain active.\n\nSTATE DECISION LOCK + CENTRAL OUTPUT + LIQ FALLBACK: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $500+, Liquidity $400+, Top10 <90%\nHard rug/honeypot and authority checks remain active.\n\nSTATE DECISION LOCK + CENTRAL OUTPUT + LIQ FALLBACK: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
