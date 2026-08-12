@@ -15,7 +15,7 @@ except Exception:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.36.4 FINAL STABLE"
+VERSION = "V11.36.4 FINAL STABLE DIAGNOSTIC"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
@@ -182,7 +182,7 @@ radar_stats = {
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
     "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
-    "momentum_pass": 0,
+    "momentum_pass": 0, "liq_confirmed": 0, "liq_wait": 0, "liq_drop_block": 0, "clone_block": 0, "signal_gate_pass": 0,
 }
 
 def load_state():
@@ -1954,7 +1954,7 @@ def auto_scanner():
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
     "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
-    "momentum_pass": 0,
+    "momentum_pass": 0, "liq_confirmed": 0, "liq_wait": 0, "liq_drop_block": 0, "clone_block": 0, "signal_gate_pass": 0,
             }
 
             stats["unique_new"] = unique_new
@@ -2146,6 +2146,12 @@ def auto_scanner():
                             confirm_drop = max(0.0, (old_liq_confirm - new_liq_confirm) / old_liq_confirm * 100.0) if old_liq_confirm > 0 else 100.0
                             liq_confirmed = confirm_drop <= LIQ_CONFIRM_MAX_DROP_PCT
                     result["liq_confirmed"] = liq_confirmed
+                    if liq_confirmed:
+                        stats["liq_confirmed"] += 1
+                    elif old_metrics is None or num(old_metrics.get("liq")) is None or num(result.get("liq")) is None:
+                        stats["liq_wait"] += 1
+                    else:
+                        stats["liq_drop_block"] += 1
 
                     watch_ok = watch_candidate(result) and seen_count >= LIQ_CONFIRM_MIN_SCANS and liq_confirmed
                     signal_ok = (
@@ -2170,10 +2176,14 @@ def auto_scanner():
                     if watch_ok or signal_ok:
                         clone_safe, clone_reason = clone_impersonation_guard(name, symbol, ca, pair)
                         if not clone_safe:
+                            stats["clone_block"] += 1
                             watch_ok = False
                             signal_ok = False
                             result["clone_block"] = clone_reason
                             print(f"CLONE GUARD BLOCK: {name} ({symbol}) {ca} | {clone_reason}", flush=True)
+
+                    if signal_ok:
+                        stats["signal_gate_pass"] += 1
 
                     if (
                         signal_ok
@@ -2372,6 +2382,9 @@ Yeni giris icin uygun degil."""
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
                     f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
+                    f"SIGNAL GATES: LIQ_OK={stats.get('liq_confirmed',0)} "
+                    f"LIQ_WAIT={stats.get('liq_wait',0)} LIQ_DROP_BLOCK={stats.get('liq_drop_block',0)} "
+                    f"CLONE_BLOCK={stats.get('clone_block',0)} FINAL_GATE={stats.get('signal_gate_pass',0)}\n"
                     f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"
                     f"H1 SMART: limit={MAX_SIGNAL_DROP_1H:.0f}% fails={stats.get('h1_fail_values',[])}"
                 )
