@@ -15,7 +15,7 @@ except Exception:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.36.2 RURU PAIR PIPELINE FIX"
+VERSION = "V11.36.3 LIQ HARD GATE FIXED"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
@@ -1461,7 +1461,7 @@ def potential_label(result, momentum=0):
         and buy_ratio_ok
         and vol5 >= 250
     ):
-        return "ğŸš€ 5Xâ€“10X POTANSÄ°YEL ADAYI"
+        return "ğŸš€ 5X-10X POTANSIYEL ADAYI"
 
     if score >= 58:
         return "ğŸŸ¡ ERKEN / Ä°ZLE"
@@ -2079,8 +2079,8 @@ Likidite Degisim: -{liq_drop_pct:.1f}%
 
 Risk Score: {result["score"]}/100
 Momentum: +{momentum}
-1s fiyat: {percent(result["price1h"])}
-6s fiyat: {percent(result["price6h"])}
+1sa fiyat: {percent(result["price1h"])}
+6sa fiyat: {percent(result["price6h"])}
 Pair yasi: {age_text}
 Final Score: {final_score}/100
 
