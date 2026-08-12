@@ -15,7 +15,7 @@ except Exception:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.38.1 FINAL GATE RECOVERY"
+VERSION = "V11.38.3 LIVE SOURCE RECOVERY"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
@@ -30,6 +30,7 @@ SOCIAL_VIRAL_ENGAGEMENT = int(os.getenv("SOCIAL_VIRAL_ENGAGEMENT", "500"))
 if not SOLANA_RPC_URL and SOLANA_WS_URL:
     SOLANA_RPC_URL = SOLANA_WS_URL.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
 
+# V11.38.2 FAST LAUNCH: 5s event-wake scan + 10s public-feed refresh; safety gates unchanged.
 # V11.37 RELAXED DISCOVERY: wider discovery, hard rug protections preserved.
 # V11.5: single-engine mode.
 # Telegram getUpdates polling is OFF by default so another stale/duplicate
@@ -45,7 +46,7 @@ MIN_LIQUIDITY = 400
 # V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
 WATCH_SCORE = 38
 SIGNAL_SCORE = 50
-SCAN_INTERVAL = 12
+SCAN_INTERVAL = 5
 
 BIRDEYE_POLL_INTERVAL = int(os.getenv("BIRDEYE_POLL_INTERVAL", "180"))
 BIRDEYE_ERROR_COOLDOWN = int(os.getenv("BIRDEYE_ERROR_COOLDOWN", "900"))
@@ -117,7 +118,7 @@ FRESH_PAIR_MAX_HOURS = 2.0
 
 # Multi-source discovery caches. These only supply candidate CAs;
 # all candidates still pass the unchanged RURU CORE safety/entry pipeline.
-SOURCE_POLL_INTERVAL = 24
+SOURCE_POLL_INTERVAL = 10
 SOURCE_CACHE_LIMIT = 120
 source_feed_lock = threading.Lock()
 source_feed_cache = {"GECKO": [], "RAYDIUM": [], "METEORA": []}
@@ -759,11 +760,17 @@ def raydium_new_candidates(force=False):
             errors.append(type(e).__name__)
 
     errtxt = ";".join(errors[:4])
-    if errors:
+    # One Raydium endpoint may fail while another is healthy. Keep the live
+    # candidates and do not put the whole source into cooldown in that case.
+    if found:
+        _feed_success("RAYDIUM")
+        if errors:
+            print(f"RAYDIUM PARTIAL: candidates={len(found)} errors={errtxt}", flush=True)
+    elif errors:
         _feed_backoff("RAYDIUM", errtxt)
     else:
         _feed_success("RAYDIUM")
-    return _cache_source_result("RAYDIUM", found, errtxt)
+    return _cache_source_result("RAYDIUM", found, errtxt if not found else "")
 
 def _meteora_row_mints(row):
     if not isinstance(row, dict):
@@ -844,11 +851,17 @@ def meteora_new_candidates(force=False):
             errors.append(type(e).__name__)
 
     errtxt = ";".join(errors[:4])
-    if errors:
+    # Meteora exposes several public pool endpoints. A partial HTTP failure
+    # must not make fresh candidates from the other endpoints stale.
+    if found:
+        _feed_success("METEORA")
+        if errors:
+            print(f"METEORA PARTIAL: candidates={len(found)} errors={errtxt}", flush=True)
+    elif errors:
         _feed_backoff("METEORA", errtxt)
     else:
         _feed_success("METEORA")
-    return _cache_source_result("METEORA", found, errtxt)
+    return _cache_source_result("METEORA", found, errtxt if not found else "")
 
 def _ws_rpc(method, params, timeout=12):
     if not SOLANA_RPC_URL:
@@ -1071,7 +1084,7 @@ def discovery_candidates():
     candidate_sources.clear()
     used = set()
     buckets = {"BIRDEYE": [], "GECKO": [], "RAYDIUM": [], "METEORA": [], "DEX": []}
-    live_ws_rows = ws_drain_candidates(40)
+    live_ws_rows = ws_drain_candidates(80)
 
     def add_many(source, values):
         for raw in values:
@@ -2356,7 +2369,7 @@ def strong_signal(result, momentum, previous=None):
         return False
     if not trend_confirmed(previous, result):
         return False
-    # V11.38.1 FINAL GATE RECOVERY: safety + confirmed trend/momentum +
+    # V11.38.2 FAST LAUNCH RECOVERY: safety + confirmed trend/momentum +
     # confirmed liquidity are already enforced by the caller. Do not kill a
     # late-stage candidate again with stricter duplicate activity thresholds.
     if result["score"] + momentum < SIGNAL_SCORE:
@@ -3000,7 +3013,7 @@ Yeni giris icin uygun degil."""
                     f"> ACTIVITY={stats.get('activity_pass',0)} "
                     f"> TREND={stats.get('trend_pass',0)} "
                     f"> MOMENTUM={stats.get('momentum_pass',0)}\n"
-                    f"WATCH={stats.get('watch',0)} SIGNAL={stats.get('signal',0)} "
+                    f"WATCH_NEW={stats.get('watch',0)} SIGNAL_NEW={stats.get('signal',0)} "
                     f"pair_missing={stats.get('pair_yok',0)} stale_pair={stats.get('stale_pair',0)}\n"
                     f"SIGNAL GATES: LIQ_OK={stats.get('liq_confirmed',0)} "
                     f"LIQ_WAIT={stats.get('liq_wait',0)} LIQ_DROP_BLOCK={stats.get('liq_drop_block',0)} "
