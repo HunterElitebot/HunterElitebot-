@@ -30,20 +30,21 @@ SOCIAL_VIRAL_ENGAGEMENT = int(os.getenv("SOCIAL_VIRAL_ENGAGEMENT", "500"))
 if not SOLANA_RPC_URL and SOLANA_WS_URL:
     SOLANA_RPC_URL = SOLANA_WS_URL.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
 
+# V11.37 RELAXED DISCOVERY: wider discovery, hard rug protections preserved.
 # V11.5: single-engine mode.
 # Telegram getUpdates polling is OFF by default so another stale/duplicate
 # poller cannot interfere with automatic signal delivery. Automatic alerts
 # still work via sendMessage using SIGNAL_CHAT_ID.
 POLLING_ENABLED = os.getenv("POLLING_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
 
-MC_MIN = 1000
-MC_MAX = 15000
-EARLY_MC_MAX = 10000
-MIN_LIQUIDITY = 800
+MC_MIN = 500
+MC_MAX = 20000
+EARLY_MC_MAX = 15000
+MIN_LIQUIDITY = 400
 
 # V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
-WATCH_SCORE = 47
-SIGNAL_SCORE = 60
+WATCH_SCORE = 38
+SIGNAL_SCORE = 50
 SCAN_INTERVAL = 12
 
 BIRDEYE_POLL_INTERVAL = int(os.getenv("BIRDEYE_POLL_INTERVAL", "180"))
@@ -55,21 +56,21 @@ BIRDEYE_PAGES = 1
 BIRDEYE_NEW_LISTING = "https://public-api.birdeye.so/defi/v2/tokens/new_listing"
 
 WATCH_REPEAT_COOLDOWN = 21600
-MAX_WATCH_DROP_5M = -10.0
+MAX_WATCH_DROP_5M = -15.0
 MAX_SIGNAL_DROP_1H = -35.0
 MAX_CRASH_DROP_6H = -35.0
 MAX_CRASH_DROP_24H = -55.0
 
-MIN_MOMENTUM_SIGNAL = 10
-MIN_MC_GROWTH = 1.005
+MIN_MOMENTUM_SIGNAL = 5
+MIN_MC_GROWTH = 1.000
 MAX_PAIR_AGE_HOURS = 2.0
 TREND_CONFIRM_SCANS = 2
 
-WATCH_MIN_BUYS_5M = 2
-WATCH_MIN_VOL_5M = 60
-SIGNAL_MIN_BUYS_5M = 4
-SIGNAL_MIN_BUY_SELL_RATIO = 1.10
-SIGNAL_MIN_VOL_5M = 180
+WATCH_MIN_BUYS_5M = 1
+WATCH_MIN_VOL_5M = 25
+SIGNAL_MIN_BUYS_5M = 2
+SIGNAL_MIN_BUY_SELL_RATIO = 1.02
+SIGNAL_MIN_VOL_5M = 75
 MIN_VOL_GROWTH = 1.00
 
 # Liquidity Drain Guard
@@ -1393,12 +1394,12 @@ def calculate_score(pair, report):
     if liq is None:
         score -= 25
         risks.append("Likidite verisi yok")
-    elif liq < 1000:
-        score -= 35
-        risks.append("Likidite Ã§ok dÃ¼ÅŸÃ¼k")
     elif liq < MIN_LIQUIDITY:
-        score -= 20
-        risks.append("Likidite dÃ¼ÅŸÃ¼k")
+        score -= 30
+        risks.append("Likidite minimum altÄ±")
+    elif liq < 800:
+        score -= 12
+        risks.append("Likidite dÃ¼ÅŸÃ¼k / erken aÅŸama")
 
     top1, top5, top10 = holders(report)
 
@@ -1409,17 +1410,17 @@ def calculate_score(pair, report):
         score -= 10
         risks.append("Holder daÄŸÄ±lÄ±mÄ± doÄŸrulanamadÄ±")
     else:
-        if top10 >= 82:
+        if top10 >= 90:
             score -= 40
             risks.append("Top-10 holder aÅŸÄ±rÄ± yoÄŸun")
-        elif top10 >= 70:
-            score -= 30
+        elif top10 >= 82:
+            score -= 22
             risks.append("Top-10 holder Ã§ok yÃ¼ksek")
-        elif top10 >= 60:
-            score -= 20
+        elif top10 >= 70:
+            score -= 14
             risks.append("Top-10 holder yÃ¼ksek")
-        elif top10 >= 50:
-            score -= 10
+        elif top10 >= 60:
+            score -= 8
             risks.append("Top-10 holder dikkat")
 
     mint = authority(report, "mintAuthority")
@@ -1473,7 +1474,7 @@ def calculate_score(pair, report):
         or sig["honeypot"]
         or mint is True
         or freeze is True
-        or (top10 is not None and top10 >= 80)
+        or (top10 is not None and top10 >= 90)
     )
 
     if severe:
@@ -2233,7 +2234,7 @@ def basic_signal_safe(result):
         return False
     if result["liq"] is None or result["liq"] < MIN_LIQUIDITY:
         return False
-    if result["top10"] is not None and result["top10"] >= 75:
+    if result["top10"] is not None and result["top10"] >= 90:
         return False
     return True
 
@@ -3168,7 +3169,7 @@ def startup():
     print(f"TELEGRAM POLLING: {'ON' if POLLING_ENABLED else 'OFF - AUTO SIGNAL MODE'}", flush=True)
     print("EARLY HUNTER ACTIVE", flush=True)
     print(f"SCAN INTERVAL: {SCAN_INTERVAL}s", flush=True)
-    print(f"EARLY ENTRY FILTERS: MC>={MC_MIN}, LIQ>={MIN_LIQUIDITY}, TOP10<75%", flush=True)
+    print(f"EARLY ENTRY FILTERS: MC>={MC_MIN}, LIQ>={MIN_LIQUIDITY}, TOP10<90%", flush=True)
     print(
         f"TUNING: watch={WATCH_SCORE}, signal={SIGNAL_SCORE}, "
         f"momentum>={MIN_MOMENTUM_SIGNAL}, MC growth>={int((MIN_MC_GROWTH-1)*100)}%, "
