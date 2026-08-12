@@ -15,14 +15,16 @@ except Exception:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.36.6 MANUAL SOCIAL DEEP"
+VERSION = "V11.36.7 SOCIAL LIVE"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "").strip()
 X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "").strip()
 REDDIT_ACCESS_TOKEN = os.getenv("REDDIT_ACCESS_TOKEN", "").strip()
-REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "HunterEliteBot/11.36.6").strip()
+REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "").strip()
+REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "").strip()
+REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "HunterEliteBot/11.36.7").strip()
 SOCIAL_MAJOR_FOLLOWERS = int(os.getenv("SOCIAL_MAJOR_FOLLOWERS", "50000"))
 SOCIAL_VIRAL_ENGAGEMENT = int(os.getenv("SOCIAL_VIRAL_ENGAGEMENT", "500"))
 if not SOLANA_RPC_URL and SOLANA_WS_URL:
@@ -236,6 +238,14 @@ def telegram(method, data=None, timeout=35):
 def clean_telegram_text(text):
     """One final cleanup point for every outgoing Telegram message."""
     s = "" if text is None else str(text)
+    # Repair common UTF-8-as-Latin1 mojibake before the legacy replacements below.
+    if any(mark in s for mark in ("Ãƒ", "Ã„", "Ã…", "Ã¢")):
+        try:
+            repaired = s.encode("latin1").decode("utf-8")
+            if repaired.count("Ãƒ") + repaired.count("Ã„") + repaired.count("Ã…") < s.count("Ãƒ") + s.count("Ã„") + s.count("Ã…"):
+                s = repaired
+        except Exception:
+            pass
     replacements = {
         "âš ï¸": "UYARI:", "ğŸ‘€": "", "ğŸš¨": "", "ğŸ’": "", "ğŸŸ¡": "",
         "ğŸ”´": "", "ğŸŸ¢": "", "â³": "", "ğŸ“ˆ": "", "ğŸ“Š": "", "ğŸ’§": "",
@@ -1671,7 +1681,7 @@ def _x_recent_social(ca, name, symbol):
     headers = {
         "Authorization": f"Bearer {X_BEARER_TOKEN}",
         "Accept": "application/json",
-        "User-Agent": "HunterEliteBot/11.36.6",
+        "User-Agent": "HunterEliteBot/11.36.7",
     }
     try:
         data = get_json(url, timeout=14, headers=headers)
@@ -1768,8 +1778,38 @@ def _x_recent_social(ca, name, symbol):
     }
 
 
+_reddit_token_cache = {"token": "", "expires": 0.0}
+
+def _reddit_oauth_token():
+    # Prefer an explicitly supplied token; otherwise obtain app-only OAuth token.
+    if REDDIT_ACCESS_TOKEN:
+        return REDDIT_ACCESS_TOKEN
+    now = time.time()
+    if _reddit_token_cache.get("token") and now < _reddit_token_cache.get("expires", 0) - 60:
+        return _reddit_token_cache["token"]
+    if not REDDIT_CLIENT_ID or not REDDIT_CLIENT_SECRET:
+        return ""
+    import base64
+    auth = base64.b64encode(f"{REDDIT_CLIENT_ID}:{REDDIT_CLIENT_SECRET}".encode()).decode()
+    body = urllib.parse.urlencode({"grant_type": "client_credentials"}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://www.reddit.com/api/v1/access_token", data=body, method="POST",
+        headers={"Authorization": f"Basic {auth}", "User-Agent": REDDIT_USER_AGENT, "Accept": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=14) as r:
+            data = json.loads(r.read().decode("utf-8", errors="replace"))
+        token = str(data.get("access_token") or "").strip()
+        if token:
+            _reddit_token_cache["token"] = token
+            _reddit_token_cache["expires"] = now + max(300, safe_int(data.get("expires_in"), 3600))
+        return token
+    except Exception:
+        return ""
+
 def _reddit_recent_social(ca, name, symbol):
-    if not REDDIT_ACCESS_TOKEN:
+    reddit_token = _reddit_oauth_token()
+    if not reddit_token:
         return {"status": "NO_REDDIT_API", "posts": 0, "score": 0, "comments": 0, "recent_hours": None}
 
     q_parts = [ca]
@@ -1787,7 +1827,7 @@ def _reddit_recent_social(ca, name, symbol):
     }
     url = "https://oauth.reddit.com/search?" + urllib.parse.urlencode(params)
     headers = {
-        "Authorization": f"bearer {REDDIT_ACCESS_TOKEN}",
+        "Authorization": f"bearer {reddit_token}",
         "User-Agent": REDDIT_USER_AGENT,
         "Accept": "application/json",
     }
@@ -2009,7 +2049,7 @@ Genel Karar: {general}
 
 NOT
 X_BEARER_TOKEN yoksa X post/etkilesim ve buyuk hesap verisi DOGRULANAMADI yazar; tahmin edilmez.
-REDDIT_ACCESS_TOKEN yoksa Reddit canli verisi DOGRULANAMADI yazar.
+Reddit icin REDDIT_ACCESS_TOKEN veya REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET gerekir.
 Eksik sosyal veri pozitif kabul edilmez."""
 
     if result["risks"]:
