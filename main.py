@@ -15,7 +15,7 @@ except Exception:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.36.3 LIQ HARD GATE FIXED"
+VERSION = "V11.36.4 FINAL STABLE"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
@@ -115,6 +115,30 @@ source_feed_lock = threading.Lock()
 source_feed_cache = {"GECKO": [], "RAYDIUM": [], "METEORA": []}
 source_feed_last_fetch = {"GECKO": 0.0, "RAYDIUM": 0.0, "METEORA": 0.0}
 source_feed_last_error = {"GECKO": "", "RAYDIUM": "", "METEORA": ""}
+source_feed_cooldown_until = {"GECKO": 0.0, "RAYDIUM": 0.0, "METEORA": 0.0}
+source_feed_fail_count = {"GECKO": 0, "RAYDIUM": 0, "METEORA": 0}
+
+def _feed_can_fetch(source):
+    with source_feed_lock:
+        return time.time() >= source_feed_cooldown_until.get(source, 0.0)
+
+def _feed_backoff(source, error_text=""):
+    low = str(error_text or "").lower()
+    with source_feed_lock:
+        n = min(6, source_feed_fail_count.get(source, 0) + 1)
+        source_feed_fail_count[source] = n
+        if "429" in low or "too many requests" in low:
+            delay = min(900, 60 * (2 ** (n - 1)))
+        else:
+            delay = min(600, 30 * (2 ** (n - 1)))
+        source_feed_cooldown_until[source] = time.time() + delay
+    return delay
+
+def _feed_success(source):
+    with source_feed_lock:
+        source_feed_fail_count[source] = 0
+        source_feed_cooldown_until[source] = 0.0
+
 
 # V11.36 LIVE WS: on-chain discovery wakes the scanner immediately.
 # One Helius WebSocket connection carries multiple logsSubscribe subscriptions.
@@ -328,6 +352,64 @@ def best_pair(ca):
         return None
     return max(pairs, key=lambda p: num((p.get("liquidity") or {}).get("usd"), 0))
 
+def recover_dex_liquidity(ca, current_pair=None):
+    """Conservative recovery: only use explicit USD liquidity from another Solana pair."""
+    candidates = []
+    if current_pair:
+        candidates.append(current_pair)
+    try:
+        candidates.extend(dex_pairs(ca))
+    except Exception:
+        pass
+    best = None
+    for p in candidates:
+        if not isinstance(p, dict):
+            continue
+        liq = num((p.get("liquidity") or {}).get("usd"))
+        if liq is None:
+            continue
+        if best is None or liq > best:
+            best = liq
+    return best
+
+def _norm_identity(v):
+    return re.sub(r"[^a-z0-9]+", "", str(v or "").lower())
+
+def clone_impersonation_guard(name, symbol, ca, current_pair):
+    """
+    Block a fresh token when DexScreener already shows an older exact-name+symbol
+    Solana token at a different CA. This runs only at WATCH/SIGNAL time.
+    """
+    nk, sk = _norm_identity(name), _norm_identity(symbol)
+    if not nk or not sk or len(nk) < 3:
+        return True, ""
+    current_created = num((current_pair or {}).get("pairCreatedAt"))
+    try:
+        data = get_json(
+            "https://api.dexscreener.com/latest/dex/search?" +
+            urllib.parse.urlencode({"q": f"{name} {symbol}"}), timeout=10
+        )
+        rows = (data or {}).get("pairs") or []
+    except Exception:
+        # Data failure is neutral; never invent a clone verdict.
+        return True, ""
+
+    for p in rows[:30]:
+        if str(p.get("chainId", "")).lower() != "solana":
+            continue
+        base = p.get("baseToken") or {}
+        other_ca = str(base.get("address") or "")
+        if not other_ca or other_ca == ca:
+            continue
+        if _norm_identity(base.get("name")) != nk or _norm_identity(base.get("symbol")) != sk:
+            continue
+        other_created = num(p.get("pairCreatedAt"))
+        other_liq = num((p.get("liquidity") or {}).get("usd"), 0) or 0
+        # Require evidence of an older established exact-name token.
+        if other_created and current_created and other_created < current_created - 60_000 and other_liq >= MIN_LIQUIDITY:
+            return False, f"CLONE: older exact name/symbol CA {other_ca[:6]}... exists"
+    return True, ""
+
 def extract_birdeye_items(payload):
     if not isinstance(payload, dict):
         return []
@@ -503,6 +585,8 @@ def _gecko_id_mint(value):
 
 def gecko_new_candidates(force=False):
     """Keyless GeckoTerminal Solana new-pools feed (robust token-id parsing)."""
+    if not _feed_can_fetch("GECKO"):
+        return _cached_source("GECKO")
     now = time.time()
     with source_feed_lock:
         last = source_feed_last_fetch.get("GECKO", 0.0)
@@ -546,7 +630,12 @@ def gecko_new_candidates(force=False):
         except Exception as e:
             errors.append(f"p{page}:{type(e).__name__}:{str(e)[:80]}")
 
-    return _cache_source_result("GECKO", found, ";".join(errors[:3]))
+    errtxt = ";".join(errors[:3])
+    if errors:
+        _feed_backoff("GECKO", errtxt)
+    else:
+        _feed_success("GECKO")
+    return _cache_source_result("GECKO", found, errtxt)
 
 def _raydium_row_mints(row):
     out = []
@@ -568,6 +657,8 @@ def _raydium_row_mints(row):
 
 def raydium_new_candidates(force=False):
     """Raydium official API v3 pool inventory + LaunchLab recent discovery."""
+    if not _feed_can_fetch("RAYDIUM"):
+        return _cached_source("RAYDIUM")
     now = time.time()
     with source_feed_lock:
         last = source_feed_last_fetch.get("RAYDIUM", 0.0)
@@ -630,7 +721,12 @@ def raydium_new_candidates(force=False):
         except Exception as e:
             errors.append(type(e).__name__)
 
-    return _cache_source_result("RAYDIUM", found, ";".join(errors[:4]))
+    errtxt = ";".join(errors[:4])
+    if errors:
+        _feed_backoff("RAYDIUM", errtxt)
+    else:
+        _feed_success("RAYDIUM")
+    return _cache_source_result("RAYDIUM", found, errtxt)
 
 def _meteora_row_mints(row):
     if not isinstance(row, dict):
@@ -654,6 +750,8 @@ def _meteora_row_mints(row):
 
 def meteora_new_candidates(force=False):
     """Meteora public DAMM + DLMM REST pool feeds."""
+    if not _feed_can_fetch("METEORA"):
+        return _cached_source("METEORA")
     now = time.time()
     with source_feed_lock:
         last = source_feed_last_fetch.get("METEORA", 0.0)
@@ -708,7 +806,12 @@ def meteora_new_candidates(force=False):
         except Exception as e:
             errors.append(type(e).__name__)
 
-    return _cache_source_result("METEORA", found, ";".join(errors[:4]))
+    errtxt = ";".join(errors[:4])
+    if errors:
+        _feed_backoff("METEORA", errtxt)
+    else:
+        _feed_success("METEORA")
+    return _cache_source_result("METEORA", found, errtxt)
 
 def _ws_rpc(method, params, timeout=12):
     if not SOLANA_RPC_URL:
@@ -1915,6 +2018,16 @@ def auto_scanner():
 
                     liq = result.get("liq")
 
+                    # V11.36.4 LIQ RECOVERY: before paid/keyed fallbacks, retry all
+                    # known Solana pairs and accept only explicit USD liquidity.
+                    if mc_ok and liq is None:
+                        recovered_liq = recover_dex_liquidity(ca, pair)
+                        if recovered_liq is not None:
+                            liq = recovered_liq
+                            result["liq"] = recovered_liq
+                            result["liq_source"] = "DEX_RECOVERY"
+                            stats["liq_fallback_ok"] += 1
+
                     # DEX liquidity is sometimes unavailable for very fresh Birdeye listings.
                     # Only in that case, ask Birdeye Market Data for the token's liquidity.
                     if mc_ok and liq is None and BIRDEYE_API_KEY and BIRDEYE_MARKET_FALLBACK:
@@ -2051,6 +2164,16 @@ def auto_scanner():
                     base = pair.get("baseToken") or {}
                     name = base.get("name", "Unknown")
                     symbol = base.get("symbol", "N/A")
+
+                    clone_safe = True
+                    clone_reason = ""
+                    if watch_ok or signal_ok:
+                        clone_safe, clone_reason = clone_impersonation_guard(name, symbol, ca, pair)
+                        if not clone_safe:
+                            watch_ok = False
+                            signal_ok = False
+                            result["clone_block"] = clone_reason
+                            print(f"CLONE GUARD BLOCK: {name} ({symbol}) {ca} | {clone_reason}", flush=True)
 
                     if (
                         signal_ok
@@ -2208,7 +2331,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.36 | total={stats.get('radar',0)} "
+                    f"RADAR V11.36.4 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
