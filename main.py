@@ -15,7 +15,7 @@ except Exception:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.38 ONE SHOT RECOVERY"
+VERSION = "V11.38.1 FINAL GATE RECOVERY"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
@@ -2356,17 +2356,20 @@ def strong_signal(result, momentum, previous=None):
         return False
     if not trend_confirmed(previous, result):
         return False
+    # V11.38.1 FINAL GATE RECOVERY: safety + confirmed trend/momentum +
+    # confirmed liquidity are already enforced by the caller. Do not kill a
+    # late-stage candidate again with stricter duplicate activity thresholds.
     if result["score"] + momentum < SIGNAL_SCORE:
         return False
     if result["mc"] > EARLY_MC_MAX:
         return False
 
     buys, sells = result["buys5"], result["sells5"]
-    if buys < SIGNAL_MIN_BUYS_5M:
+    if buys < WATCH_MIN_BUYS_5M:
         return False
-    if sells > 0 and buys < sells * SIGNAL_MIN_BUY_SELL_RATIO:
+    if sells > 0 and buys < sells * 1.10:
         return False
-    if result["vol5"] is not None and result["vol5"] < SIGNAL_MIN_VOL_5M:
+    if result["vol5"] is not None and result["vol5"] < WATCH_MIN_VOL_5M:
         return False
 
     return True
