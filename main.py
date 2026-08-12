@@ -15,7 +15,7 @@ except Exception:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.36 RURU LIVE WS"
+VERSION = "V11.36.1 RURU LIVE WS FIX"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
@@ -129,6 +129,7 @@ ws_candidate_seen = {}
 ws_wake_event = threading.Event()
 ws_status_lock = threading.Lock()
 ws_status = {"connected": False, "events": 0, "tx_fetch": 0, "candidates": 0, "last_error": "", "last_event": 0.0}
+ws_listener_started = threading.Event()
 
 VIRAL_RADAR_ENABLED = True
 VIRAL_SCORE_BONUS_MAX = 12
@@ -767,6 +768,12 @@ def ws_drain_candidates(limit=40):
 
 
 def solana_ws_listener():
+    """Maintain exactly one Helius WSS connection with safe reconnect pacing."""
+    if ws_listener_started.is_set():
+        print("SOLANA WS: DUPLICATE LISTENER BLOCKED", flush=True)
+        return
+    ws_listener_started.set()
+
     if not SOLANA_WS_URL:
         print("SOLANA WS: DISABLED - SOLANA_WS_URL missing", flush=True)
         return
@@ -774,14 +781,23 @@ def solana_ws_listener():
         print("SOLANA WS: DISABLED - websocket-client missing", flush=True)
         return
 
-    backoff = 2
+    # Normal transient errors use exponential backoff. Helius 429 / connection
+    # limit errors get a long cooldown so stale sockets have time to expire.
+    backoff = 5
+    ws = None
     while True:
+        retry_wait = backoff
         try:
-            ws = websocket.create_connection(SOLANA_WS_URL, timeout=30, enable_multithread=True)
-            ws.settimeout(40)
+            ws = websocket.create_connection(
+                SOLANA_WS_URL,
+                timeout=30,
+                enable_multithread=True,
+            )
+            ws.settimeout(70)
             with ws_status_lock:
                 ws_status.update({"connected": True, "last_error": ""})
             print("SOLANA WS: CONNECTED", flush=True)
+
             request_id = 100
             request_program = {}
             subscription_program = {}
@@ -789,32 +805,40 @@ def solana_ws_listener():
                 request_id += 1
                 request_program[request_id] = name
                 ws.send(json.dumps({
-                    "jsonrpc": "2.0", "id": request_id, "method": "logsSubscribe",
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "logsSubscribe",
                     "params": [{"mentions": [program]}, {"commitment": "processed"}],
                 }))
-            backoff = 2
+
+            # Once a connection survives and subscriptions are sent, reset the
+            # transient retry delay. Health ping once/minute matches Helius guidance.
+            backoff = 5
             last_ping = time.time()
 
             while True:
-                if time.time() - last_ping >= 30:
-                    try:
-                        ws.ping()
-                    except Exception:
-                        raise
+                if time.time() - last_ping >= 60:
+                    ws.ping()
                     last_ping = time.time()
                 try:
                     raw = ws.recv()
                 except Exception as e:
-                    # websocket timeout is used as a heartbeat opportunity.
                     if "timed out" in str(e).lower():
                         continue
                     raise
                 if not raw:
                     continue
+
                 msg = json.loads(raw)
                 if isinstance(msg.get("result"), int) and msg.get("id") in request_program:
                     subscription_program[msg["result"]] = request_program[msg["id"]]
                     continue
+
+                # JSON-RPC subscription errors are handled as connection errors so
+                # we do not spin and continuously reopen sockets.
+                if msg.get("error"):
+                    raise RuntimeError(f"WSS RPC error: {msg.get('error')}")
+
                 params = msg.get("params") or {}
                 result = params.get("result") or {}
                 value = result.get("value") or result
@@ -822,6 +846,7 @@ def solana_ws_listener():
                 logs = value.get("logs") or [] if isinstance(value, dict) else []
                 if not signature:
                     continue
+
                 sub_id = params.get("subscription")
                 source = subscription_program.get(sub_id, "WS")
                 text = " ".join(str(x).lower() for x in logs)
@@ -829,10 +854,9 @@ def solana_ws_listener():
                     ws_status["events"] += 1
                     ws_status["last_event"] = time.time()
 
-                # Avoid spending RPC credits on every swap. Fetch full transactions
-                # only when logs look like pool/token creation or initialization.
                 if not any(hint in text for hint in WS_CREATE_HINTS):
                     continue
+
                 tx = _ws_rpc("getTransaction", [signature, {
                     "encoding": "jsonParsed",
                     "commitment": "confirmed",
@@ -840,6 +864,7 @@ def solana_ws_listener():
                 }])
                 with ws_status_lock:
                     ws_status["tx_fetch"] += 1
+
                 mapped_source = "DEX"
                 if source.startswith("RAYDIUM"):
                     mapped_source = "RAYDIUM"
@@ -847,14 +872,40 @@ def solana_ws_listener():
                     mapped_source = "METEORA"
                 for ca in _extract_mints_from_transaction(tx):
                     _ws_enqueue(ca, mapped_source)
+
         except Exception as e:
             err = repr(e)
+            err_lower = err.lower()
+            limited = (
+                "429" in err_lower
+                or "too many requests" in err_lower
+                or "connection limit exceeded" in err_lower
+            )
+            if limited:
+                # Long cooldown is deliberate: hammering reconnect on a connection
+                # limit extends the problem and can consume provider capacity.
+                retry_wait = 300
+                backoff = 5
+                label = "RATE_LIMIT_COOLDOWN"
+            else:
+                retry_wait = backoff
+                backoff = min(backoff * 2, 120)
+                label = "RETRY"
+
             with ws_status_lock:
                 ws_status["connected"] = False
                 ws_status["last_error"] = err[:180]
-            print("SOLANA WS ERROR:", err, f"retry={backoff}s", flush=True)
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 60)
+            print(f"SOLANA WS ERROR [{label}]:", err, f"retry={retry_wait}s", flush=True)
+
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+                ws = None
+
+        time.sleep(retry_wait)
 
 
 def discovery_candidates():
