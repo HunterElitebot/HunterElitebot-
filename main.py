@@ -466,18 +466,28 @@ def rugcheck(ca):
         return None
 
 def holder_pct(holder):
+    """Read RugCheck holder concentration without inflating pct values."""
     if not isinstance(holder, dict):
         return None
-    for key in ("pct", "percentage", "percent", "ownershipPercentage"):
-        value = holder.get(key)
-        if value is None:
-            continue
-        value = num(value)
-        if value is None:
-            continue
+
+    # RugCheck topHolders[].pct is already expressed in percentage points.
+    # Example: pct=0.867 means 0.867%, not 86.7%.
+    value = num(holder.get("pct"))
+    if value is not None:
+        return value if 0 <= value <= 100 else None
+
+    for key in ("percentage", "percent"):
+        value = num(holder.get(key))
+        if value is not None:
+            return value if 0 <= value <= 100 else None
+
+    # Only this explicitly fractional field is converted from 0..1 to percent.
+    value = num(holder.get("ownershipPercentage"))
+    if value is not None:
         if 0 <= value <= 1:
             value *= 100
-        return value
+        return value if 0 <= value <= 100 else None
+
     return None
 
 def holders(report):
