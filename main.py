@@ -15,7 +15,7 @@ except Exception:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.37.1 RELAXED PIPELINE FIX"
+VERSION = "V11.37.2 SIGNAL GATE RELAXED"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
@@ -61,16 +61,16 @@ MAX_SIGNAL_DROP_1H = -35.0
 MAX_CRASH_DROP_6H = -35.0
 MAX_CRASH_DROP_24H = -55.0
 
-MIN_MOMENTUM_SIGNAL = 5
+MIN_MOMENTUM_SIGNAL = 2
 MIN_MC_GROWTH = 1.000
 MAX_PAIR_AGE_HOURS = 2.0
-TREND_CONFIRM_SCANS = 2
+TREND_CONFIRM_SCANS = 1
 
 WATCH_MIN_BUYS_5M = 1
 WATCH_MIN_VOL_5M = 25
 SIGNAL_MIN_BUYS_5M = 2
-SIGNAL_MIN_BUY_SELL_RATIO = 1.02
-SIGNAL_MIN_VOL_5M = 75
+SIGNAL_MIN_BUY_SELL_RATIO = 0.95
+SIGNAL_MIN_VOL_5M = 40
 MIN_VOL_GROWTH = 1.00
 
 # Liquidity Drain Guard
@@ -79,8 +79,8 @@ MIN_VOL_GROWTH = 1.00
 LIQ_DRAIN_GUARD_ENABLED = True
 LIQ_DRAIN_WARN_PCT = 20.0
 LIQ_DRAIN_HARD_PCT = 25.0
-LIQ_CONFIRM_MIN_SCANS = 2
-LIQ_CONFIRM_MAX_DROP_PCT = 12.0
+LIQ_CONFIRM_MIN_SCANS = 1
+LIQ_CONFIRM_MAX_DROP_PCT = 18.0
 
 STATE_FILE = "/tmp/hunterelite_v11_2_state.json"
 
@@ -2274,8 +2274,9 @@ def trend_confirmed(previous, current):
     if p5 is not None and 1.0 <= p5 <= 55:
         confirmations += 1
 
-    # Require two independent confirmations.
-    return confirmations >= 2
+    # Relaxed discovery: one positive confirmation is enough.
+    # Hard rug/honeypot/authority/crash gates are evaluated separately and remain active.
+    return confirmations >= 1
 
 def watch_candidate(result):
     if not basic_signal_safe(result):
@@ -2731,9 +2732,14 @@ def auto_scanner():
                     else:
                         stats["liq_drop_block"] += 1
 
-                    watch_ok = watch_candidate(result) and seen_count >= LIQ_CONFIRM_MIN_SCANS and liq_confirmed
+                    # V11.37.2: WATCH can surface a safe early candidate immediately.
+                    # SIGNAL still needs a previous snapshot so trend/liquidity can be compared.
+                    watch_ok = watch_candidate(result) and (
+                        old_metrics is None or liq_confirmed
+                    )
                     signal_ok = (
-                        seen_count >= max(TREND_CONFIRM_SCANS, LIQ_CONFIRM_MIN_SCANS)
+                        old_metrics is not None
+                        and seen_count >= 2
                         and liq_confirmed
                         and strong_signal(result, momentum, old_metrics)
                     )
