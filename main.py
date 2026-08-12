@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.34 RURU CORE + LIQ GUARD"
+VERSION = "V11.34 RURU BIRDEYE CU FIX"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -25,12 +25,15 @@ MC_MAX = 15000
 EARLY_MC_MAX = 10000
 MIN_LIQUIDITY = 800
 
-# V11.2 — daha erken aday yakala, sert rug korumalarını koru
+# V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
 WATCH_SCORE = 47
 SIGNAL_SCORE = 60
 SCAN_INTERVAL = 30
 
-BIRDEYE_POLL_INTERVAL = 60
+BIRDEYE_POLL_INTERVAL = int(os.getenv("BIRDEYE_POLL_INTERVAL", "180"))
+BIRDEYE_ERROR_COOLDOWN = int(os.getenv("BIRDEYE_ERROR_COOLDOWN", "900"))
+BIRDEYE_QUOTA_COOLDOWN = int(os.getenv("BIRDEYE_QUOTA_COOLDOWN", "21600"))
+BIRDEYE_MARKET_FALLBACK = os.getenv("BIRDEYE_MARKET_FALLBACK", "0").strip().lower() in ("1", "true", "yes", "on")
 BIRDEYE_LIMIT = 20
 BIRDEYE_PAGES = 1
 BIRDEYE_NEW_LISTING = "https://public-api.birdeye.so/defi/v2/tokens/new_listing"
@@ -75,6 +78,7 @@ birdeye_lock = threading.Lock()
 birdeye_cache = []
 birdeye_last_fetch = 0.0
 birdeye_last_error = ""
+birdeye_cooldown_until = 0.0
 
 radar_stats_lock = threading.Lock()
 last_diag_send = 0.0
@@ -84,10 +88,22 @@ discovery_seen_lock = threading.Lock()
 DISCOVERY_MEMORY_SECONDS = 21600
 RADAR_RAW_LIMIT = 240
 RADAR_TARGET = 80
-BIRDEYE_TARGET = 80
+BIRDEYE_TARGET = 20
+GECKO_TARGET = 20
+RAYDIUM_TARGET = 20
+METEORA_TARGET = 20
 DEX_TARGET = 20
 MAX_REPEAT_PER_SCAN = 20
 FRESH_PAIR_MAX_HOURS = 6.0
+
+# Multi-source discovery caches. These only supply candidate CAs;
+# all candidates still pass the unchanged RURU CORE safety/entry pipeline.
+SOURCE_POLL_INTERVAL = 30
+SOURCE_CACHE_LIMIT = 120
+source_feed_lock = threading.Lock()
+source_feed_cache = {"GECKO": [], "RAYDIUM": [], "METEORA": []}
+source_feed_last_fetch = {"GECKO": 0.0, "RAYDIUM": 0.0, "METEORA": 0.0}
+source_feed_last_error = {"GECKO": "", "RAYDIUM": "", "METEORA": ""}
 
 VIRAL_RADAR_ENABLED = True
 VIRAL_SCORE_BONUS_MAX = 12
@@ -96,7 +112,7 @@ radar_stats = {
     "updated": 0,
     "radar": 0,
     "processed": 0,
-    "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [], "prepump": 0, "prepump_safe": 0, "src_birdeye": 0, "src_dex": 0, "src_birdeye_stale": 0, "src_dex_stale": 0, "src_birdeye_safe": 0, "src_dex_safe": 0,
+    "pair_yok": 0, "stale_pair": 0, "viral_hot": 0, "viral_rising": 0, "h1_fail_values": [], "prepump": 0, "prepump_safe": 0, "src_birdeye": 0, "src_gecko": 0, "src_raydium": 0, "src_meteora": 0, "src_dex": 0, "src_birdeye_stale": 0, "src_gecko_stale": 0, "src_raydium_stale": 0, "src_meteora_stale": 0, "src_dex_stale": 0, "src_birdeye_safe": 0, "src_gecko_safe": 0, "src_raydium_safe": 0, "src_meteora_safe": 0, "src_dex_safe": 0,
     "basic_fail": 0,
     "crash_fail": 0,
     "watch": 0,
@@ -164,23 +180,23 @@ def clean_telegram_text(text):
     """One final cleanup point for every outgoing Telegram message."""
     s = "" if text is None else str(text)
     replacements = {
-        "⚠️": "UYARI:", "👀": "", "🚨": "", "💎": "", "🟡": "",
-        "🔴": "", "🟢": "", "⏳": "", "📈": "", "📊": "", "💧": "",
-        "⚡": "", "💵": "", "👥": "", "🛡": "", "🚀": "", "🎯": "", "⏱": "",
-        "SİNYAL İPTAL": "SINYAL IPTAL", "İZLE": "IZLE",
-        "GİRME": "GIRME", "GİR": "GIR", "POTANSİYEL": "POTANSIYEL",
-        "şartları": "sartlari", "kötüleşti": "kotulesti",
-        "giriş": "giris", "için": "icin", "değil": "degil", "yaşı": "yasi",
-        "âš ï¸": "UYARI:", "ğŸ‘€": "", "ğŸš¨": "", "ğŸ’Ž": "",
-        "ğŸŸ¡": "", "ğŸ”´": "", "â³": "", "Ä°ZLE": "IZLE",
-        "SÄ°NYAL Ä°PTAL": "SINYAL IPTAL", "GÄ°RME": "GIRME",
-        "GÄ°R": "GIR", "POTANSÄ°YEL": "POTANSIYEL",
+        "âš ï¸": "UYARI:", "ğŸ‘€": "", "ğŸš¨": "", "ğŸ’": "", "ğŸŸ¡": "",
+        "ğŸ”´": "", "ğŸŸ¢": "", "â³": "", "ğŸ“ˆ": "", "ğŸ“Š": "", "ğŸ’§": "",
+        "âš¡": "", "ğŸ’µ": "", "ğŸ‘¥": "", "ğŸ›¡": "", "ğŸš€": "", "ğŸ¯": "", "â±": "",
+        "SÄ°NYAL Ä°PTAL": "SINYAL IPTAL", "Ä°ZLE": "IZLE",
+        "GÄ°RME": "GIRME", "GÄ°R": "GIR", "POTANSÄ°YEL": "POTANSIYEL",
         "ÅŸartlarÄ±": "sartlari", "kÃ¶tÃ¼leÅŸti": "kotulesti",
-        "giriÅŸ": "giris", "iÃ§in": "icin", "deÄŸil": "degil",
-        "yaÅŸÄ±": "yasi",
-        "âš ï¸ VERÄ° ALINAMADI": "VERI BEKLENIYOR",
+        "giriÅŸ": "giris", "iÃ§in": "icin", "deÄŸil": "degil", "yaÅŸÄ±": "yasi",
+        "Ã¢Å¡ Ã¯Â¸Â": "UYARI:", "ÄŸÅ¸â€˜â‚¬": "", "ÄŸÅ¸Å¡Â¨": "", "ÄŸÅ¸â€™Å½": "",
+        "ÄŸÅ¸Å¸Â¡": "", "ÄŸÅ¸â€Â´": "", "Ã¢ÂÂ³": "", "Ã„Â°ZLE": "IZLE",
+        "SÃ„Â°NYAL Ã„Â°PTAL": "SINYAL IPTAL", "GÃ„Â°RME": "GIRME",
+        "GÃ„Â°R": "GIR", "POTANSÃ„Â°YEL": "POTANSIYEL",
+        "Ã…Å¸artlarÃ„Â±": "sartlari", "kÃƒÂ¶tÃƒÂ¼leÃ…Å¸ti": "kotulesti",
+        "giriÃ…Å¸": "giris", "iÃƒÂ§in": "icin", "deÃ„Å¸il": "degil",
+        "yaÃ…Å¸Ã„Â±": "yasi",
+        "Ã¢Å¡ Ã¯Â¸Â VERÃ„Â° ALINAMADI": "VERI BEKLENIYOR",
+        "VERÃ„Â° ALINAMADI": "VERI BEKLENIYOR",
         "VERÄ° ALINAMADI": "VERI BEKLENIYOR",
-        "VERİ ALINAMADI": "VERI BEKLENIYOR",
     }
     for old, new in replacements.items():
         s = s.replace(old, new)
@@ -234,7 +250,7 @@ def safe_int(value):
 def money(value):
     value = num(value)
     if value is None:
-        return "⚠️ VERİ ALINAMADI"
+        return "âš ï¸ VERÄ° ALINAMADI"
     if abs(value) >= 1_000_000:
         return f"${value/1_000_000:.2f}M"
     if abs(value) >= 1_000:
@@ -317,14 +333,18 @@ def birdeye_item_time(item):
 
 
 def birdeye_new_candidates(force=False):
-    global birdeye_cache, birdeye_last_fetch, birdeye_last_error
+    global birdeye_cache, birdeye_last_fetch, birdeye_last_error, birdeye_cooldown_until
 
     if not BIRDEYE_API_KEY:
         return []
 
     now = time.time()
     with birdeye_lock:
-        if not force and birdeye_cache and now - birdeye_last_fetch < BIRDEYE_POLL_INTERVAL:
+        # IMPORTANT: respect poll/cooldown even when cache is empty.
+        # FIX2 retried every scan after an empty/error response and could burn CU / hammer quota.
+        if not force and now < birdeye_cooldown_until:
+            return list(birdeye_cache)
+        if not force and birdeye_last_fetch > 0 and now - birdeye_last_fetch < BIRDEYE_POLL_INTERVAL:
             return list(birdeye_cache)
 
     try:
@@ -369,7 +389,7 @@ def birdeye_new_candidates(force=False):
             birdeye_last_error = ""
 
         print(
-            f"BIRDEYE ROLLING FRESH: api={len(newest)} cache={len(birdeye_cache)}",
+            f"BIRDEYE MEME FRESH: api_items={len(items)} valid_sol={len(newest)} cache={len(birdeye_cache)} meme_platform=true",
             flush=True,
         )
         return list(birdeye_cache)
@@ -380,23 +400,280 @@ def birdeye_new_candidates(force=False):
         except Exception:
             body = ""
         err = f"HTTP {e.code}: {body[:220]}"
+        low = err.lower()
+        quota_hit = ("compute unit" in low and ("limit" in low or "exceed" in low)) or "usage limit" in low
+        cooldown = BIRDEYE_QUOTA_COOLDOWN if quota_hit else BIRDEYE_ERROR_COOLDOWN
         with birdeye_lock:
             birdeye_last_error = err
             birdeye_last_fetch = now
-        print("BIRDEYE ERROR:", err, flush=True)
+            birdeye_cooldown_until = now + cooldown
+        print(f"BIRDEYE ERROR: {err} | cooldown={cooldown}s", flush=True)
 
     except Exception as e:
         err = repr(e)
         with birdeye_lock:
             birdeye_last_error = err
             birdeye_last_fetch = now
-        print("BIRDEYE ERROR:", err, flush=True)
+            birdeye_cooldown_until = now + BIRDEYE_ERROR_COOLDOWN
+        print(f"BIRDEYE ERROR: {err} | cooldown={BIRDEYE_ERROR_COOLDOWN}s", flush=True)
 
     with birdeye_lock:
         return list(birdeye_cache)
 
+
+SOL_WRAPPED = "So11111111111111111111111111111111111111112"
+SOL_STABLE_MINTS = {
+    SOL_WRAPPED,
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+    "Es9vMFrzaCERmJfrF4H2FYDibp2dZrjG1pFjTz7E3Jr",      # USDT
+}
+
+def _valid_candidate_mint(value):
+    ca = str(value or "").strip()
+    return ca if SOL_CA.fullmatch(ca) and ca not in SOL_STABLE_MINTS else None
+
+def _cache_source_result(source, fresh, error=""):
+    now = time.time()
+    fresh = [ca for ca in fresh if _valid_candidate_mint(ca)]
+    with source_feed_lock:
+        merged, seen = [], set()
+        for ca in fresh + list(source_feed_cache.get(source, [])):
+            if ca not in seen:
+                seen.add(ca)
+                merged.append(ca)
+        source_feed_cache[source] = merged[:SOURCE_CACHE_LIMIT]
+        source_feed_last_fetch[source] = now
+        source_feed_last_error[source] = error
+        return list(source_feed_cache[source])
+
+def _cached_source(source):
+    with source_feed_lock:
+        return list(source_feed_cache.get(source, []))
+
+def _gecko_id_mint(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    direct = _valid_candidate_mint(raw)
+    if direct:
+        return direct
+    # GeckoTerminal token ids are commonly network_mint (e.g. solana_<mint>).
+    if "_" in raw:
+        return _valid_candidate_mint(raw.rsplit("_", 1)[-1])
+    return None
+
+
+def gecko_new_candidates(force=False):
+    """Keyless GeckoTerminal Solana new-pools feed (robust token-id parsing)."""
+    now = time.time()
+    with source_feed_lock:
+        last = source_feed_last_fetch.get("GECKO", 0.0)
+        cached = list(source_feed_cache.get("GECKO", []))
+    if not force and cached and now - last < SOURCE_POLL_INTERVAL:
+        return cached
+
+    found, seen, errors = [], set(), []
+    for page in (1, 2, 3):
+        url = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools?" + urllib.parse.urlencode({
+            "include": "base_token,quote_token",
+            "page": page,
+        })
+        try:
+            payload = get_json(
+                url,
+                timeout=15,
+                headers={"Accept": "application/json;version=20230203"},
+            )
+            included_map = {}
+            for obj in (payload.get("included") or []) if isinstance(payload, dict) else []:
+                if not isinstance(obj, dict):
+                    continue
+                oid = str(obj.get("id") or "")
+                attrs = obj.get("attributes") or {}
+                addr = _valid_candidate_mint(attrs.get("address")) or _gecko_id_mint(oid)
+                if oid and addr:
+                    included_map[oid] = addr
+
+            for pool in (payload.get("data") or []) if isinstance(payload, dict) else []:
+                if not isinstance(pool, dict):
+                    continue
+                rel = pool.get("relationships") or {}
+                for rel_name in ("base_token", "quote_token"):
+                    rel_data = ((rel.get(rel_name) or {}).get("data") or {})
+                    rid = str(rel_data.get("id") or "")
+                    ca = included_map.get(rid) or _gecko_id_mint(rid)
+                    if ca and ca not in seen:
+                        seen.add(ca)
+                        found.append(ca)
+        except Exception as e:
+            errors.append(f"p{page}:{type(e).__name__}:{str(e)[:80]}")
+
+    return _cache_source_result("GECKO", found, ";".join(errors[:3]))
+
+def _raydium_row_mints(row):
+    out = []
+    if not isinstance(row, dict):
+        return out
+    for key in ("mintA", "mintB", "mint1", "mint2"):
+        obj = row.get(key)
+        if isinstance(obj, dict):
+            ca = _valid_candidate_mint(obj.get("address") or obj.get("mint") or obj.get("id"))
+        else:
+            ca = _valid_candidate_mint(obj)
+        if ca:
+            out.append(ca)
+    for key in ("mintAAddress", "mintBAddress", "baseMint", "quoteMint", "mint1Address", "mint2Address"):
+        ca = _valid_candidate_mint(row.get(key))
+        if ca:
+            out.append(ca)
+    return out
+
+def raydium_new_candidates(force=False):
+    """Raydium official API v3 pool inventory + LaunchLab recent discovery."""
+    now = time.time()
+    with source_feed_lock:
+        last = source_feed_last_fetch.get("RAYDIUM", 0.0)
+        cached = list(source_feed_cache.get("RAYDIUM", []))
+    if not force and cached and now - last < SOURCE_POLL_INTERVAL:
+        return cached
+
+    found, seen, errors = [], set(), []
+
+    # Official API v3 pool inventory. We use a modest page size and let
+    # DexScreener's pairCreatedAt enforce the existing <=6h freshness gate later.
+    urls = [
+        "https://api-v3.raydium.io/pools/info/list?" + urllib.parse.urlencode({
+            "poolType": "all",
+            "poolSortField": "default",
+            "sortType": "desc",
+            "pageSize": 100,
+            "page": 1,
+        }),
+        # Official LaunchLab discovery endpoint for recently featured launches.
+        "https://launch-mint-v1.raydium.io/get/random/index-recent-mint",
+    ]
+
+    for url in urls:
+        try:
+            payload = get_json(url, timeout=15)
+            rows = []
+            if isinstance(payload, dict):
+                data = payload.get("data")
+                if isinstance(data, dict):
+                    rows.extend(data.get("data") or data.get("rows") or data.get("list") or [])
+                    # Some LaunchLab responses return a single mint object.
+                    if not rows:
+                        rows.append(data)
+                elif isinstance(data, list):
+                    rows.extend(data)
+                for k in ("rows", "list", "items"):
+                    if isinstance(payload.get(k), list):
+                        rows.extend(payload[k])
+            elif isinstance(payload, list):
+                rows = payload
+
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                candidates = _raydium_row_mints(row)
+                for key in ("mint", "mintAddress", "address", "tokenAddress"):
+                    ca = _valid_candidate_mint(row.get(key))
+                    if ca:
+                        candidates.append(ca)
+                token_obj = row.get("token") or row.get("mintInfo") or {}
+                if isinstance(token_obj, dict):
+                    ca = _valid_candidate_mint(token_obj.get("address") or token_obj.get("mint"))
+                    if ca:
+                        candidates.append(ca)
+                for ca in candidates:
+                    if ca not in seen:
+                        seen.add(ca)
+                        found.append(ca)
+        except Exception as e:
+            errors.append(type(e).__name__)
+
+    return _cache_source_result("RAYDIUM", found, ";".join(errors[:4]))
+
+def _meteora_row_mints(row):
+    if not isinstance(row, dict):
+        return []
+    values = []
+    for key in (
+        "token_a_mint", "token_b_mint", "tokenAMint", "tokenBMint",
+        "mint_a", "mint_b", "mint_x", "mint_y", "mintX", "mintY",
+        "base_mint", "quote_mint",
+    ):
+        ca = _valid_candidate_mint(row.get(key))
+        if ca:
+            values.append(ca)
+    for key in ("token_a", "token_b", "tokenA", "tokenB", "token_x", "token_y", "tokenX", "tokenY", "mint_x", "mint_y", "mintX", "mintY"):
+        obj = row.get(key)
+        if isinstance(obj, dict):
+            ca = _valid_candidate_mint(obj.get("mint") or obj.get("address") or obj.get("id"))
+            if ca:
+                values.append(ca)
+    return values
+
+def meteora_new_candidates(force=False):
+    """Meteora public DAMM + DLMM REST pool feeds."""
+    now = time.time()
+    with source_feed_lock:
+        last = source_feed_last_fetch.get("METEORA", 0.0)
+        cached = list(source_feed_cache.get("METEORA", []))
+    if not force and cached and now - last < SOURCE_POLL_INTERVAL:
+        return cached
+
+    found, seen, errors = [], set(), []
+    urls = [
+        # DAMM v2 supports sorting by pool creation time; prioritize newest pools.
+        "https://damm-v2.datapi.meteora.ag/pools?" + urllib.parse.urlencode({
+            "page": 1,
+            "page_size": 200,
+            "sort_by": "pool_created_at:desc",
+        }),
+        "https://damm-api.meteora.ag/pools",
+        "https://dlmm.datapi.meteora.ag/pools",
+    ]
+    for url in urls:
+        try:
+            payload = get_json(url, timeout=15)
+            rows = []
+            if isinstance(payload, list):
+                rows = payload
+            elif isinstance(payload, dict):
+                for key in ("data", "pools", "items", "rows"):
+                    value = payload.get(key)
+                    if isinstance(value, list):
+                        rows.extend(value)
+                    elif isinstance(value, dict):
+                        for sub in ("data", "pools", "items", "rows"):
+                            if isinstance(value.get(sub), list):
+                                rows.extend(value[sub])
+            # Prefer newest indexed pools when the feed exposes a creation timestamp.
+            def _row_created(v):
+                if not isinstance(v, dict):
+                    return 0.0
+                for k in ("pool_created_at", "created_at", "createdAt", "timestamp"):
+                    x = num(v.get(k), 0) or 0
+                    if x > 10_000_000_000:
+                        x /= 1000.0
+                    if x > 0:
+                        return float(x)
+                return 0.0
+            if any(_row_created(r) > 0 for r in rows):
+                rows.sort(key=_row_created, reverse=True)
+            for row in rows[:250]:
+                for ca in _meteora_row_mints(row):
+                    if ca not in seen:
+                        seen.add(ca)
+                        found.append(ca)
+        except Exception as e:
+            errors.append(type(e).__name__)
+
+    return _cache_source_result("METEORA", found, ";".join(errors[:4]))
+
 def discovery_candidates():
-    endpoints = [
+    dex_endpoints = [
         "https://api.dexscreener.com/token-profiles/latest/v1",
         "https://api.dexscreener.com/token-boosts/latest/v1",
         "https://api.dexscreener.com/token-boosts/top/v1",
@@ -404,16 +681,28 @@ def discovery_candidates():
     ]
 
     candidate_sources.clear()
+    used = set()
+    buckets = {"BIRDEYE": [], "GECKO": [], "RAYDIUM": [], "METEORA": [], "DEX": []}
 
-    birdeye_found, birdeye_seen = [], set()
-    for ca in birdeye_new_candidates():
-        if ca and ca not in birdeye_seen:
-            birdeye_seen.add(ca)
-            birdeye_found.append(ca)
-            candidate_sources[ca] = "BIRDEYE"
+    def add_many(source, values):
+        for raw in values:
+            ca = _valid_candidate_mint(raw)
+            if not ca or ca in used:
+                continue
+            used.add(ca)
+            buckets[source].append(ca)
+            candidate_sources[ca] = source
 
-    dex_found, dex_seen = [], set()
-    for url in endpoints:
+    # Birdeye is optional/bonus when quota works.
+    add_many("BIRDEYE", birdeye_new_candidates())
+
+    # Keyless/public feeds keep discovery alive when Birdeye quota is exhausted.
+    add_many("GECKO", gecko_new_candidates())
+    add_many("RAYDIUM", raydium_new_candidates())
+    add_many("METEORA", meteora_new_candidates())
+
+    dex_found = []
+    for url in dex_endpoints:
         try:
             data = get_json(url)
             if not isinstance(data, list):
@@ -421,21 +710,39 @@ def discovery_candidates():
             for item in data:
                 if str(item.get("chainId", "")).lower() != "solana":
                     continue
-                ca = str(item.get("tokenAddress", "")).strip()
-                if not (ca and SOL_CA.match(ca)):
-                    continue
-                if ca in birdeye_seen or ca in dex_seen:
-                    continue
-                dex_seen.add(ca)
-                dex_found.append(ca)
-                candidate_sources[ca] = "DEX"
+                ca = _valid_candidate_mint(item.get("tokenAddress"))
+                if ca:
+                    dex_found.append(ca)
         except Exception as e:
-            print("DISCOVERY ERROR:", repr(e), flush=True)
+            print("DISCOVERY DEX ERROR:", repr(e), flush=True)
+    add_many("DEX", dex_found)
 
-    birdeye_selected = birdeye_found[:BIRDEYE_TARGET]
-    remaining = max(0, RADAR_TARGET - len(birdeye_selected))
-    dex_selected = dex_found[:min(DEX_TARGET, remaining)]
-    return (birdeye_selected + dex_selected)[:RADAR_TARGET]
+    # Balanced source mix. Unused slots are filled by any source with extra candidates.
+    limits = {
+        "BIRDEYE": BIRDEYE_TARGET,
+        "GECKO": GECKO_TARGET,
+        "RAYDIUM": RAYDIUM_TARGET,
+        "METEORA": METEORA_TARGET,
+        "DEX": DEX_TARGET,
+    }
+    selected = []
+    for source in ("BIRDEYE", "GECKO", "RAYDIUM", "METEORA", "DEX"):
+        selected.extend(buckets[source][:limits[source]])
+
+    # Refill only from real multi-source feeds. DEX remains capped at DEX_TARGET
+    # so it cannot silently take over the radar when upstream discovery is empty.
+    if len(selected) < RADAR_TARGET:
+        already = set(selected)
+        for source in ("GECKO", "RAYDIUM", "METEORA", "BIRDEYE"):
+            for ca in buckets[source][limits[source]:]:
+                if ca in already:
+                    continue
+                selected.append(ca)
+                already.add(ca)
+                if len(selected) >= RADAR_TARGET:
+                    return selected[:RADAR_TARGET]
+
+    return selected[:RADAR_TARGET]
 
 def birdeye_market_data(ca):
     """Fetch Birdeye single-token market data as fallback when DEX liquidity is missing."""
@@ -688,17 +995,17 @@ def calculate_score(pair, report):
         risks.append("Market cap verisi yok")
     elif mc < MC_MIN or mc > MC_MAX:
         score -= 20
-        risks.append("Market cap hedef bölgesi dışında")
+        risks.append("Market cap hedef bÃ¶lgesi dÄ±ÅŸÄ±nda")
 
     if liq is None:
         score -= 25
         risks.append("Likidite verisi yok")
     elif liq < 1000:
         score -= 35
-        risks.append("Likidite çok düşük")
+        risks.append("Likidite Ã§ok dÃ¼ÅŸÃ¼k")
     elif liq < MIN_LIQUIDITY:
         score -= 20
-        risks.append("Likidite düşük")
+        risks.append("Likidite dÃ¼ÅŸÃ¼k")
 
     top1, top5, top10 = holders(report)
 
@@ -707,17 +1014,17 @@ def calculate_score(pair, report):
         risks.append("RugCheck verisi yok")
     elif top10 is None:
         score -= 10
-        risks.append("Holder dağılımı doğrulanamadı")
+        risks.append("Holder daÄŸÄ±lÄ±mÄ± doÄŸrulanamadÄ±")
     else:
         if top10 >= 82:
             score -= 40
-            risks.append("Top-10 holder aşırı yoğun")
+            risks.append("Top-10 holder aÅŸÄ±rÄ± yoÄŸun")
         elif top10 >= 70:
             score -= 30
-            risks.append("Top-10 holder çok yüksek")
+            risks.append("Top-10 holder Ã§ok yÃ¼ksek")
         elif top10 >= 60:
             score -= 20
-            risks.append("Top-10 holder yüksek")
+            risks.append("Top-10 holder yÃ¼ksek")
         elif top10 >= 50:
             score -= 10
             risks.append("Top-10 holder dikkat")
@@ -730,14 +1037,14 @@ def calculate_score(pair, report):
         risks.append("Mint authority aktif")
     elif mint is None:
         score -= 5
-        risks.append("Mint authority doğrulanamadı")
+        risks.append("Mint authority doÄŸrulanamadÄ±")
 
     if freeze is True:
         score -= 30
         risks.append("Freeze authority aktif")
     elif freeze is None:
         score -= 5
-        risks.append("Freeze authority doğrulanamadı")
+        risks.append("Freeze authority doÄŸrulanamadÄ±")
 
     sig = rug_signals(report)
 
@@ -752,7 +1059,7 @@ def calculate_score(pair, report):
         risks.append("Insider sinyali")
     if sig["sniper"]:
         score -= 10
-        risks.append("Sniper yoğunluğu")
+        risks.append("Sniper yoÄŸunluÄŸu")
     if sig["bundler"]:
         score -= 10
         risks.append("Bundler sinyali")
@@ -760,11 +1067,11 @@ def calculate_score(pair, report):
     buys, sells = m["buys5"], m["sells5"]
     if buys + sells >= 10 and sells > buys * 1.5:
         score -= 10
-        risks.append("5dk satış baskısı")
+        risks.append("5dk satÄ±ÅŸ baskÄ±sÄ±")
 
     if m["price5"] is not None and m["price5"] <= -25:
         score -= 10
-        risks.append("5dk sert fiyat düşüşü")
+        risks.append("5dk sert fiyat dÃ¼ÅŸÃ¼ÅŸÃ¼")
 
     score = max(0, min(100, int(score)))
 
@@ -777,13 +1084,13 @@ def calculate_score(pair, report):
     )
 
     if severe:
-        decision = "🔴 GİRME"
+        decision = "ğŸ”´ GÄ°RME"
     elif score >= 75 and mc is not None and MC_MIN <= mc <= EARLY_MC_MAX:
-        decision = "🟢 UYGUN GİRİŞ"
+        decision = "ğŸŸ¢ UYGUN GÄ°RÄ°Å"
     elif score >= 55:
-        decision = "🟡 BEKLE"
+        decision = "ğŸŸ¡ BEKLE"
     else:
-        decision = "🔴 GİRME"
+        decision = "ğŸ”´ GÄ°RME"
 
     return {
         **m,
@@ -832,25 +1139,25 @@ def momentum_score(old, new):
 
 def authority_text(value):
     if value is True:
-        return "🚨 AKTİF"
+        return "ğŸš¨ AKTÄ°F"
     if value is False:
-        return "✅ KAPALI"
-    return "⚠️ N/A"
+        return "âœ… KAPALI"
+    return "âš ï¸ N/A"
 
 def potential_label(result, momentum=0):
     """Heuristic only: expresses upside setup quality, never a return guarantee."""
     if not result:
-        return "❌ YETERSİZ VERİ"
+        return "âŒ YETERSÄ°Z VERÄ°"
 
     # Hard safety blocks first.
     if result["signals"]["rug"] or result["signals"]["honeypot"]:
-        return "⛔ RUG RİSKİ"
+        return "â›” RUG RÄ°SKÄ°"
     if result["mint"] is True or result["freeze"] is True:
-        return "⛔ YETKİ RİSKİ"
+        return "â›” YETKÄ° RÄ°SKÄ°"
     if result["liq"] is None or result["liq"] < MIN_LIQUIDITY:
-        return "🔴 ZAYIF"
+        return "ğŸ”´ ZAYIF"
     if result["top10"] is not None and result["top10"] >= 75:
-        return "🔴 DAĞILIM RİSKİ"
+        return "ğŸ”´ DAÄILIM RÄ°SKÄ°"
 
     score = result["score"] + momentum
     mc = result["mc"] or 0
@@ -870,7 +1177,7 @@ def potential_label(result, momentum=0):
         and vol5 >= 500
         and p5 is not None and 1 <= p5 <= 45
     ):
-        return "💎 100X POTANSİYEL ADAYI"
+        return "ğŸ’ 100X POTANSÄ°YEL ADAYI"
 
     if (
         2000 <= mc <= 9000
@@ -879,42 +1186,42 @@ def potential_label(result, momentum=0):
         and buy_ratio_ok
         and vol5 >= 250
     ):
-        return "🚀 5X–10X POTANSİYEL ADAYI"
+        return "ğŸš€ 5Xâ€“10X POTANSÄ°YEL ADAYI"
 
     if score >= 58:
-        return "🟡 ERKEN / İZLE"
+        return "ğŸŸ¡ ERKEN / Ä°ZLE"
 
-    return "🔴 GİRME"
+    return "ğŸ”´ GÄ°RME"
 
 
 def simple_action(result, momentum=0, previous=None):
     if not result:
-        return "🔴 GİRME"
+        return "ğŸ”´ GÄ°RME"
 
     if not basic_signal_safe(result) or not crash_guard(result):
-        return "🔴 GİRME"
+        return "ğŸ”´ GÄ°RME"
 
     p5 = result.get("price5")
     buys = result.get("buys5", 0)
     sells = result.get("sells5", 0)
 
     if p5 is not None and p5 <= -8:
-        return "🔴 SAT / GİRME"
+        return "ğŸ”´ SAT / GÄ°RME"
     if sells > buys * 1.35 and buys + sells >= 8:
-        return "🔴 SAT / GİRME"
+        return "ğŸ”´ SAT / GÄ°RME"
 
     if strong_signal(result, momentum, previous):
-        return "🟢 GİR"
+        return "ğŸŸ¢ GÄ°R"
 
     if watch_candidate(result):
-        return "🟡 İZLE / ERKEN ADAY"
+        return "ğŸŸ¡ Ä°ZLE / ERKEN ADAY"
 
-    return "🔴 GİRME"
+    return "ğŸ”´ GÄ°RME"
 
 def analyse(ca):
     pair = best_pair(ca)
     if pair is None:
-        return None, f"🦅 HUNTERELITE {VERSION}\n\nCA: {ca}\n\n❌ DEX pair verisi bulunamadı.\n\n🔴 GİRME / VERİ BEKLE"
+        return None, f"ğŸ¦… HUNTERELITE {VERSION}\n\nCA: {ca}\n\nâŒ DEX pair verisi bulunamadÄ±.\n\nğŸ”´ GÄ°RME / VERÄ° BEKLE"
 
     report = rugcheck(ca)
     result = calculate_score(pair, report)
@@ -922,25 +1229,25 @@ def analyse(ca):
     name = base.get("name") or "Unknown"
     symbol = base.get("symbol") or "N/A"
 
-    text = f"""🦅 HUNTERELITE {VERSION}
+    text = f"""ğŸ¦… HUNTERELITE {VERSION}
 
 {name} ({symbol})
 CA: {ca}
 
-🎯 Market Giriş Bölgesi: $2K–$10K
+ğŸ¯ Market GiriÅŸ BÃ¶lgesi: $2Kâ€“$10K
 
 Market Cap: {money(result["mc"])}
 Likidite: {money(result["liq"])}
 
-⚡ 5dk: {result["buys5"]} buy / {result["sells5"]} sell
-📊 1s: {result["buys1h"]} buy / {result["sells1h"]} sell
+âš¡ 5dk: {result["buys5"]} buy / {result["sells5"]} sell
+ğŸ“Š 1s: {result["buys1h"]} buy / {result["sells1h"]} sell
 
-💵 5dk hacim: {money(result["vol5"])}
-📈 5dk fiyat: {percent(result["price5"])}
+ğŸ’µ 5dk hacim: {money(result["vol5"])}
+ğŸ“ˆ 5dk fiyat: {percent(result["price5"])}
 
-🧪 RugCheck Derin Kontrol
+ğŸ§ª RugCheck Derin Kontrol
 
-RugCheck: {"✅ ALINDI" if report else "⚠️ VERİ ALINAMADI"}
+RugCheck: {"âœ… ALINDI" if report else "âš ï¸ VERÄ° ALINAMADI"}
 
 Top-1 holder: {percent(result["top1"])}
 Top-5 holder: {percent(result["top5"])}
@@ -949,15 +1256,15 @@ Top-10 holder: {percent(result["top10"])}
 Mint authority: {authority_text(result["mint"])}
 Freeze authority: {authority_text(result["freeze"])}
 
-🛡 Hunter Elite Score: {result["score"]}/100
-💎 Potansiyel: IZLE
+ğŸ›¡ Hunter Elite Score: {result["score"]}/100
+ğŸ’ Potansiyel: IZLE
 
-🎯 Karar: {result["decision"]}"""
+ğŸ¯ Karar: {result["decision"]}"""
 
     if result["risks"]:
-        text += "\n\n⚠️ Riskler:\n" + "".join(f"• {r}\n" for r in result["risks"][:7])
+        text += "\n\nâš ï¸ Riskler:\n" + "".join(f"â€¢ {r}\n" for r in result["risks"][:7])
 
-    text += "\nEksik veri güvenli kabul edilmez.\nBu sistem risk filtresidir, yatırım garantisi değildir."
+    text += "\nEksik veri gÃ¼venli kabul edilmez.\nBu sistem risk filtresidir, yatÄ±rÄ±m garantisi deÄŸildir."
     return result, text
 
 def basic_signal_safe(result):
@@ -1213,9 +1520,9 @@ def market_viral_score(result):
 def auto_scanner():
     print("EARLY HUNTER SCANNER ACTIVE", flush=True)
     print(
-        "WIDE RADAR: BIRDEYE + DEXSCREENER"
+        "WIDE RADAR: BIRDEYE + GECKO + RAYDIUM + METEORA + DEX"
         if BIRDEYE_API_KEY
-        else "WIDE RADAR: BIRDEYE KEY MISSING, DEX ONLY",
+        else "WIDE RADAR: GECKO + RAYDIUM + METEORA + DEX (BIRDEYE KEY MISSING)",
         flush=True,
     )
     time.sleep(10)
@@ -1263,9 +1570,9 @@ def auto_scanner():
                 "volume_fail": 0,
                 "trend_fail": 0,
                 "momentum_fail": 0,
-                "src_birdeye": 0, "src_dex": 0,
-                "src_birdeye_stale": 0, "src_dex_stale": 0,
-                "src_birdeye_safe": 0, "src_dex_safe": 0,
+                "src_birdeye": 0, "src_gecko": 0, "src_raydium": 0, "src_meteora": 0, "src_dex": 0,
+                "src_birdeye_stale": 0, "src_gecko_stale": 0, "src_raydium_stale": 0, "src_meteora_stale": 0, "src_dex_stale": 0,
+                "src_birdeye_safe": 0, "src_gecko_safe": 0, "src_raydium_safe": 0, "src_meteora_safe": 0, "src_dex_safe": 0,
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
     "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
@@ -1278,13 +1585,11 @@ def auto_scanner():
             for ca in candidates:
                 try:
                     source_name = candidate_sources.get(ca)
-                    if source_name not in ("BIRDEYE", "DEX"):
+                    if source_name not in ("BIRDEYE", "GECKO", "RAYDIUM", "METEORA", "DEX"):
                         source_name = "DEX"
 
-                    if source_name == "BIRDEYE":
-                        stats["src_birdeye"] += 1
-                    else:
-                        stats["src_dex"] += 1
+                    source_key = source_name.lower()
+                    stats[f"src_{source_key}"] += 1
 
                     pair = best_pair(ca)
                     if pair is None:
@@ -1297,8 +1602,7 @@ def auto_scanner():
                     pre_age = pre_metrics.get("age_hours")
                     if pre_age is not None and pre_age > FRESH_PAIR_MAX_HOURS:
                         stats["stale_pair"] += 1
-                        if source_name == "BIRDEYE": stats["src_birdeye_stale"] += 1
-                        else: stats["src_dex_stale"] += 1
+                        stats[f"src_{source_key}_stale"] += 1
                         continue
 
                     report = rugcheck(ca)
@@ -1327,9 +1631,8 @@ def auto_scanner():
                     elif viral_label == "RISING":
                         stats["viral_rising"] += 1
 
-                    # Viral activity can strengthen a candidate, never bypass hard safety.
-                    if viral_score and result.get("score") is not None:
-                        result["score"] = min(100, result["score"] + viral_score)
+                    # Viral score is diagnostic only. Do NOT alter the original RURU risk score.
+                    # It may be displayed/used separately, but never changes safety/entry thresholds.
                     stats["pair_pass"] += 1
 
                     mc_ok = result.get("mc") is not None and MC_MIN <= result["mc"] <= MC_MAX
@@ -1339,7 +1642,7 @@ def auto_scanner():
 
                     # DEX liquidity is sometimes unavailable for very fresh Birdeye listings.
                     # Only in that case, ask Birdeye Market Data for the token's liquidity.
-                    if mc_ok and liq is None and BIRDEYE_API_KEY:
+                    if mc_ok and liq is None and BIRDEYE_API_KEY and BIRDEYE_MARKET_FALLBACK:
                         be_market = birdeye_market_data(ca)
                         be_liq = num((be_market or {}).get("liquidity"))
                         if be_liq is not None:
@@ -1379,7 +1682,7 @@ def auto_scanner():
                         elif top10 >= 50:
                             stats["holder_50_60"] += 1
 
-                    holder_ok = liq_ok and (top10 is None or top10 < 82)
+                    holder_ok = liq_ok and (top10 is None or top10 < 75)
                     if holder_ok: stats["holder_pass"] += 1
 
                     sig = result.get("signals") or {}
@@ -1413,8 +1716,7 @@ def auto_scanner():
                     safety_ok = crash_ok
                     if safety_ok:
                         stats["safety_pass"] += 1
-                        if source_name == "BIRDEYE": stats["src_birdeye_safe"] += 1
-                        else: stats["src_dex_safe"] += 1
+                        stats[f"src_{source_key}_safe"] += 1
                         if result.get("prepump"):
                             stats["prepump_safe"] += 1
 
@@ -1496,7 +1798,7 @@ Pair yasi: {age_text}
 Final Score: {final_score}/100
 
 KARAR: GIR
-POTANSIYEL: 5X-10X POTANSIYEL ADAYI
+POTANSIYEL: {potential_label(result, momentum)}
 
 UYARI: Potansiyel etiketi garanti degildir.
 Axiom'da son kontrolunu yap."""
@@ -1622,8 +1924,14 @@ Yeni giris icin uygun degil."""
                     f"RADAR V11.34 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
+                    f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
+                    f"RAYDIUM={stats.get('src_raydium',0)} stale={stats.get('src_raydium_stale',0)} safe={stats.get('src_raydium_safe',0)} | "
+                    f"METEORA={stats.get('src_meteora',0)} stale={stats.get('src_meteora_stale',0)} safe={stats.get('src_meteora_safe',0)} | "
                     f"DEX={stats.get('src_dex',0)} stale={stats.get('src_dex_stale',0)} safe={stats.get('src_dex_safe',0)}\n"
-                    f"SOURCE_ACCOUNTED={stats.get('src_birdeye',0)+stats.get('src_dex',0)}\n"
+                    f"SOURCE_ACCOUNTED={stats.get('src_birdeye',0)+stats.get('src_gecko',0)+stats.get('src_raydium',0)+stats.get('src_meteora',0)+stats.get('src_dex',0)}\n"
+                    f"FEEDS: GECKO cache={len(_cached_source('GECKO'))} err={source_feed_last_error.get('GECKO') or '-'} | "
+                    f"RAYDIUM cache={len(_cached_source('RAYDIUM'))} err={source_feed_last_error.get('RAYDIUM') or '-'} | "
+                    f"METEORA cache={len(_cached_source('METEORA'))} err={source_feed_last_error.get('METEORA') or '-'}\n"
                     f"PIPELINE: pair={stats.get('pair_pass',0)} "
                     f"> MC={stats.get('mc_pass',0)} "
                     f"> LIQ={stats.get('liq_pass',0)} "
@@ -1683,15 +1991,15 @@ def process_message(message):
 
     if command == "/start":
         signal_chats.add(int(chat_id))
-        send(chat_id, f"""✅ HunterElite {VERSION} ONLINE
+        send(chat_id, f"""âœ… HunterElite {VERSION} ONLINE
 
-🎯 Early Hunter: AKTİF
-🎯 Market bölgesi: $2K–$10K
-🧪 RugCheck: AKTİF
-📡 Eksik veri koruması: AKTİF
-🚨 Otomatik sinyal: AKTİF
+ğŸ¯ Early Hunter: AKTÄ°F
+ğŸ¯ Market bÃ¶lgesi: $2Kâ€“$10K
+ğŸ§ª RugCheck: AKTÄ°F
+ğŸ“¡ Eksik veri korumasÄ±: AKTÄ°F
+ğŸš¨ Otomatik sinyal: AKTÄ°F
 
-CA göndererek manuel analiz yapabilirsin.
+CA gÃ¶ndererek manuel analiz yapabilirsin.
 
 Komutlar:
 /ping
@@ -1703,51 +2011,51 @@ Komutlar:
         return
 
     if command == "/ping":
-        send(chat_id, f"🏓 PONG — HunterElite {VERSION} ONLINE")
+        send(chat_id, f"ğŸ“ PONG â€” HunterElite {VERSION} ONLINE")
         return
 
     if command == "/status":
         active = int(chat_id) in signal_chats
-        send(chat_id, f"""✅ HunterElite {VERSION} ONLINE
+        send(chat_id, f"""âœ… HunterElite {VERSION} ONLINE
 
-🔎 Manuel analiz: AKTİF
-🚨 Early Hunter: {"AKTİF" if active else "KAPALI"}
-⏱ Tarama: {SCAN_INTERVAL} sn
+ğŸ” Manuel analiz: AKTÄ°F
+ğŸš¨ Early Hunter: {"AKTÄ°F" if active else "KAPALI"}
+â± Tarama: {SCAN_INTERVAL} sn
 RURU Core: V11.34 ORIJINAL SINYAL ESikleri
 Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
-🎯 Watch Score: {WATCH_SCORE}
-🔥 Signal Score: {SIGNAL_SCORE}
-📈 Trend teyidi: {TREND_CONFIRM_SCANS} tarama / min momentum {MIN_MOMENTUM_SIGNAL}
-📡 Radar: {"BIRDEYE + DEX" if BIRDEYE_API_KEY else "DEX ONLY"}
-🟢 Birdeye API: {"BAĞLI" if BIRDEYE_API_KEY else "KEY YOK"}
-⏱ Birdeye yenileme: {BIRDEYE_POLL_INTERVAL} sn
-💧 Min Likidite: {money(MIN_LIQUIDITY)}
-📊 Market: $2K–$10K öncelikli
-💎 100X potansiyel filtresi: AKTİF\n📡 /radar teşhisi: AKTİF\n🧩 Single Engine: AKTİF""")
+ğŸ¯ Watch Score: {WATCH_SCORE}
+ğŸ”¥ Signal Score: {SIGNAL_SCORE}
+ğŸ“ˆ Trend teyidi: {TREND_CONFIRM_SCANS} tarama / min momentum {MIN_MOMENTUM_SIGNAL}
+ğŸ“¡ Radar: {"BIRDEYE + GECKO + RAYDIUM + METEORA + DEX" if BIRDEYE_API_KEY else "GECKO + RAYDIUM + METEORA + DEX"}
+ğŸŸ¢ Birdeye API: {"BAÄLI" if BIRDEYE_API_KEY else "KEY YOK"}
+â± Birdeye yenileme: {BIRDEYE_POLL_INTERVAL} sn
+ğŸ’§ Min Likidite: {money(MIN_LIQUIDITY)}
+ğŸ“Š Market: $2Kâ€“$10K Ã¶ncelikli
+ğŸ’ 100X potansiyel filtresi: AKTÄ°F\nğŸ“¡ /radar teÅŸhisi: AKTÄ°F\nğŸ§© Single Engine: AKTÄ°F""")
         return
 
     if command == "/signal_on":
         signal_chats.add(int(chat_id))
-        send(chat_id, "🚨 HunterElite otomatik sinyal AKTİF.\nEarly Hunter taraması başladı.")
+        send(chat_id, "ğŸš¨ HunterElite otomatik sinyal AKTÄ°F.\nEarly Hunter taramasÄ± baÅŸladÄ±.")
         return
 
     if command == "/signal_off":
         signal_chats.discard(int(chat_id))
-        send(chat_id, "🔕 Otomatik sinyal KAPALI.")
+        send(chat_id, "ğŸ”• Otomatik sinyal KAPALI.")
         return
 
     if command == "/signal_test":
         signal_chats.add(int(chat_id))
-        send(chat_id, f"""✅ HUNTERELITE TEST SİNYALİ
+        send(chat_id, f"""âœ… HUNTERELITE TEST SÄ°NYALÄ°
 
 {VERSION}
 
-📡 Telegram kanalı: ÇALIŞIYOR
-🚨 Otomatik sinyal: AKTİF
-🔎 Manuel analiz: AKTİF
-🔥 Early Hunter: AKTİF
+ğŸ“¡ Telegram kanalÄ±: Ã‡ALIÅIYOR
+ğŸš¨ Otomatik sinyal: AKTÄ°F
+ğŸ” Manuel analiz: AKTÄ°F
+ğŸ”¥ Early Hunter: AKTÄ°F
 
-Gerçek aday taraması başladı.""")
+GerÃ§ek aday taramasÄ± baÅŸladÄ±.""")
         return
 
     if command == "/radar":
@@ -1756,40 +2064,40 @@ Gerçek aday taraması başladı.""")
 
         updated = s.get("updated", 0)
         age = int(max(0, time.time() - updated)) if updated else None
-        age_text = f"{age} sn önce" if age is not None else "henüz ilk tur tamamlanmadı"
+        age_text = f"{age} sn Ã¶nce" if age is not None else "henÃ¼z ilk tur tamamlanmadÄ±"
 
-        send(chat_id, f"""📡 HUNTERELITE RADAR TEST
+        send(chat_id, f"""ğŸ“¡ HUNTERELITE RADAR TEST
 
-Sürüm: {VERSION}
+SÃ¼rÃ¼m: {VERSION}
 Son tarama: {age_text}
 
-🔎 Radar adayı: {s.get("radar", 0)}
-✅ İşlenen: {s.get("processed", 0)}
-❌ Pair yok: {s.get("pair_yok", 0)}
+ğŸ” Radar adayÄ±: {s.get("radar", 0)}
+âœ… Ä°ÅŸlenen: {s.get("processed", 0)}
+âŒ Pair yok: {s.get("pair_yok", 0)}
 
-Filtreye takılanlar:
-• MC: {s.get("mc_fail", 0)}
-• Likidite: {s.get("liq_fail", 0)}
-• Holder: {s.get("holder_fail", 0)}
-• Mint/Freeze: {s.get("authority_fail", 0)}
-• Rug/Honeypot: {s.get("rug_fail", 0)}
-• Score: {s.get("score_fail", 0)}
-• Buy baskısı: {s.get("buy_fail", 0)}
-• Hacim: {s.get("volume_fail", 0)}
-• Trend: {s.get("trend_fail", 0)}
-• Momentum: {s.get("momentum_fail", 0)}
+Filtreye takÄ±lanlar:
+â€¢ MC: {s.get("mc_fail", 0)}
+â€¢ Likidite: {s.get("liq_fail", 0)}
+â€¢ Holder: {s.get("holder_fail", 0)}
+â€¢ Mint/Freeze: {s.get("authority_fail", 0)}
+â€¢ Rug/Honeypot: {s.get("rug_fail", 0)}
+â€¢ Score: {s.get("score_fail", 0)}
+â€¢ Buy baskÄ±sÄ±: {s.get("buy_fail", 0)}
+â€¢ Hacim: {s.get("volume_fail", 0)}
+â€¢ Trend: {s.get("trend_fail", 0)}
+â€¢ Momentum: {s.get("momentum_fail", 0)}
 
-👀 WATCH: {s.get("watch", 0)}
-🚨 SIGNAL: {s.get("signal", 0)}
+ğŸ‘€ WATCH: {s.get("watch", 0)}
+ğŸš¨ SIGNAL: {s.get("signal", 0)}
 
-Bu ekran teşhis içindir; sinyal garantisi değildir.""")
+Bu ekran teÅŸhis iÃ§indir; sinyal garantisi deÄŸildir.""")
         return
 
     if command == "/help":
         send(
             chat_id,
             "HunterElite V11.3 EARLY 100X RADAR\n\n"
-            "CA gönder → manuel analiz\n\n"
+            "CA gÃ¶nder â†’ manuel analiz\n\n"
             "/ping\n/status\n/signal_on\n/signal_off\n/signal_test\n/radar\n/start"
         )
         return
@@ -1800,16 +2108,16 @@ Bu ekran teşhis içindir; sinyal garantisi değildir.""")
         ca = matches[0] if matches else ""
 
     if ca and SOL_CA.match(ca):
-        send(chat_id, "🔎 Token analiz ediliyor...")
+        send(chat_id, "ğŸ” Token analiz ediliyor...")
         try:
             _, report = analyse(ca)
             send(chat_id, report)
         except Exception as e:
             print("ANALYSIS ERROR:", repr(e), flush=True)
-            send(chat_id, "❌ Analiz sırasında veri hatası oluştu.")
+            send(chat_id, "âŒ Analiz sÄ±rasÄ±nda veri hatasÄ± oluÅŸtu.")
         return
 
-    send(chat_id, "Solana kontrat adresini gönder veya /help yaz.")
+    send(chat_id, "Solana kontrat adresini gÃ¶nder veya /help yaz.")
 
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -1842,14 +2150,14 @@ def startup_notify():
 
 Early Hunter: ACTIVE
 Scan: {SCAN_INTERVAL} sec
-Radar: {"BIRDEYE + DEX" if BIRDEYE_API_KEY else "DEX ONLY"}
-Birdeye: {"CONNECTED" if BIRDEYE_API_KEY else "KEY MISSING"}\nBirdeye Fresh: official 20/request + rolling unique cache / 60 sec\nRadar Mix: rolling Birdeye fills first + DEX max 20 fallback
+Radar: {"BIRDEYE + GECKO + RAYDIUM + METEORA + DEX" if BIRDEYE_API_KEY else "GECKO + RAYDIUM + METEORA + DEX"}
+Birdeye: {"CONNECTED" if BIRDEYE_API_KEY else "KEY MISSING"}\nBirdeye Fresh: official 20/request + rolling unique cache / CU-safe 180 sec\nRadar Mix: FIX2 multi-source; Gecko + Raydium + Meteora primary, DEX max 20 fallback
 Watch Score: {WATCH_SCORE}
 Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
 
-Early Entry: MC $1K+, Liquidity $800+, Top10 target <=82%\nHard rug/honeypot and authority checks remain active.\n\nSTATE DECISION LOCK + CENTRAL OUTPUT + LIQ FALLBACK: ACTIVE.\nAutomatic signal engine is running.""")
+Early Entry: MC $1K+, Liquidity $800+, Top10 <75%\nHard rug/honeypot and authority checks remain active.\n\nSTATE DECISION LOCK + CENTRAL OUTPUT + LIQ FALLBACK: ACTIVE.\nAutomatic signal engine is running.""")
 
 
 def startup():
@@ -1857,7 +2165,7 @@ def startup():
     print(f"TELEGRAM POLLING: {'ON' if POLLING_ENABLED else 'OFF - AUTO SIGNAL MODE'}", flush=True)
     print("EARLY HUNTER ACTIVE", flush=True)
     print(f"SCAN INTERVAL: {SCAN_INTERVAL}s", flush=True)
-    print(f"EARLY ENTRY FILTERS: MC>={MC_MIN}, LIQ>={MIN_LIQUIDITY}, TOP10<=82% target", flush=True)
+    print(f"EARLY ENTRY FILTERS: MC>={MC_MIN}, LIQ>={MIN_LIQUIDITY}, TOP10<75%", flush=True)
     print(
         f"TUNING: watch={WATCH_SCORE}, signal={SIGNAL_SCORE}, "
         f"momentum>={MIN_MOMENTUM_SIGNAL}, MC growth>={int((MIN_MC_GROWTH-1)*100)}%, "
