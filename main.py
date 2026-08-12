@@ -15,11 +15,16 @@ except Exception:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.36.4 TOKEN GATE DIAGNOSTIC"
+VERSION = "V11.36.6 MANUAL SOCIAL DEEP"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "").strip()
+X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "").strip()
+REDDIT_ACCESS_TOKEN = os.getenv("REDDIT_ACCESS_TOKEN", "").strip()
+REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "HunterEliteBot/11.36.6").strip()
+SOCIAL_MAJOR_FOLLOWERS = int(os.getenv("SOCIAL_MAJOR_FOLLOWERS", "50000"))
+SOCIAL_VIRAL_ENGAGEMENT = int(os.getenv("SOCIAL_VIRAL_ENGAGEMENT", "500"))
 if not SOLANA_RPC_URL and SOLANA_WS_URL:
     SOLANA_RPC_URL = SOLANA_WS_URL.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
 
@@ -55,7 +60,7 @@ MAX_CRASH_DROP_24H = -55.0
 
 MIN_MOMENTUM_SIGNAL = 10
 MIN_MC_GROWTH = 1.005
-MAX_PAIR_AGE_HOURS = 12.0
+MAX_PAIR_AGE_HOURS = 2.0
 TREND_CONFIRM_SCANS = 2
 
 WATCH_MIN_BUYS_5M = 2
@@ -105,7 +110,7 @@ RAYDIUM_TARGET = 20
 METEORA_TARGET = 20
 DEX_TARGET = 20
 MAX_REPEAT_PER_SCAN = 20
-FRESH_PAIR_MAX_HOURS = 6.0
+FRESH_PAIR_MAX_HOURS = 2.0
 
 # Multi-source discovery caches. These only supply candidate CAs;
 # all candidates still pass the unchanged RURU CORE safety/entry pipeline.
@@ -1596,10 +1601,337 @@ def simple_action(result, momentum=0, previous=None):
 
     return "ğŸ”´ GÄ°RME"
 
+
+def _pair_social_links(pair):
+    info = (pair or {}).get("info") or {}
+    socials = info.get("socials") or []
+    websites = info.get("websites") or []
+    out = {"x": [], "telegram": [], "reddit": [], "website": []}
+
+    for s in socials:
+        if not isinstance(s, dict):
+            continue
+        url = str(s.get("url") or "").strip()
+        stype = str(s.get("type") or "").lower()
+        low = url.lower()
+        if not url:
+            continue
+        if stype in ("twitter", "x") or "x.com/" in low or "twitter.com/" in low:
+            out["x"].append(url)
+        elif stype == "telegram" or "t.me/" in low or "telegram.me/" in low:
+            out["telegram"].append(url)
+        elif stype == "reddit" or "reddit.com/" in low:
+            out["reddit"].append(url)
+
+    for w in websites:
+        if isinstance(w, dict):
+            url = str(w.get("url") or "").strip()
+        else:
+            url = str(w or "").strip()
+        if url:
+            out["website"].append(url)
+
+    for k in out:
+        # stable dedupe
+        seen, deduped = set(), []
+        for url in out[k]:
+            if url not in seen:
+                seen.add(url)
+                deduped.append(url)
+        out[k] = deduped[:4]
+    return out
+
+
+def _x_recent_social(ca, name, symbol):
+    if not X_BEARER_TOKEN:
+        return {
+            "status": "NO_X_API", "posts": 0, "engagement": 0, "major_posts": 0,
+            "major_accounts": [], "top_accounts": [], "recent_minutes": None
+        }
+
+    # Search CA first; name/symbol are additive but quoted to reduce noise.
+    terms = [ca]
+    if name and name != "Unknown":
+        safe_name = str(name).replace('"', '')[:70]
+        terms.append(f'"{safe_name}"')
+    if symbol and symbol not in ("N/A", "") and len(str(symbol)) >= 2:
+        safe_symbol = re.sub(r"[^A-Za-z0-9_]+", "", str(symbol))[:15]
+        if safe_symbol:
+            terms.append(f'"${safe_symbol}"')
+    query = "(" + " OR ".join(terms[:3]) + ") -is:retweet"
+
+    params = {
+        "query": query,
+        "max_results": 50,
+        "tweet.fields": "created_at,public_metrics,author_id",
+        "expansions": "author_id",
+        "user.fields": "id,name,username,verified,verified_type,public_metrics",
+    }
+    url = "https://api.x.com/2/tweets/search/recent?" + urllib.parse.urlencode(params)
+    headers = {
+        "Authorization": f"Bearer {X_BEARER_TOKEN}",
+        "Accept": "application/json",
+        "User-Agent": "HunterEliteBot/11.36.6",
+    }
+    try:
+        data = get_json(url, timeout=14, headers=headers)
+    except urllib.error.HTTPError as e:
+        return {
+            "status": f"X_HTTP_{getattr(e, 'code', 'ERR')}", "posts": 0, "engagement": 0,
+            "major_posts": 0, "major_accounts": [], "top_accounts": [], "recent_minutes": None
+        }
+    except Exception:
+        return {
+            "status": "X_ERROR", "posts": 0, "engagement": 0, "major_posts": 0,
+            "major_accounts": [], "top_accounts": [], "recent_minutes": None
+        }
+
+    users = {}
+    for u in ((data.get("includes") or {}).get("users") or []):
+        if isinstance(u, dict):
+            users[str(u.get("id"))] = u
+
+    posts = data.get("data") or []
+    total_eng = 0
+    major_posts = 0
+    major_accounts = {}
+    top_accounts = {}
+    newest_age_min = None
+    now = time.time()
+
+    for p in posts:
+        if not isinstance(p, dict):
+            continue
+        pm = p.get("public_metrics") or {}
+        eng = (
+            safe_int(pm.get("like_count")) +
+            safe_int(pm.get("retweet_count")) +
+            safe_int(pm.get("reply_count")) +
+            safe_int(pm.get("quote_count"))
+        )
+        total_eng += eng
+
+        created = str(p.get("created_at") or "")
+        if created:
+            try:
+                from datetime import datetime, timezone
+                dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                age_min = max(0, int((datetime.now(timezone.utc) - dt).total_seconds() / 60))
+                newest_age_min = age_min if newest_age_min is None else min(newest_age_min, age_min)
+            except Exception:
+                pass
+
+        author = users.get(str(p.get("author_id"))) or {}
+        username = str(author.get("username") or "").strip()
+        upm = author.get("public_metrics") or {}
+        followers = safe_int(upm.get("followers_count"))
+        verified = bool(author.get("verified")) or bool(author.get("verified_type"))
+
+        if username:
+            rec = top_accounts.setdefault(username, {"followers": followers, "engagement": 0, "verified": verified})
+            rec["followers"] = max(rec["followers"], followers)
+            rec["engagement"] += eng
+            rec["verified"] = rec["verified"] or verified
+
+        if followers >= SOCIAL_MAJOR_FOLLOWERS or verified:
+            major_posts += 1
+            if username:
+                rec = major_accounts.setdefault(username, {"followers": followers, "engagement": 0, "verified": verified})
+                rec["followers"] = max(rec["followers"], followers)
+                rec["engagement"] += eng
+                rec["verified"] = rec["verified"] or verified
+
+    def pack_accounts(d):
+        ranked = sorted(
+            d.items(),
+            key=lambda kv: (kv[1].get("followers", 0), kv[1].get("engagement", 0)),
+            reverse=True,
+        )[:4]
+        return [
+            {
+                "username": k,
+                "followers": v.get("followers", 0),
+                "engagement": v.get("engagement", 0),
+                "verified": bool(v.get("verified")),
+            }
+            for k, v in ranked
+        ]
+
+    return {
+        "status": "OK",
+        "posts": len(posts),
+        "engagement": total_eng,
+        "major_posts": major_posts,
+        "major_accounts": pack_accounts(major_accounts),
+        "top_accounts": pack_accounts(top_accounts),
+        "recent_minutes": newest_age_min,
+    }
+
+
+def _reddit_recent_social(ca, name, symbol):
+    if not REDDIT_ACCESS_TOKEN:
+        return {"status": "NO_REDDIT_API", "posts": 0, "score": 0, "comments": 0, "recent_hours": None}
+
+    q_parts = [ca]
+    if name and name != "Unknown":
+        q_parts.append(f'"{str(name)[:60]}"')
+    if symbol and symbol not in ("N/A", ""):
+        q_parts.append(str(symbol)[:15])
+    params = {
+        "q": " OR ".join(q_parts[:3]),
+        "sort": "new",
+        "t": "week",
+        "limit": 25,
+        "restrict_sr": "false",
+        "type": "link",
+    }
+    url = "https://oauth.reddit.com/search?" + urllib.parse.urlencode(params)
+    headers = {
+        "Authorization": f"bearer {REDDIT_ACCESS_TOKEN}",
+        "User-Agent": REDDIT_USER_AGENT,
+        "Accept": "application/json",
+    }
+    try:
+        data = get_json(url, timeout=14, headers=headers)
+    except urllib.error.HTTPError as e:
+        return {"status": f"REDDIT_HTTP_{getattr(e,'code','ERR')}", "posts": 0, "score": 0, "comments": 0, "recent_hours": None}
+    except Exception:
+        return {"status": "REDDIT_ERROR", "posts": 0, "score": 0, "comments": 0, "recent_hours": None}
+
+    children = (((data or {}).get("data") or {}).get("children") or [])
+    score = comments = 0
+    newest = None
+    now = time.time()
+    for child in children:
+        p = (child or {}).get("data") or {}
+        score += safe_int(p.get("score"))
+        comments += safe_int(p.get("num_comments"))
+        created = num(p.get("created_utc"))
+        if created:
+            age_h = max(0.0, (now - created) / 3600.0)
+            newest = age_h if newest is None else min(newest, age_h)
+    return {
+        "status": "OK", "posts": len(children), "score": score,
+        "comments": comments, "recent_hours": newest
+    }
+
+
+def deep_social_analysis(ca, pair, name, symbol):
+    links = _pair_social_links(pair)
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fx = ex.submit(_x_recent_social, ca, name, symbol)
+        fr = ex.submit(_reddit_recent_social, ca, name, symbol)
+        x = fx.result()
+        reddit = fr.result()
+
+    has_x = bool(links["x"])
+    has_tg = bool(links["telegram"])
+    has_reddit_link = bool(links["reddit"])
+    has_site = bool(links["website"])
+
+    presence = 0
+    presence += 25 if has_x else 0
+    presence += 15 if has_tg else 0
+    presence += 10 if has_reddit_link else 0
+    presence += 15 if has_site else 0
+    if x.get("status") == "OK" and x.get("posts", 0) > 0:
+        presence += min(25, 5 + x.get("posts", 0))
+    if reddit.get("status") == "OK" and reddit.get("posts", 0) > 0:
+        presence += min(10, reddit.get("posts", 0) * 2)
+    presence = min(100, presence)
+
+    viral = 0
+    if x.get("status") == "OK":
+        viral += min(45, x.get("posts", 0) * 2)
+        viral += min(35, int(x.get("engagement", 0) / 20))
+        viral += min(20, x.get("major_posts", 0) * 7)
+        if x.get("recent_minutes") is not None and x["recent_minutes"] <= 60:
+            viral += 10
+    if reddit.get("status") == "OK":
+        viral += min(15, reddit.get("posts", 0) * 2)
+        viral += min(10, int((reddit.get("score", 0) + reddit.get("comments", 0)) / 20))
+    viral = min(100, viral)
+
+    major = x.get("major_accounts") or []
+    if major:
+        catalyst = "MAJOR ACCOUNT ACTIVITY"
+    elif x.get("status") == "OK" and x.get("engagement", 0) >= SOCIAL_VIRAL_ENGAGEMENT:
+        catalyst = "HIGH X ENGAGEMENT"
+    elif viral >= 60:
+        catalyst = "VIRAL RISING"
+    elif viral >= 30:
+        catalyst = "SOCIAL RISING"
+    else:
+        catalyst = "NO VERIFIED CATALYST"
+
+    if viral >= 70:
+        viral_label = "VIRAL"
+    elif viral >= 45:
+        viral_label = "RISING"
+    elif viral >= 20:
+        viral_label = "EARLY"
+    else:
+        viral_label = "WEAK/UNKNOWN"
+
+    return {
+        "links": links,
+        "x": x,
+        "reddit": reddit,
+        "presence_score": presence,
+        "viral_score": viral,
+        "viral_label": viral_label,
+        "catalyst": catalyst,
+    }
+
+
+def _fmt_major_accounts(accounts):
+    if not accounts:
+        return "YOK / DOGRULANAMADI"
+    parts = []
+    for a in accounts[:3]:
+        followers = safe_int(a.get("followers"))
+        username = a.get("username") or "?"
+        mark = "âœ“" if a.get("verified") else ""
+        parts.append(f"@{username}{mark} ({followers:,} takipci)")
+    return ", ".join(parts)
+
+
+def manual_general_decision(result, social, clone_safe=True):
+    if not result:
+        return "VERI BEKLE"
+    if not basic_signal_safe(result):
+        return "UZAK DUR"
+    if not crash_guard(result):
+        return "UZAK DUR"
+    if not clone_safe:
+        return "UZAK DUR / CLONE"
+    buys, sells = result.get("buys5", 0), result.get("sells5", 0)
+    p5 = result.get("price5")
+    vol5 = result.get("vol5") or 0
+    viral = social.get("viral_score", 0)
+    strong_market = (
+        buys >= 8 and buys >= max(1, sells * 1.15)
+        and vol5 >= 300 and p5 is not None and 1 <= p5 <= 55
+    )
+    if strong_market and viral >= 35 and result.get("score", 0) >= SIGNAL_SCORE:
+        return "GIR ADAYI / SON KONTROL"
+    if strong_market and result.get("score", 0) >= WATCH_SCORE:
+        return "BEKLE - SOSYAL TEYIT"
+    if viral >= 60 and (p5 is None or p5 <= 0):
+        return "SOSYAL VAR AMA FIYAT TEYITSIZ"
+    return "BEKLE / UZAK DUR"
+
 def analyse(ca):
     pair = best_pair(ca)
     if pair is None:
-        return None, f"ğŸ¦… HUNTERELITE {VERSION}\n\nCA: {ca}\n\nâŒ DEX pair verisi bulunamadÄ±.\n\nğŸ”´ GÄ°RME / VERÄ° BEKLE"
+        return None, f"""HUNTERELITE {VERSION}
+
+CA: {ca}
+
+DEX pair verisi bulunamadi.
+
+KARAR: GIRME / VERI BEKLE"""
 
     report = rugcheck(ca)
     result = calculate_score(pair, report)
@@ -1607,43 +1939,84 @@ def analyse(ca):
     name = base.get("name") or "Unknown"
     symbol = base.get("symbol") or "N/A"
 
-    text = f"""ğŸ¦… HUNTERELITE {VERSION}
+    # Clone/impersonation check is also applied to manual CA analysis.
+    clone_safe, clone_reason = clone_impersonation_guard(name, symbol, ca, pair)
+
+    # Deep social analysis is intentionally manual-only so the fast radar is not slowed.
+    social = deep_social_analysis(ca, pair, name, symbol)
+    x = social["x"]
+    reddit = social["reddit"]
+    links = social["links"]
+
+    x_status = (
+        f"{x.get('posts',0)} post / {x.get('engagement',0)} etkilesim"
+        if x.get("status") == "OK"
+        else f"DOGRULANAMADI ({x.get('status')})"
+    )
+    reddit_status = (
+        f"{reddit.get('posts',0)} post / score {reddit.get('score',0)} / {reddit.get('comments',0)} yorum"
+        if reddit.get("status") == "OK"
+        else f"DOGRULANAMADI ({reddit.get('status')})"
+    )
+
+    age = result.get("age_hours")
+    age_text = f"{age:.2f} saat" if age is not None else "N/A"
+
+    general = manual_general_decision(result, social, clone_safe=clone_safe)
+
+    text = f"""HUNTERELITE MANUEL DERIN ANALIZ
 
 {name} ({symbol})
 CA: {ca}
 
-ğŸ¯ Market GiriÅŸ BÃ¶lgesi: $2Kâ€“$10K
-
+PIYASA
 Market Cap: {money(result["mc"])}
 Likidite: {money(result["liq"])}
+Pair yasi: {age_text}
+5dk: {result["buys5"]} buy / {result["sells5"]} sell
+5dk hacim: {money(result["vol5"])}
+5dk fiyat: {percent(result["price5"])}
+1sa fiyat: {percent(result["price1h"])}
+6sa fiyat: {percent(result["price6h"])}
 
-âš¡ 5dk: {result["buys5"]} buy / {result["sells5"]} sell
-ğŸ“Š 1s: {result["buys1h"]} buy / {result["sells1h"]} sell
-
-ğŸ’µ 5dk hacim: {money(result["vol5"])}
-ğŸ“ˆ 5dk fiyat: {percent(result["price5"])}
-
-ğŸ§ª RugCheck Derin Kontrol
-
-RugCheck: {"âœ… ALINDI" if report else "âš ï¸ VERÄ° ALINAMADI"}
-
-Top-1 holder: {percent(result["top1"])}
-Top-5 holder: {percent(result["top5"])}
-Top-10 holder: {percent(result["top10"])}
-
+RUG / HOLDER
+RugCheck: {"ALINDI" if report else "VERI YOK"}
+Top-1: {percent(result["top1"])}
+Top-5: {percent(result["top5"])}
+Top-10: {percent(result["top10"])}
 Mint authority: {authority_text(result["mint"])}
 Freeze authority: {authority_text(result["freeze"])}
+Clone Guard: {"TEMIZ" if clone_safe else "BLOCK"}
+Clone Notu: {clone_reason or "-"}
 
-ğŸ›¡ Hunter Elite Score: {result["score"]}/100
-ğŸ’ Potansiyel: IZLE
+SOSYAL VARLIK
+X linki: {"VAR" if links["x"] else "YOK"}
+Telegram: {"VAR" if links["telegram"] else "YOK"}
+Reddit linki: {"VAR" if links["reddit"] else "YOK"}
+Website: {"VAR" if links["website"] else "YOK"}
+Social Presence: {social["presence_score"]}/100
 
-ğŸ¯ Karar: {result["decision"]}"""
+CANLI SOSYAL
+X: {x_status}
+Reddit: {reddit_status}
+Buyuk hesap paylasimi: {_fmt_major_accounts(x.get("major_accounts") or [])}
+Social Catalyst: {social["catalyst"]}
+Viral Durum: {social["viral_label"]} ({social["viral_score"]}/100)
+
+SKOR
+Risk/Quality Score: {result["score"]}/100
+Genel Karar: {general}
+
+NOT
+X_BEARER_TOKEN yoksa X post/etkilesim ve buyuk hesap verisi DOGRULANAMADI yazar; tahmin edilmez.
+REDDIT_ACCESS_TOKEN yoksa Reddit canli verisi DOGRULANAMADI yazar.
+Eksik sosyal veri pozitif kabul edilmez."""
 
     if result["risks"]:
-        text += "\n\nâš ï¸ Riskler:\n" + "".join(f"â€¢ {r}\n" for r in result["risks"][:7])
+        text += "\n\nRISKLER\n" + "".join(f"- {r}\n" for r in result["risks"][:8])
 
-    text += "\nEksik veri gÃ¼venli kabul edilmez.\nBu sistem risk filtresidir, yatÄ±rÄ±m garantisi deÄŸildir."
     return result, text
+
 
 def basic_signal_safe(result):
     if not result:
@@ -2246,33 +2619,11 @@ POTANSIYEL: {potential_label(result, momentum)}
 UYARI: Potansiyel etiketi garanti degildir.
 Axiom'da son kontrolunu yap."""
 
-                    elif (
-                        watch_ok
-                        and stage == "NEW"
-                        and now - last_sent > WATCH_REPEAT_COOLDOWN
-                    ):
+                    elif watch_ok and stage == "NEW":
+                        # V11.36.5: WATCH stays internal. Telegram receives only final GIR signals.
                         new_stage = "WATCH"
                         stats["watch"] += 1
-
-                        message = f"""HUNTERELITE IZLE
-
-{name} ({symbol})
-CA: {ca}
-
-Market Cap: {money(result["mc"])}
-Likidite: {money(result["liq"])}
-
-5dk: {result["buys5"]} buy / {result["sells5"]} sell
-5dk hacim: {money(result["vol5"])}
-5dk fiyat: {percent(result["price5"])}
-
-Top-10: {percent(result["top10"])}
-Score: {result["score"]}/100
-
-Potansiyel: IZLE
-KARAR: IZLE / ERKEN ADAY
-
-Momentum teyidi bekleniyor."""
+                        message = None
 
                     # V11.34 LIQ GUARD:
                     # If a token that already signaled loses >=35% of pool liquidity
@@ -2465,7 +2816,7 @@ Komutlar:
         active = int(chat_id) in signal_chats
         send(chat_id, f"""âœ… HunterElite {VERSION} ONLINE
 
-ğŸ” Manuel analiz: AKTÄ°F
+ğŸ” Manuel analiz: AKTÄ°F (SOSYAL DEEP)
 ğŸš¨ Early Hunter: {"AKTÄ°F" if active else "KAPALI"}
 â± Tarama: {SCAN_INTERVAL} sn
 RURU Core: V11.34 ORIJINAL SINYAL ESikleri
@@ -2499,7 +2850,7 @@ Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 
 ğŸ“¡ Telegram kanalÄ±: Ã‡ALIÅIYOR
 ğŸš¨ Otomatik sinyal: AKTÄ°F
-ğŸ” Manuel analiz: AKTÄ°F
+ğŸ” Manuel analiz: AKTÄ°F (SOSYAL DEEP)
 ğŸ”¥ Early Hunter: AKTÄ°F
 
 GerÃ§ek aday taramasÄ± baÅŸladÄ±.""")
@@ -2544,7 +2895,7 @@ Bu ekran teÅŸhis iÃ§indir; sinyal garantisi deÄŸildir.""")
         send(
             chat_id,
             "HunterElite V11.3 EARLY 100X RADAR\n\n"
-            "CA gÃ¶nder â†’ manuel analiz\n\n"
+            "CA gÃ¶nder â†’ derin manuel analiz (rug + holder + clone + sosyal + viral)\n\n"
             "/ping\n/status\n/signal_on\n/signal_off\n/signal_test\n/radar\n/start"
         )
         return
