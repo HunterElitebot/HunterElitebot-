@@ -15,7 +15,7 @@ except Exception:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.36.4 FINAL STABLE DIAGNOSTIC"
+VERSION = "V11.36.4 TOKEN GATE DIAGNOSTIC"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
@@ -2184,6 +2184,29 @@ def auto_scanner():
 
                     if signal_ok:
                         stats["signal_gate_pass"] += 1
+
+                    # TOKEN GATE DIAGNOSTIC: show exactly why a late-stage candidate
+                    # did or did not reach WATCH/SIGNAL. No thresholds are changed.
+                    if safety_ok and (activity_ok or trend_ok or momentum_ok):
+                        reasons = []
+                        if not activity_ok: reasons.append("ACTIVITY")
+                        if not trend_ok: reasons.append("TREND")
+                        if not momentum_ok: reasons.append("MOMENTUM")
+                        if not liq_confirmed: reasons.append("LIQ_CONFIRM")
+                        if not clone_safe: reasons.append("CLONE")
+                        if not liq_drain_safe: reasons.append("LIQ_DRAIN")
+                        if not watch_ok and not signal_ok and not reasons:
+                            reasons.append("DECISION_GATE")
+                        print(
+                            f"TOKEN_GATE | {ca} | {name} ({symbol}) | "
+                            f"SAFE={int(bool(safety_ok))} ACT={int(bool(activity_ok))} "
+                            f"TREND={int(bool(trend_ok))} MOM={int(bool(momentum_ok))} "
+                            f"LIQ_OK={int(bool(liq_confirmed))} CLONE={int(not bool(clone_safe))} "
+                            f"LIQ_DRAIN_OK={int(bool(liq_drain_safe))} "
+                            f"WATCH={int(bool(watch_ok))} SIGNAL={int(bool(signal_ok))} | "
+                            f"BLOCK={','.join(reasons) if reasons else 'NONE'}",
+                            flush=True
+                        )
 
                     if (
                         signal_ok
