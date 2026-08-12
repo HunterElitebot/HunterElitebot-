@@ -15,7 +15,7 @@ except Exception:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.37.2 SIGNAL GATE RELAXED"
+VERSION = "V11.38 ONE SHOT RECOVERY"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
@@ -117,7 +117,7 @@ FRESH_PAIR_MAX_HOURS = 2.0
 
 # Multi-source discovery caches. These only supply candidate CAs;
 # all candidates still pass the unchanged RURU CORE safety/entry pipeline.
-SOURCE_POLL_INTERVAL = 12
+SOURCE_POLL_INTERVAL = 24
 SOURCE_CACHE_LIMIT = 120
 source_feed_lock = threading.Lock()
 source_feed_cache = {"GECKO": [], "RAYDIUM": [], "METEORA": []}
@@ -388,6 +388,27 @@ def recover_dex_liquidity(ca, current_pair=None):
             best = liq
     return best
 
+
+def recover_gecko_liquidity(ca):
+    """Keyless GeckoTerminal fallback. Returns explicit reserve_in_usd only."""
+    try:
+        url = (
+            "https://api.geckoterminal.com/api/v2/networks/solana/tokens/"
+            + urllib.parse.quote(str(ca), safe="")
+            + "/pools?page=1"
+        )
+        payload = get_json(url, timeout=12, headers={"Accept": "application/json;version=20230203"})
+        best = None
+        for row in (payload.get("data") or []) if isinstance(payload, dict) else []:
+            attrs = (row or {}).get("attributes") or {}
+            liq = num(attrs.get("reserve_in_usd"))
+            if liq is not None and (best is None or liq > best):
+                best = liq
+        return best
+    except Exception as e:
+        print("GECKO LIQ RECOVERY ERROR:", ca, repr(e), flush=True)
+        return None
+
 def _norm_identity(v):
     return re.sub(r"[^a-z0-9]+", "", str(v or "").lower())
 
@@ -611,7 +632,7 @@ def gecko_new_candidates(force=False):
         return cached
 
     found, seen, errors = [], set(), []
-    for page in (1, 2, 3):
+    for page in (1,):
         url = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools?" + urllib.parse.urlencode({
             "include": "base_token,quote_token",
             "page": page,
@@ -2539,6 +2560,7 @@ def auto_scanner():
             stats["unique_new"] = unique_new
             stats["repeat"] = repeat
 
+            birdeye_liq_attempts = 0
             for ca in candidates:
                 try:
                     source_name = candidate_sources.get(ca)
@@ -2607,9 +2629,19 @@ def auto_scanner():
                             result["liq_source"] = "DEX_RECOVERY"
                             stats["liq_fallback_ok"] += 1
 
-                    # DEX liquidity is sometimes unavailable for very fresh Birdeye listings.
-                    # Only in that case, ask Birdeye Market Data for the token's liquidity.
-                    if mc_ok and liq is None and BIRDEYE_API_KEY and BIRDEYE_MARKET_FALLBACK:
+                    # ONE SHOT RECOVERY: if DexScreener still has no explicit liquidity,
+                    # try GeckoTerminal token-pools before spending Birdeye quota.
+                    if mc_ok and liq is None:
+                        gecko_liq = recover_gecko_liquidity(ca)
+                        if gecko_liq is not None:
+                            liq = gecko_liq
+                            result["liq"] = gecko_liq
+                            result["liq_source"] = "GECKO_RECOVERY"
+                            stats["liq_fallback_ok"] += 1
+
+                    # If both keyless sources are missing, Birdeye remains the last fallback.
+                    if mc_ok and liq is None and BIRDEYE_API_KEY and BIRDEYE_MARKET_FALLBACK and birdeye_liq_attempts < 4:
+                        birdeye_liq_attempts += 1
                         be_market = birdeye_market_data(ca)
                         be_liq = num((be_market or {}).get("liquidity"))
                         if be_liq is not None:
@@ -2926,7 +2958,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.36.8 | total={stats.get('radar',0)} "
+                    f"RADAR {VERSION} | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -2941,8 +2973,8 @@ Yeni giris icin uygun degil."""
                     f"> MC={stats.get('mc_pass',0)} "
                     f"> LIQ={stats.get('liq_pass',0)} "
                     f"> HOLDER={stats.get('holder_pass',0)}\n"
-                    f"LIQ FALLBACK: birdeye_ok={stats.get('liq_fallback_ok',0)} "
-                    f"birdeye_missing={stats.get('liq_fallback_missing',0)}\n"
+                    f"LIQ RECOVERY: recovered={stats.get('liq_fallback_ok',0)} "
+                    f"missing_after_recovery={stats.get('liq_fallback_missing',0)}\n"
                     f"LIQ BREAKDOWN: missing={stats.get('liq_missing',0)} "
                     f"$0-200={stats.get('liq_0_200',0)} "
                     f"$200-500={stats.get('liq_200_500',0)} "
