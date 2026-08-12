@@ -15,7 +15,7 @@ except Exception:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.36.7 SOCIAL LIVE"
+VERSION = "V11.36.8 SOCIAL WEB FALLBACK"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
@@ -1652,12 +1652,161 @@ def _pair_social_links(pair):
     return out
 
 
+
+def _strip_html_text(value):
+    s = html.unescape(str(value or ""))
+    s = re.sub(r"<script\\b[^>]*>.*?</script>", " ", s, flags=re.I|re.S)
+    s = re.sub(r"<style\\b[^>]*>.*?</style>", " ", s, flags=re.I|re.S)
+    s = re.sub(r"<[^>]+>", " ", s)
+    return re.sub(r"\\s+", " ", s).strip()
+
+
+def _public_search_ddg(query, limit=12):
+    """Manual-only public web search fallback. No login/API key required.
+    Conservative: returns URLs/titles/snippets only; never invents engagement metrics.
+    """
+    url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Android 16; HunterEliteBot/11.36.8)",
+        "Accept": "text/html,application/xhtml+xml",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=12) as r:
+            raw = r.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        return [], f"SEARCH_{type(e).__name__}"
+
+    rows = []
+    # DuckDuckGo HTML result anchors and snippets. Keep parsing intentionally tolerant.
+    blocks = re.split(r'<div[^>]+class="[^"]*result[^"]*"[^>]*>', raw, flags=re.I)
+    for block in blocks[1:]:
+        href_m = re.search(r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', block, flags=re.I|re.S)
+        if not href_m:
+            continue
+        href = html.unescape(href_m.group(1))
+        title = _strip_html_text(href_m.group(2))
+        if "uddg=" in href:
+            try:
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+                href = qs.get("uddg", [href])[0]
+            except Exception:
+                pass
+        sn_m = re.search(r'class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</', block, flags=re.I|re.S)
+        snippet = _strip_html_text(sn_m.group(1)) if sn_m else ""
+        if href.startswith("http"):
+            rows.append({"url": href, "title": title, "snippet": snippet})
+        if len(rows) >= limit:
+            break
+    return rows, "OK" if rows else "NO_RESULTS"
+
+
+def _x_oembed_verify(tweet_url):
+    """Verify a concrete public X post URL via X's public oEmbed endpoint.
+    oEmbed does not provide follower counts or engagement metrics.
+    """
+    try:
+        url = "https://publish.twitter.com/oembed?" + urllib.parse.urlencode({
+            "url": tweet_url, "omit_script": "true", "dnt": "true"
+        })
+        data = get_json(url, timeout=10)
+        author = str((data or {}).get("author_name") or "").strip()
+        author_url = str((data or {}).get("author_url") or "").strip()
+        handle = ""
+        m = re.search(r'(?:x|twitter)\\.com/([^/?#]+)', author_url, flags=re.I)
+        if m:
+            handle = m.group(1)
+        body = _strip_html_text((data or {}).get("html") or "")
+        return {"ok": True, "author": author, "handle": handle, "text": body[:500]}
+    except Exception:
+        return {"ok": False, "author": "", "handle": "", "text": ""}
+
+
+def _public_x_web_social(ca, name, symbol):
+    terms = [ca]
+    if name and name != "Unknown":
+        terms.append(f'"{str(name).replace(chr(34), "")[:60]}"')
+    if symbol and symbol not in ("", "N/A"):
+        terms.append(f'"{str(symbol)[:15]}"')
+    q = "site:x.com " + " ".join(terms[:3])
+    rows, status = _public_search_ddg(q, limit=12)
+    posts = []
+    handles = {}
+    for row in rows:
+        u = row.get("url") or ""
+        if not re.search(r'https?://(?:www\\.)?(?:x|twitter)\\.com/', u, flags=re.I):
+            continue
+        m = re.search(r'(?:x|twitter)\\.com/([^/?#]+)/status/(\\d+)', u, flags=re.I)
+        if not m:
+            continue
+        verified = _x_oembed_verify(u)
+        if verified.get("ok"):
+            h = verified.get("handle") or m.group(1)
+            if h:
+                handles[h] = handles.get(h, 0) + 1
+            posts.append({"url": u, "handle": h, "text": verified.get("text") or row.get("snippet") or ""})
+        if len(posts) >= 8:
+            break
+    return {
+        "status": "PUBLIC_WEB_OK" if posts else status,
+        "posts": len(posts),
+        "engagement": None,
+        "major_posts": 0,
+        "major_accounts": [],
+        "top_accounts": [{"username": h, "followers": None, "engagement": None, "verified": False} for h, _ in sorted(handles.items(), key=lambda kv: kv[1], reverse=True)[:4]],
+        "recent_minutes": None,
+        "verified_urls": [p["url"] for p in posts[:5]],
+    }
+
+
+def _public_reddit_social(ca, name, symbol):
+    # Public search fallback. If Reddit blocks anonymous JSON, degrade to web-search mentions.
+    qparts = [ca]
+    if name and name != "Unknown":
+        qparts.append(str(name)[:60])
+    if symbol and symbol not in ("", "N/A"):
+        qparts.append(str(symbol)[:15])
+    query = " OR ".join(qparts[:3])
+    try:
+        url = "https://www.reddit.com/search.json?" + urllib.parse.urlencode({
+            "q": query, "sort": "new", "t": "week", "limit": 20, "raw_json": 1
+        })
+        req = urllib.request.Request(url, headers={"User-Agent": REDDIT_USER_AGENT, "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            data = json.loads(r.read().decode("utf-8", errors="replace"))
+        children = (((data or {}).get("data") or {}).get("children") or [])
+        score = comments = 0
+        newest = None
+        now = time.time()
+        for child in children:
+            p = (child or {}).get("data") or {}
+            score += safe_int(p.get("score"))
+            comments += safe_int(p.get("num_comments"))
+            created = num(p.get("created_utc"))
+            if created:
+                age_h = max(0.0, (now - created) / 3600.0)
+                newest = age_h if newest is None else min(newest, age_h)
+        return {"status": "PUBLIC_JSON_OK", "posts": len(children), "score": score, "comments": comments, "recent_hours": newest}
+    except Exception:
+        rows, status = _public_search_ddg("site:reddit.com " + " ".join(qparts[:3]), limit=10)
+        return {"status": "PUBLIC_WEB_OK" if rows else status, "posts": len(rows), "score": None, "comments": None, "recent_hours": None}
+
+
+def _public_general_mentions(ca, name, symbol):
+    q = " ".join([x for x in [ca, f'"{name}"' if name and name != "Unknown" else "", symbol if symbol not in ("", "N/A") else ""] if x])
+    rows, status = _public_search_ddg(q, limit=12)
+    domains = []
+    for r in rows:
+        try:
+            d = urllib.parse.urlparse(r.get("url") or "").netloc.lower().replace("www.", "")
+        except Exception:
+            d = ""
+        if d and d not in domains:
+            domains.append(d)
+    return {"status": status, "mentions": len(rows), "domains": domains[:6]}
+
 def _x_recent_social(ca, name, symbol):
     if not X_BEARER_TOKEN:
-        return {
-            "status": "NO_X_API", "posts": 0, "engagement": 0, "major_posts": 0,
-            "major_accounts": [], "top_accounts": [], "recent_minutes": None
-        }
+        return _public_x_web_social(ca, name, symbol)
 
     # Search CA first; name/symbol are additive but quoted to reduce noise.
     terms = [ca]
@@ -1859,11 +2008,13 @@ def _reddit_recent_social(ca, name, symbol):
 def deep_social_analysis(ca, pair, name, symbol):
     links = _pair_social_links(pair)
 
-    with ThreadPoolExecutor(max_workers=2) as ex:
+    with ThreadPoolExecutor(max_workers=3) as ex:
         fx = ex.submit(_x_recent_social, ca, name, symbol)
         fr = ex.submit(_reddit_recent_social, ca, name, symbol)
+        fw = ex.submit(_public_general_mentions, ca, name, symbol)
         x = fx.result()
         reddit = fr.result()
+        web_mentions = fw.result()
 
     has_x = bool(links["x"])
     has_tg = bool(links["telegram"])
@@ -1875,29 +2026,38 @@ def deep_social_analysis(ca, pair, name, symbol):
     presence += 15 if has_tg else 0
     presence += 10 if has_reddit_link else 0
     presence += 15 if has_site else 0
-    if x.get("status") == "OK" and x.get("posts", 0) > 0:
+    if x.get("status") in ("OK", "PUBLIC_WEB_OK") and x.get("posts", 0) > 0:
         presence += min(25, 5 + x.get("posts", 0))
-    if reddit.get("status") == "OK" and reddit.get("posts", 0) > 0:
+    if reddit.get("status") in ("OK", "PUBLIC_JSON_OK", "PUBLIC_WEB_OK") and reddit.get("posts", 0) > 0:
         presence += min(10, reddit.get("posts", 0) * 2)
+    presence += min(10, web_mentions.get("mentions", 0))
     presence = min(100, presence)
 
     viral = 0
     if x.get("status") == "OK":
         viral += min(45, x.get("posts", 0) * 2)
-        viral += min(35, int(x.get("engagement", 0) / 20))
+        viral += min(35, int((x.get("engagement") or 0) / 20))
         viral += min(20, x.get("major_posts", 0) * 7)
         if x.get("recent_minutes") is not None and x["recent_minutes"] <= 60:
             viral += 10
-    if reddit.get("status") == "OK":
+    elif x.get("status") == "PUBLIC_WEB_OK":
+        # Public-web fallback can verify post URLs/authors, but not engagement/follower counts.
+        viral += min(30, x.get("posts", 0) * 4)
+    if reddit.get("status") in ("OK", "PUBLIC_JSON_OK"):
         viral += min(15, reddit.get("posts", 0) * 2)
-        viral += min(10, int((reddit.get("score", 0) + reddit.get("comments", 0)) / 20))
+        viral += min(10, int(((reddit.get("score") or 0) + (reddit.get("comments") or 0)) / 20))
+    elif reddit.get("status") == "PUBLIC_WEB_OK":
+        viral += min(10, reddit.get("posts", 0) * 2)
+    viral += min(10, web_mentions.get("mentions", 0))
     viral = min(100, viral)
 
     major = x.get("major_accounts") or []
     if major:
         catalyst = "MAJOR ACCOUNT ACTIVITY"
-    elif x.get("status") == "OK" and x.get("engagement", 0) >= SOCIAL_VIRAL_ENGAGEMENT:
+    elif x.get("status") == "OK" and (x.get("engagement") or 0) >= SOCIAL_VIRAL_ENGAGEMENT:
         catalyst = "HIGH X ENGAGEMENT"
+    elif x.get("status") == "PUBLIC_WEB_OK" and x.get("posts", 0) >= 3:
+        catalyst = "PUBLIC X MENTIONS"
     elif viral >= 60:
         catalyst = "VIRAL RISING"
     elif viral >= 30:
@@ -1918,6 +2078,7 @@ def deep_social_analysis(ca, pair, name, symbol):
         "links": links,
         "x": x,
         "reddit": reddit,
+        "web_mentions": web_mentions,
         "presence_score": presence,
         "viral_score": viral,
         "viral_label": viral_label,
@@ -1988,16 +2149,18 @@ KARAR: GIRME / VERI BEKLE"""
     reddit = social["reddit"]
     links = social["links"]
 
-    x_status = (
-        f"{x.get('posts',0)} post / {x.get('engagement',0)} etkilesim"
-        if x.get("status") == "OK"
-        else f"DOGRULANAMADI ({x.get('status')})"
-    )
-    reddit_status = (
-        f"{reddit.get('posts',0)} post / score {reddit.get('score',0)} / {reddit.get('comments',0)} yorum"
-        if reddit.get("status") == "OK"
-        else f"DOGRULANAMADI ({reddit.get('status')})"
-    )
+    if x.get("status") == "OK":
+        x_status = f"{x.get('posts',0)} post / {x.get('engagement',0)} etkilesim"
+    elif x.get("status") == "PUBLIC_WEB_OK":
+        x_status = f"{x.get('posts',0)} dogrulanmis public X sonucu / etkilesim API'siz"
+    else:
+        x_status = f"DOGRULANAMADI ({x.get('status')})"
+    if reddit.get("status") in ("OK", "PUBLIC_JSON_OK"):
+        reddit_status = f"{reddit.get('posts',0)} post / score {reddit.get('score') or 0} / {reddit.get('comments') or 0} yorum"
+    elif reddit.get("status") == "PUBLIC_WEB_OK":
+        reddit_status = f"{reddit.get('posts',0)} public Reddit sonucu"
+    else:
+        reddit_status = f"DOGRULANAMADI ({reddit.get('status')})"
 
     age = result.get("age_hours")
     age_text = f"{age:.2f} saat" if age is not None else "N/A"
@@ -2039,6 +2202,7 @@ Social Presence: {social["presence_score"]}/100
 CANLI SOSYAL
 X: {x_status}
 Reddit: {reddit_status}
+Public Web: {social.get("web_mentions",{}).get("mentions",0)} sonuc / kaynaklar: {", ".join(social.get("web_mentions",{}).get("domains",[])[:4]) or "-"}
 Buyuk hesap paylasimi: {_fmt_major_accounts(x.get("major_accounts") or [])}
 Social Catalyst: {social["catalyst"]}
 Viral Durum: {social["viral_label"]} ({social["viral_score"]}/100)
@@ -2755,7 +2919,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.36.4 | total={stats.get('radar',0)} "
+                    f"RADAR V11.36.8 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
