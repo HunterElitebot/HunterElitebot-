@@ -15,7 +15,7 @@ except Exception:
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.38.3 LIVE SOURCE RECOVERY"
+VERSION = "V11.38.4 EARLY CATALYST"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
@@ -191,7 +191,7 @@ radar_stats = {
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
     "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
-    "momentum_pass": 0, "liq_confirmed": 0, "liq_wait": 0, "liq_drop_block": 0, "clone_block": 0, "signal_gate_pass": 0,
+    "momentum_pass": 0, "early_catalyst": 0, "catalyst_signal": 0, "liq_confirmed": 0, "liq_wait": 0, "liq_drop_block": 0, "clone_block": 0, "signal_gate_pass": 0,
 }
 
 def load_state():
@@ -2570,7 +2570,7 @@ def auto_scanner():
     "unique_new": 0, "repeat": 0, "pair_pass": 0, "mc_pass": 0,
     "liq_pass": 0, "liq_missing": 0, "liq_0_200": 0, "liq_200_500": 0, "liq_500_800": 0, "liq_800_plus": 0, "liq_fallback_ok": 0, "liq_fallback_missing": 0, "holder_pass": 0, "holder_missing": 0, "holder_50_60": 0, "holder_60_70": 0, "holder_70_82": 0, "holder_82_plus": 0, "safety_pass": 0, "rug_ok": 0, "auth_ok": 0, "crash_ok": 0, "age_fail": 0, "h1_fail": 0, "h6_fail": 0, "h24_fail": 0,
     "score_pass": 0, "activity_pass": 0, "trend_pass": 0,
-    "momentum_pass": 0, "liq_confirmed": 0, "liq_wait": 0, "liq_drop_block": 0, "clone_block": 0, "signal_gate_pass": 0,
+    "momentum_pass": 0, "early_catalyst": 0, "catalyst_signal": 0, "liq_confirmed": 0, "liq_wait": 0, "liq_drop_block": 0, "clone_block": 0, "signal_gate_pass": 0,
             }
 
             stats["unique_new"] = unique_new
@@ -2785,12 +2785,42 @@ def auto_scanner():
                     watch_ok = watch_candidate(result) and (
                         old_metrics is None or liq_confirmed
                     )
-                    signal_ok = (
+                    # V11.38.4 EARLY CATALYST: emulate the useful part of an Early/Surge feed
+                    # from public/live market data. It NEVER bypasses rug/auth/crash/liquidity guards.
+                    total5 = float(result.get("buys5") or 0) + float(result.get("sells5") or 0)
+                    buy_ratio5 = float(result.get("buys5") or 0) / max(total5, 1.0)
+                    age_h = result.get("age_hours")
+                    early_catalyst = bool(
+                        safety_ok
+                        and score_ok
+                        and activity_ok
+                        and result.get("prepump")
+                        and result.get("viral_label") in ("RISING", "HOT")
+                        and age_h is not None and age_h <= 0.25
+                        and buy_ratio5 >= 0.60
+                        and float(result.get("vol5") or 0) >= 750
+                        and -5 <= float(result.get("price5") or 0) <= 22
+                    )
+                    result["early_catalyst"] = early_catalyst
+                    if early_catalyst:
+                        stats["early_catalyst"] += 1
+
+                    normal_signal_ok = (
                         old_metrics is not None
                         and seen_count >= 2
                         and liq_confirmed
                         and strong_signal(result, momentum, old_metrics)
                     )
+                    catalyst_signal_ok = bool(
+                        early_catalyst
+                        and old_metrics is not None
+                        and seen_count >= 2
+                        and liq_confirmed
+                        and liq_drain_safe
+                    )
+                    if catalyst_signal_ok and not normal_signal_ok:
+                        stats["catalyst_signal"] += 1
+                    signal_ok = normal_signal_ok or catalyst_signal_ok
 
                     if ca not in cancelled_this_scan and (not watch_ok):
                         reason = filter_fail_reason(result, old_metrics, momentum, for_signal=False)
@@ -2849,7 +2879,7 @@ def auto_scanner():
                         final_score = min(100, result["score"] + momentum)
                         age_text = f'{result["age_hours"]:.1f} saat' if result["age_hours"] is not None else "N/A"
 
-                        message = f"""HUNTERELITE EARLY SIGNAL
+                        message = f"""HUNTERELITE EARLY CATALYST SIGNAL
 
 {name} ({symbol})
 CA: {ca}
@@ -2866,6 +2896,7 @@ Likidite Guard: {"PASSED" if liq_drain_safe else "BLOCKED"}
 Likidite Degisim: -{liq_drop_pct:.1f}%
 
 Risk Score: {result["score"]}/100
+Early Catalyst: {"ACTIVE" if result.get("early_catalyst") else "NORMAL TREND"}
 Momentum: +{momentum}
 1sa fiyat: {percent(result["price1h"])}
 6sa fiyat: {percent(result["price6h"])}
@@ -3018,7 +3049,7 @@ Yeni giris icin uygun degil."""
                     f"SIGNAL GATES: LIQ_OK={stats.get('liq_confirmed',0)} "
                     f"LIQ_WAIT={stats.get('liq_wait',0)} LIQ_DROP_BLOCK={stats.get('liq_drop_block',0)} "
                     f"CLONE_BLOCK={stats.get('clone_block',0)} FINAL_GATE={stats.get('signal_gate_pass',0)}\n"
-                    f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"
+                    f"MARKET VIRAL: HOT={stats.get('viral_hot',0)} RISING={stats.get('viral_rising',0)} PREPUMP={stats.get('prepump',0)} SAFE_PREPUMP={stats.get('prepump_safe',0)}\n"                    f"EARLY CATALYST: CANDIDATE={stats.get('early_catalyst',0)} FAST_SIGNAL={stats.get('catalyst_signal',0)}\n"
                     f"H1 SMART: limit={MAX_SIGNAL_DROP_1H:.0f}% fails={stats.get('h1_fail_values',[])}"
                 )
                 for chat_id in list(signal_chats):
