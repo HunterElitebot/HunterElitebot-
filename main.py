@@ -4,13 +4,14 @@ import json
 import html
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.request
 import urllib.parse
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.34 RURU BIRDEYE CU FIX"
+VERSION = "V11.35 RURU FAST MULTI SOURCE"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 
@@ -25,10 +26,10 @@ MC_MAX = 15000
 EARLY_MC_MAX = 10000
 MIN_LIQUIDITY = 800
 
-# V11.2 — daha erken aday yakala, sert rug korumalarını koru
+# V11.2 â€” daha erken aday yakala, sert rug korumalarÄ±nÄ± koru
 WATCH_SCORE = 47
 SIGNAL_SCORE = 60
-SCAN_INTERVAL = 30
+SCAN_INTERVAL = 12
 
 BIRDEYE_POLL_INTERVAL = int(os.getenv("BIRDEYE_POLL_INTERVAL", "180"))
 BIRDEYE_ERROR_COOLDOWN = int(os.getenv("BIRDEYE_ERROR_COOLDOWN", "900"))
@@ -57,7 +58,7 @@ SIGNAL_MIN_VOL_5M = 180
 MIN_VOL_GROWTH = 1.00
 
 # Liquidity Drain Guard
-# V11.34 signal thresholds stay unchanged.
+# V11.35 keeps V11.34 signal thresholds unchanged.
 # This layer only blocks/cancels when liquidity collapses between scans.
 LIQ_DRAIN_GUARD_ENABLED = True
 LIQ_DRAIN_WARN_PCT = 20.0
@@ -98,7 +99,7 @@ FRESH_PAIR_MAX_HOURS = 6.0
 
 # Multi-source discovery caches. These only supply candidate CAs;
 # all candidates still pass the unchanged RURU CORE safety/entry pipeline.
-SOURCE_POLL_INTERVAL = 30
+SOURCE_POLL_INTERVAL = 12
 SOURCE_CACHE_LIMIT = 120
 source_feed_lock = threading.Lock()
 source_feed_cache = {"GECKO": [], "RAYDIUM": [], "METEORA": []}
@@ -180,23 +181,23 @@ def clean_telegram_text(text):
     """One final cleanup point for every outgoing Telegram message."""
     s = "" if text is None else str(text)
     replacements = {
-        "⚠️": "UYARI:", "👀": "", "🚨": "", "💎": "", "🟡": "",
-        "🔴": "", "🟢": "", "⏳": "", "📈": "", "📊": "", "💧": "",
-        "⚡": "", "💵": "", "👥": "", "🛡": "", "🚀": "", "🎯": "", "⏱": "",
-        "SİNYAL İPTAL": "SINYAL IPTAL", "İZLE": "IZLE",
-        "GİRME": "GIRME", "GİR": "GIR", "POTANSİYEL": "POTANSIYEL",
-        "şartları": "sartlari", "kötüleşti": "kotulesti",
-        "giriş": "giris", "için": "icin", "değil": "degil", "yaşı": "yasi",
-        "âš ï¸": "UYARI:", "ğŸ‘€": "", "ğŸš¨": "", "ğŸ’Ž": "",
-        "ğŸŸ¡": "", "ğŸ”´": "", "â³": "", "Ä°ZLE": "IZLE",
-        "SÄ°NYAL Ä°PTAL": "SINYAL IPTAL", "GÄ°RME": "GIRME",
-        "GÄ°R": "GIR", "POTANSÄ°YEL": "POTANSIYEL",
+        "âš ï¸": "UYARI:", "ğŸ‘€": "", "ğŸš¨": "", "ğŸ’": "", "ğŸŸ¡": "",
+        "ğŸ”´": "", "ğŸŸ¢": "", "â³": "", "ğŸ“ˆ": "", "ğŸ“Š": "", "ğŸ’§": "",
+        "âš¡": "", "ğŸ’µ": "", "ğŸ‘¥": "", "ğŸ›¡": "", "ğŸš€": "", "ğŸ¯": "", "â±": "",
+        "SÄ°NYAL Ä°PTAL": "SINYAL IPTAL", "Ä°ZLE": "IZLE",
+        "GÄ°RME": "GIRME", "GÄ°R": "GIR", "POTANSÄ°YEL": "POTANSIYEL",
         "ÅŸartlarÄ±": "sartlari", "kÃ¶tÃ¼leÅŸti": "kotulesti",
-        "giriÅŸ": "giris", "iÃ§in": "icin", "deÄŸil": "degil",
-        "yaÅŸÄ±": "yasi",
-        "âš ï¸ VERÄ° ALINAMADI": "VERI BEKLENIYOR",
+        "giriÅŸ": "giris", "iÃ§in": "icin", "deÄŸil": "degil", "yaÅŸÄ±": "yasi",
+        "Ã¢Å¡ Ã¯Â¸Â": "UYARI:", "ÄŸÅ¸â€˜â‚¬": "", "ÄŸÅ¸Å¡Â¨": "", "ÄŸÅ¸â€™Å½": "",
+        "ÄŸÅ¸Å¸Â¡": "", "ÄŸÅ¸â€Â´": "", "Ã¢ÂÂ³": "", "Ã„Â°ZLE": "IZLE",
+        "SÃ„Â°NYAL Ã„Â°PTAL": "SINYAL IPTAL", "GÃ„Â°RME": "GIRME",
+        "GÃ„Â°R": "GIR", "POTANSÃ„Â°YEL": "POTANSIYEL",
+        "Ã…Å¸artlarÃ„Â±": "sartlari", "kÃƒÂ¶tÃƒÂ¼leÃ…Å¸ti": "kotulesti",
+        "giriÃ…Å¸": "giris", "iÃƒÂ§in": "icin", "deÃ„Å¸il": "degil",
+        "yaÃ…Å¸Ã„Â±": "yasi",
+        "Ã¢Å¡ Ã¯Â¸Â VERÃ„Â° ALINAMADI": "VERI BEKLENIYOR",
+        "VERÃ„Â° ALINAMADI": "VERI BEKLENIYOR",
         "VERÄ° ALINAMADI": "VERI BEKLENIYOR",
-        "VERİ ALINAMADI": "VERI BEKLENIYOR",
     }
     for old, new in replacements.items():
         s = s.replace(old, new)
@@ -250,7 +251,7 @@ def safe_int(value):
 def money(value):
     value = num(value)
     if value is None:
-        return "⚠️ VERİ ALINAMADI"
+        return "âš ï¸ VERÄ° ALINAMADI"
     if abs(value) >= 1_000_000:
         return f"${value/1_000_000:.2f}M"
     if abs(value) >= 1_000:
@@ -389,7 +390,7 @@ def birdeye_new_candidates(force=False):
             birdeye_last_error = ""
 
         print(
-            f"BIRDEYE MEME FRESH: api_items={len(items)} valid_sol={len(newest)} cache={len(birdeye_cache)} meme_platform=true",
+            f"BIRDEYE ROLLING FRESH: api={len(newest)} cache={len(birdeye_cache)}",
             flush=True,
         )
         return list(birdeye_cache)
@@ -693,29 +694,46 @@ def discovery_candidates():
             buckets[source].append(ca)
             candidate_sources[ca] = source
 
-    # Birdeye is optional/bonus when quota works.
-    add_many("BIRDEYE", birdeye_new_candidates())
-
-    # Keyless/public feeds keep discovery alive when Birdeye quota is exhausted.
-    add_many("GECKO", gecko_new_candidates())
-    add_many("RAYDIUM", raydium_new_candidates())
-    add_many("METEORA", meteora_new_candidates())
-
-    dex_found = []
-    for url in dex_endpoints:
-        try:
-            data = get_json(url)
-            if not isinstance(data, list):
-                continue
-            for item in data:
-                if str(item.get("chainId", "")).lower() != "solana":
+    # V11.35 FAST DISCOVERY: keyless/public feeds are fetched in parallel.
+    # This reduces discovery latency without weakening the unchanged RURU safety gates.
+    def fetch_dex_candidates():
+        found = []
+        for url in dex_endpoints:
+            try:
+                data = get_json(url)
+                if not isinstance(data, list):
                     continue
-                ca = _valid_candidate_mint(item.get("tokenAddress"))
-                if ca:
-                    dex_found.append(ca)
-        except Exception as e:
-            print("DISCOVERY DEX ERROR:", repr(e), flush=True)
-    add_many("DEX", dex_found)
+                for item in data:
+                    if str(item.get("chainId", "")).lower() != "solana":
+                        continue
+                    ca = _valid_candidate_mint(item.get("tokenAddress"))
+                    if ca:
+                        found.append(ca)
+            except Exception as e:
+                print("DISCOVERY DEX ERROR:", repr(e), flush=True)
+        return found
+
+    jobs = {
+        "BIRDEYE": birdeye_new_candidates,
+        "GECKO": gecko_new_candidates,
+        "RAYDIUM": raydium_new_candidates,
+        "METEORA": meteora_new_candidates,
+        "DEX": fetch_dex_candidates,
+    }
+    fetched = {}
+    with ThreadPoolExecutor(max_workers=5, thread_name_prefix="hunter-feed") as pool:
+        future_to_source = {pool.submit(fn): source for source, fn in jobs.items()}
+        for future in as_completed(future_to_source):
+            source = future_to_source[future]
+            try:
+                fetched[source] = future.result() or []
+            except Exception as e:
+                print(f"DISCOVERY {source} ERROR:", repr(e), flush=True)
+                fetched[source] = []
+
+    # Preserve deterministic source priority after parallel fetch completes.
+    for source in ("BIRDEYE", "GECKO", "RAYDIUM", "METEORA", "DEX"):
+        add_many(source, fetched.get(source, []))
 
     # Balanced source mix. Unused slots are filled by any source with extra candidates.
     limits = {
@@ -995,17 +1013,17 @@ def calculate_score(pair, report):
         risks.append("Market cap verisi yok")
     elif mc < MC_MIN or mc > MC_MAX:
         score -= 20
-        risks.append("Market cap hedef bölgesi dışında")
+        risks.append("Market cap hedef bÃ¶lgesi dÄ±ÅŸÄ±nda")
 
     if liq is None:
         score -= 25
         risks.append("Likidite verisi yok")
     elif liq < 1000:
         score -= 35
-        risks.append("Likidite çok düşük")
+        risks.append("Likidite Ã§ok dÃ¼ÅŸÃ¼k")
     elif liq < MIN_LIQUIDITY:
         score -= 20
-        risks.append("Likidite düşük")
+        risks.append("Likidite dÃ¼ÅŸÃ¼k")
 
     top1, top5, top10 = holders(report)
 
@@ -1014,17 +1032,17 @@ def calculate_score(pair, report):
         risks.append("RugCheck verisi yok")
     elif top10 is None:
         score -= 10
-        risks.append("Holder dağılımı doğrulanamadı")
+        risks.append("Holder daÄŸÄ±lÄ±mÄ± doÄŸrulanamadÄ±")
     else:
         if top10 >= 82:
             score -= 40
-            risks.append("Top-10 holder aşırı yoğun")
+            risks.append("Top-10 holder aÅŸÄ±rÄ± yoÄŸun")
         elif top10 >= 70:
             score -= 30
-            risks.append("Top-10 holder çok yüksek")
+            risks.append("Top-10 holder Ã§ok yÃ¼ksek")
         elif top10 >= 60:
             score -= 20
-            risks.append("Top-10 holder yüksek")
+            risks.append("Top-10 holder yÃ¼ksek")
         elif top10 >= 50:
             score -= 10
             risks.append("Top-10 holder dikkat")
@@ -1037,14 +1055,14 @@ def calculate_score(pair, report):
         risks.append("Mint authority aktif")
     elif mint is None:
         score -= 5
-        risks.append("Mint authority doğrulanamadı")
+        risks.append("Mint authority doÄŸrulanamadÄ±")
 
     if freeze is True:
         score -= 30
         risks.append("Freeze authority aktif")
     elif freeze is None:
         score -= 5
-        risks.append("Freeze authority doğrulanamadı")
+        risks.append("Freeze authority doÄŸrulanamadÄ±")
 
     sig = rug_signals(report)
 
@@ -1059,7 +1077,7 @@ def calculate_score(pair, report):
         risks.append("Insider sinyali")
     if sig["sniper"]:
         score -= 10
-        risks.append("Sniper yoğunluğu")
+        risks.append("Sniper yoÄŸunluÄŸu")
     if sig["bundler"]:
         score -= 10
         risks.append("Bundler sinyali")
@@ -1067,11 +1085,11 @@ def calculate_score(pair, report):
     buys, sells = m["buys5"], m["sells5"]
     if buys + sells >= 10 and sells > buys * 1.5:
         score -= 10
-        risks.append("5dk satış baskısı")
+        risks.append("5dk satÄ±ÅŸ baskÄ±sÄ±")
 
     if m["price5"] is not None and m["price5"] <= -25:
         score -= 10
-        risks.append("5dk sert fiyat düşüşü")
+        risks.append("5dk sert fiyat dÃ¼ÅŸÃ¼ÅŸÃ¼")
 
     score = max(0, min(100, int(score)))
 
@@ -1084,13 +1102,13 @@ def calculate_score(pair, report):
     )
 
     if severe:
-        decision = "🔴 GİRME"
+        decision = "ğŸ”´ GÄ°RME"
     elif score >= 75 and mc is not None and MC_MIN <= mc <= EARLY_MC_MAX:
-        decision = "🟢 UYGUN GİRİŞ"
+        decision = "ğŸŸ¢ UYGUN GÄ°RÄ°Å"
     elif score >= 55:
-        decision = "🟡 BEKLE"
+        decision = "ğŸŸ¡ BEKLE"
     else:
-        decision = "🔴 GİRME"
+        decision = "ğŸ”´ GÄ°RME"
 
     return {
         **m,
@@ -1139,25 +1157,25 @@ def momentum_score(old, new):
 
 def authority_text(value):
     if value is True:
-        return "🚨 AKTİF"
+        return "ğŸš¨ AKTÄ°F"
     if value is False:
-        return "✅ KAPALI"
-    return "⚠️ N/A"
+        return "âœ… KAPALI"
+    return "âš ï¸ N/A"
 
 def potential_label(result, momentum=0):
     """Heuristic only: expresses upside setup quality, never a return guarantee."""
     if not result:
-        return "❌ YETERSİZ VERİ"
+        return "âŒ YETERSÄ°Z VERÄ°"
 
     # Hard safety blocks first.
     if result["signals"]["rug"] or result["signals"]["honeypot"]:
-        return "⛔ RUG RİSKİ"
+        return "â›” RUG RÄ°SKÄ°"
     if result["mint"] is True or result["freeze"] is True:
-        return "⛔ YETKİ RİSKİ"
+        return "â›” YETKÄ° RÄ°SKÄ°"
     if result["liq"] is None or result["liq"] < MIN_LIQUIDITY:
-        return "🔴 ZAYIF"
+        return "ğŸ”´ ZAYIF"
     if result["top10"] is not None and result["top10"] >= 75:
-        return "🔴 DAĞILIM RİSKİ"
+        return "ğŸ”´ DAÄILIM RÄ°SKÄ°"
 
     score = result["score"] + momentum
     mc = result["mc"] or 0
@@ -1177,7 +1195,7 @@ def potential_label(result, momentum=0):
         and vol5 >= 500
         and p5 is not None and 1 <= p5 <= 45
     ):
-        return "💎 100X POTANSİYEL ADAYI"
+        return "ğŸ’ 100X POTANSÄ°YEL ADAYI"
 
     if (
         2000 <= mc <= 9000
@@ -1186,42 +1204,42 @@ def potential_label(result, momentum=0):
         and buy_ratio_ok
         and vol5 >= 250
     ):
-        return "🚀 5X–10X POTANSİYEL ADAYI"
+        return "ğŸš€ 5Xâ€“10X POTANSÄ°YEL ADAYI"
 
     if score >= 58:
-        return "🟡 ERKEN / İZLE"
+        return "ğŸŸ¡ ERKEN / Ä°ZLE"
 
-    return "🔴 GİRME"
+    return "ğŸ”´ GÄ°RME"
 
 
 def simple_action(result, momentum=0, previous=None):
     if not result:
-        return "🔴 GİRME"
+        return "ğŸ”´ GÄ°RME"
 
     if not basic_signal_safe(result) or not crash_guard(result):
-        return "🔴 GİRME"
+        return "ğŸ”´ GÄ°RME"
 
     p5 = result.get("price5")
     buys = result.get("buys5", 0)
     sells = result.get("sells5", 0)
 
     if p5 is not None and p5 <= -8:
-        return "🔴 SAT / GİRME"
+        return "ğŸ”´ SAT / GÄ°RME"
     if sells > buys * 1.35 and buys + sells >= 8:
-        return "🔴 SAT / GİRME"
+        return "ğŸ”´ SAT / GÄ°RME"
 
     if strong_signal(result, momentum, previous):
-        return "🟢 GİR"
+        return "ğŸŸ¢ GÄ°R"
 
     if watch_candidate(result):
-        return "🟡 İZLE / ERKEN ADAY"
+        return "ğŸŸ¡ Ä°ZLE / ERKEN ADAY"
 
-    return "🔴 GİRME"
+    return "ğŸ”´ GÄ°RME"
 
 def analyse(ca):
     pair = best_pair(ca)
     if pair is None:
-        return None, f"🦅 HUNTERELITE {VERSION}\n\nCA: {ca}\n\n❌ DEX pair verisi bulunamadı.\n\n🔴 GİRME / VERİ BEKLE"
+        return None, f"ğŸ¦… HUNTERELITE {VERSION}\n\nCA: {ca}\n\nâŒ DEX pair verisi bulunamadÄ±.\n\nğŸ”´ GÄ°RME / VERÄ° BEKLE"
 
     report = rugcheck(ca)
     result = calculate_score(pair, report)
@@ -1229,25 +1247,25 @@ def analyse(ca):
     name = base.get("name") or "Unknown"
     symbol = base.get("symbol") or "N/A"
 
-    text = f"""🦅 HUNTERELITE {VERSION}
+    text = f"""ğŸ¦… HUNTERELITE {VERSION}
 
 {name} ({symbol})
 CA: {ca}
 
-🎯 Market Giriş Bölgesi: $2K–$10K
+ğŸ¯ Market GiriÅŸ BÃ¶lgesi: $2Kâ€“$10K
 
 Market Cap: {money(result["mc"])}
 Likidite: {money(result["liq"])}
 
-⚡ 5dk: {result["buys5"]} buy / {result["sells5"]} sell
-📊 1s: {result["buys1h"]} buy / {result["sells1h"]} sell
+âš¡ 5dk: {result["buys5"]} buy / {result["sells5"]} sell
+ğŸ“Š 1s: {result["buys1h"]} buy / {result["sells1h"]} sell
 
-💵 5dk hacim: {money(result["vol5"])}
-📈 5dk fiyat: {percent(result["price5"])}
+ğŸ’µ 5dk hacim: {money(result["vol5"])}
+ğŸ“ˆ 5dk fiyat: {percent(result["price5"])}
 
-🧪 RugCheck Derin Kontrol
+ğŸ§ª RugCheck Derin Kontrol
 
-RugCheck: {"✅ ALINDI" if report else "⚠️ VERİ ALINAMADI"}
+RugCheck: {"âœ… ALINDI" if report else "âš ï¸ VERÄ° ALINAMADI"}
 
 Top-1 holder: {percent(result["top1"])}
 Top-5 holder: {percent(result["top5"])}
@@ -1256,15 +1274,15 @@ Top-10 holder: {percent(result["top10"])}
 Mint authority: {authority_text(result["mint"])}
 Freeze authority: {authority_text(result["freeze"])}
 
-🛡 Hunter Elite Score: {result["score"]}/100
-💎 Potansiyel: IZLE
+ğŸ›¡ Hunter Elite Score: {result["score"]}/100
+ğŸ’ Potansiyel: IZLE
 
-🎯 Karar: {result["decision"]}"""
+ğŸ¯ Karar: {result["decision"]}"""
 
     if result["risks"]:
-        text += "\n\n⚠️ Riskler:\n" + "".join(f"• {r}\n" for r in result["risks"][:7])
+        text += "\n\nâš ï¸ Riskler:\n" + "".join(f"â€¢ {r}\n" for r in result["risks"][:7])
 
-    text += "\nEksik veri güvenli kabul edilmez.\nBu sistem risk filtresidir, yatırım garantisi değildir."
+    text += "\nEksik veri gÃ¼venli kabul edilmez.\nBu sistem risk filtresidir, yatÄ±rÄ±m garantisi deÄŸildir."
     return result, text
 
 def basic_signal_safe(result):
@@ -1991,15 +2009,15 @@ def process_message(message):
 
     if command == "/start":
         signal_chats.add(int(chat_id))
-        send(chat_id, f"""✅ HunterElite {VERSION} ONLINE
+        send(chat_id, f"""âœ… HunterElite {VERSION} ONLINE
 
-🎯 Early Hunter: AKTİF
-🎯 Market bölgesi: $2K–$10K
-🧪 RugCheck: AKTİF
-📡 Eksik veri koruması: AKTİF
-🚨 Otomatik sinyal: AKTİF
+ğŸ¯ Early Hunter: AKTÄ°F
+ğŸ¯ Market bÃ¶lgesi: $2Kâ€“$10K
+ğŸ§ª RugCheck: AKTÄ°F
+ğŸ“¡ Eksik veri korumasÄ±: AKTÄ°F
+ğŸš¨ Otomatik sinyal: AKTÄ°F
 
-CA göndererek manuel analiz yapabilirsin.
+CA gÃ¶ndererek manuel analiz yapabilirsin.
 
 Komutlar:
 /ping
@@ -2011,51 +2029,51 @@ Komutlar:
         return
 
     if command == "/ping":
-        send(chat_id, f"🏓 PONG — HunterElite {VERSION} ONLINE")
+        send(chat_id, f"ğŸ“ PONG â€” HunterElite {VERSION} ONLINE")
         return
 
     if command == "/status":
         active = int(chat_id) in signal_chats
-        send(chat_id, f"""✅ HunterElite {VERSION} ONLINE
+        send(chat_id, f"""âœ… HunterElite {VERSION} ONLINE
 
-🔎 Manuel analiz: AKTİF
-🚨 Early Hunter: {"AKTİF" if active else "KAPALI"}
-⏱ Tarama: {SCAN_INTERVAL} sn
+ğŸ” Manuel analiz: AKTÄ°F
+ğŸš¨ Early Hunter: {"AKTÄ°F" if active else "KAPALI"}
+â± Tarama: {SCAN_INTERVAL} sn
 RURU Core: V11.34 ORIJINAL SINYAL ESikleri
 Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
-🎯 Watch Score: {WATCH_SCORE}
-🔥 Signal Score: {SIGNAL_SCORE}
-📈 Trend teyidi: {TREND_CONFIRM_SCANS} tarama / min momentum {MIN_MOMENTUM_SIGNAL}
-📡 Radar: {"BIRDEYE + GECKO + RAYDIUM + METEORA + DEX" if BIRDEYE_API_KEY else "GECKO + RAYDIUM + METEORA + DEX"}
-🟢 Birdeye API: {"BAĞLI" if BIRDEYE_API_KEY else "KEY YOK"}
-⏱ Birdeye yenileme: {BIRDEYE_POLL_INTERVAL} sn
-💧 Min Likidite: {money(MIN_LIQUIDITY)}
-📊 Market: $2K–$10K öncelikli
-💎 100X potansiyel filtresi: AKTİF\n📡 /radar teşhisi: AKTİF\n🧩 Single Engine: AKTİF""")
+ğŸ¯ Watch Score: {WATCH_SCORE}
+ğŸ”¥ Signal Score: {SIGNAL_SCORE}
+ğŸ“ˆ Trend teyidi: {TREND_CONFIRM_SCANS} tarama / min momentum {MIN_MOMENTUM_SIGNAL}
+ğŸ“¡ Radar: {"BIRDEYE + GECKO + RAYDIUM + METEORA + DEX" if BIRDEYE_API_KEY else "GECKO + RAYDIUM + METEORA + DEX"}
+ğŸŸ¢ Birdeye API: {"BAÄLI" if BIRDEYE_API_KEY else "KEY YOK"}
+â± Birdeye yenileme: {BIRDEYE_POLL_INTERVAL} sn
+ğŸ’§ Min Likidite: {money(MIN_LIQUIDITY)}
+ğŸ“Š Market: $2Kâ€“$10K Ã¶ncelikli
+ğŸ’ 100X potansiyel filtresi: AKTÄ°F\nğŸ“¡ /radar teÅŸhisi: AKTÄ°F\nğŸ§© Single Engine: AKTÄ°F""")
         return
 
     if command == "/signal_on":
         signal_chats.add(int(chat_id))
-        send(chat_id, "🚨 HunterElite otomatik sinyal AKTİF.\nEarly Hunter taraması başladı.")
+        send(chat_id, "ğŸš¨ HunterElite otomatik sinyal AKTÄ°F.\nEarly Hunter taramasÄ± baÅŸladÄ±.")
         return
 
     if command == "/signal_off":
         signal_chats.discard(int(chat_id))
-        send(chat_id, "🔕 Otomatik sinyal KAPALI.")
+        send(chat_id, "ğŸ”• Otomatik sinyal KAPALI.")
         return
 
     if command == "/signal_test":
         signal_chats.add(int(chat_id))
-        send(chat_id, f"""✅ HUNTERELITE TEST SİNYALİ
+        send(chat_id, f"""âœ… HUNTERELITE TEST SÄ°NYALÄ°
 
 {VERSION}
 
-📡 Telegram kanalı: ÇALIŞIYOR
-🚨 Otomatik sinyal: AKTİF
-🔎 Manuel analiz: AKTİF
-🔥 Early Hunter: AKTİF
+ğŸ“¡ Telegram kanalÄ±: Ã‡ALIÅIYOR
+ğŸš¨ Otomatik sinyal: AKTÄ°F
+ğŸ” Manuel analiz: AKTÄ°F
+ğŸ”¥ Early Hunter: AKTÄ°F
 
-Gerçek aday taraması başladı.""")
+GerÃ§ek aday taramasÄ± baÅŸladÄ±.""")
         return
 
     if command == "/radar":
@@ -2064,40 +2082,40 @@ Gerçek aday taraması başladı.""")
 
         updated = s.get("updated", 0)
         age = int(max(0, time.time() - updated)) if updated else None
-        age_text = f"{age} sn önce" if age is not None else "henüz ilk tur tamamlanmadı"
+        age_text = f"{age} sn Ã¶nce" if age is not None else "henÃ¼z ilk tur tamamlanmadÄ±"
 
-        send(chat_id, f"""📡 HUNTERELITE RADAR TEST
+        send(chat_id, f"""ğŸ“¡ HUNTERELITE RADAR TEST
 
-Sürüm: {VERSION}
+SÃ¼rÃ¼m: {VERSION}
 Son tarama: {age_text}
 
-🔎 Radar adayı: {s.get("radar", 0)}
-✅ İşlenen: {s.get("processed", 0)}
-❌ Pair yok: {s.get("pair_yok", 0)}
+ğŸ” Radar adayÄ±: {s.get("radar", 0)}
+âœ… Ä°ÅŸlenen: {s.get("processed", 0)}
+âŒ Pair yok: {s.get("pair_yok", 0)}
 
-Filtreye takılanlar:
-• MC: {s.get("mc_fail", 0)}
-• Likidite: {s.get("liq_fail", 0)}
-• Holder: {s.get("holder_fail", 0)}
-• Mint/Freeze: {s.get("authority_fail", 0)}
-• Rug/Honeypot: {s.get("rug_fail", 0)}
-• Score: {s.get("score_fail", 0)}
-• Buy baskısı: {s.get("buy_fail", 0)}
-• Hacim: {s.get("volume_fail", 0)}
-• Trend: {s.get("trend_fail", 0)}
-• Momentum: {s.get("momentum_fail", 0)}
+Filtreye takÄ±lanlar:
+â€¢ MC: {s.get("mc_fail", 0)}
+â€¢ Likidite: {s.get("liq_fail", 0)}
+â€¢ Holder: {s.get("holder_fail", 0)}
+â€¢ Mint/Freeze: {s.get("authority_fail", 0)}
+â€¢ Rug/Honeypot: {s.get("rug_fail", 0)}
+â€¢ Score: {s.get("score_fail", 0)}
+â€¢ Buy baskÄ±sÄ±: {s.get("buy_fail", 0)}
+â€¢ Hacim: {s.get("volume_fail", 0)}
+â€¢ Trend: {s.get("trend_fail", 0)}
+â€¢ Momentum: {s.get("momentum_fail", 0)}
 
-👀 WATCH: {s.get("watch", 0)}
-🚨 SIGNAL: {s.get("signal", 0)}
+ğŸ‘€ WATCH: {s.get("watch", 0)}
+ğŸš¨ SIGNAL: {s.get("signal", 0)}
 
-Bu ekran teşhis içindir; sinyal garantisi değildir.""")
+Bu ekran teÅŸhis iÃ§indir; sinyal garantisi deÄŸildir.""")
         return
 
     if command == "/help":
         send(
             chat_id,
             "HunterElite V11.3 EARLY 100X RADAR\n\n"
-            "CA gönder → manuel analiz\n\n"
+            "CA gÃ¶nder â†’ manuel analiz\n\n"
             "/ping\n/status\n/signal_on\n/signal_off\n/signal_test\n/radar\n/start"
         )
         return
@@ -2108,16 +2126,16 @@ Bu ekran teşhis içindir; sinyal garantisi değildir.""")
         ca = matches[0] if matches else ""
 
     if ca and SOL_CA.match(ca):
-        send(chat_id, "🔎 Token analiz ediliyor...")
+        send(chat_id, "ğŸ” Token analiz ediliyor...")
         try:
             _, report = analyse(ca)
             send(chat_id, report)
         except Exception as e:
             print("ANALYSIS ERROR:", repr(e), flush=True)
-            send(chat_id, "❌ Analiz sırasında veri hatası oluştu.")
+            send(chat_id, "âŒ Analiz sÄ±rasÄ±nda veri hatasÄ± oluÅŸtu.")
         return
 
-    send(chat_id, "Solana kontrat adresini gönder veya /help yaz.")
+    send(chat_id, "Solana kontrat adresini gÃ¶nder veya /help yaz.")
 
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
