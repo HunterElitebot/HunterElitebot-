@@ -8,12 +8,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.request
 import urllib.parse
 import urllib.error
+try:
+    import websocket
+except Exception:
+    websocket = None
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION = "V11.35 RURU FAST MULTI SOURCE"
+VERSION = "V11.36 RURU LIVE WS"
 TOKEN = os.getenv("TOKEN", "").strip()
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
+SOLANA_WS_URL = os.getenv("SOLANA_WS_URL", "").strip()
+SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "").strip()
+if not SOLANA_RPC_URL and SOLANA_WS_URL:
+    SOLANA_RPC_URL = SOLANA_WS_URL.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
 
 # V11.5: single-engine mode.
 # Telegram getUpdates polling is OFF by default so another stale/duplicate
@@ -105,6 +113,22 @@ source_feed_lock = threading.Lock()
 source_feed_cache = {"GECKO": [], "RAYDIUM": [], "METEORA": []}
 source_feed_last_fetch = {"GECKO": 0.0, "RAYDIUM": 0.0, "METEORA": 0.0}
 source_feed_last_error = {"GECKO": "", "RAYDIUM": "", "METEORA": ""}
+
+# V11.36 LIVE WS: on-chain discovery wakes the scanner immediately.
+# One Helius WebSocket connection carries multiple logsSubscribe subscriptions.
+WS_PROGRAMS = {
+    "PUMP": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+    "PUMP_AMM": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+    "RAYDIUM_LAUNCHLAB": "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj",
+    "METEORA_DBC": "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN",
+}
+WS_CREATE_HINTS = ("create", "initialize", "init_pool", "initialize_pool", "create_pool", "migration")
+ws_candidate_lock = threading.Lock()
+ws_candidates = []
+ws_candidate_seen = {}
+ws_wake_event = threading.Event()
+ws_status_lock = threading.Lock()
+ws_status = {"connected": False, "events": 0, "tx_fetch": 0, "candidates": 0, "last_error": "", "last_event": 0.0}
 
 VIRAL_RADAR_ENABLED = True
 VIRAL_SCORE_BONUS_MAX = 12
@@ -673,6 +697,166 @@ def meteora_new_candidates(force=False):
 
     return _cache_source_result("METEORA", found, ";".join(errors[:4]))
 
+def _ws_rpc(method, params, timeout=12):
+    if not SOLANA_RPC_URL:
+        return None
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode("utf-8")
+    req = urllib.request.Request(
+        SOLANA_RPC_URL, data=body,
+        headers={"Content-Type": "application/json", "User-Agent": "HunterElite-V11.36"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        payload = json.loads(r.read().decode("utf-8", errors="replace"))
+    return payload.get("result") if isinstance(payload, dict) else None
+
+
+def _extract_mints_from_transaction(tx):
+    found = []
+    seen = set()
+    if not isinstance(tx, dict):
+        return found
+    meta = tx.get("meta") or {}
+    for key in ("preTokenBalances", "postTokenBalances"):
+        for row in meta.get(key) or []:
+            ca = _valid_candidate_mint((row or {}).get("mint"))
+            if ca and ca not in seen:
+                seen.add(ca); found.append(ca)
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if str(k).lower() == "mint":
+                    ca = _valid_candidate_mint(v)
+                    if ca and ca not in seen:
+                        seen.add(ca); found.append(ca)
+                else:
+                    walk(v)
+        elif isinstance(obj, list):
+            for x in obj:
+                walk(x)
+    walk((tx.get("transaction") or {}).get("message") or {})
+    walk(meta.get("innerInstructions") or [])
+    return found
+
+
+def _ws_enqueue(ca, source):
+    ca = _valid_candidate_mint(ca)
+    if not ca:
+        return
+    now = time.time()
+    with ws_candidate_lock:
+        for k in [k for k, ts in ws_candidate_seen.items() if now - ts > 900]:
+            ws_candidate_seen.pop(k, None)
+        if ca in ws_candidate_seen:
+            return
+        ws_candidate_seen[ca] = now
+        ws_candidates.append((ca, source, now))
+        if len(ws_candidates) > 200:
+            del ws_candidates[:-200]
+    with ws_status_lock:
+        ws_status["candidates"] += 1
+    ws_wake_event.set()
+
+
+def ws_drain_candidates(limit=40):
+    with ws_candidate_lock:
+        rows = ws_candidates[:limit]
+        del ws_candidates[:len(rows)]
+    return rows
+
+
+def solana_ws_listener():
+    if not SOLANA_WS_URL:
+        print("SOLANA WS: DISABLED - SOLANA_WS_URL missing", flush=True)
+        return
+    if websocket is None:
+        print("SOLANA WS: DISABLED - websocket-client missing", flush=True)
+        return
+
+    backoff = 2
+    while True:
+        try:
+            ws = websocket.create_connection(SOLANA_WS_URL, timeout=30, enable_multithread=True)
+            ws.settimeout(40)
+            with ws_status_lock:
+                ws_status.update({"connected": True, "last_error": ""})
+            print("SOLANA WS: CONNECTED", flush=True)
+            request_id = 100
+            request_program = {}
+            subscription_program = {}
+            for name, program in WS_PROGRAMS.items():
+                request_id += 1
+                request_program[request_id] = name
+                ws.send(json.dumps({
+                    "jsonrpc": "2.0", "id": request_id, "method": "logsSubscribe",
+                    "params": [{"mentions": [program]}, {"commitment": "processed"}],
+                }))
+            backoff = 2
+            last_ping = time.time()
+
+            while True:
+                if time.time() - last_ping >= 30:
+                    try:
+                        ws.ping()
+                    except Exception:
+                        raise
+                    last_ping = time.time()
+                try:
+                    raw = ws.recv()
+                except Exception as e:
+                    # websocket timeout is used as a heartbeat opportunity.
+                    if "timed out" in str(e).lower():
+                        continue
+                    raise
+                if not raw:
+                    continue
+                msg = json.loads(raw)
+                if isinstance(msg.get("result"), int) and msg.get("id") in request_program:
+                    subscription_program[msg["result"]] = request_program[msg["id"]]
+                    continue
+                params = msg.get("params") or {}
+                result = params.get("result") or {}
+                value = result.get("value") or result
+                signature = value.get("signature") if isinstance(value, dict) else None
+                logs = value.get("logs") or [] if isinstance(value, dict) else []
+                if not signature:
+                    continue
+                sub_id = params.get("subscription")
+                source = subscription_program.get(sub_id, "WS")
+                text = " ".join(str(x).lower() for x in logs)
+                with ws_status_lock:
+                    ws_status["events"] += 1
+                    ws_status["last_event"] = time.time()
+
+                # Avoid spending RPC credits on every swap. Fetch full transactions
+                # only when logs look like pool/token creation or initialization.
+                if not any(hint in text for hint in WS_CREATE_HINTS):
+                    continue
+                tx = _ws_rpc("getTransaction", [signature, {
+                    "encoding": "jsonParsed",
+                    "commitment": "confirmed",
+                    "maxSupportedTransactionVersion": 0,
+                }])
+                with ws_status_lock:
+                    ws_status["tx_fetch"] += 1
+                mapped_source = "DEX"
+                if source.startswith("RAYDIUM"):
+                    mapped_source = "RAYDIUM"
+                elif source.startswith("METEORA"):
+                    mapped_source = "METEORA"
+                for ca in _extract_mints_from_transaction(tx):
+                    _ws_enqueue(ca, mapped_source)
+        except Exception as e:
+            err = repr(e)
+            with ws_status_lock:
+                ws_status["connected"] = False
+                ws_status["last_error"] = err[:180]
+            print("SOLANA WS ERROR:", err, f"retry={backoff}s", flush=True)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+
+
 def discovery_candidates():
     dex_endpoints = [
         "https://api.dexscreener.com/token-profiles/latest/v1",
@@ -684,6 +868,7 @@ def discovery_candidates():
     candidate_sources.clear()
     used = set()
     buckets = {"BIRDEYE": [], "GECKO": [], "RAYDIUM": [], "METEORA": [], "DEX": []}
+    live_ws_rows = ws_drain_candidates(40)
 
     def add_many(source, values):
         for raw in values:
@@ -694,7 +879,16 @@ def discovery_candidates():
             buckets[source].append(ca)
             candidate_sources[ca] = source
 
-    # V11.35 FAST DISCOVERY: keyless/public feeds are fetched in parallel.
+    # LIVE WS candidates get first priority, then REST feeds refill the radar.
+    live_ws_selected = []
+    for ca, source, _ts in live_ws_rows:
+        if ca in used:
+            continue
+        used.add(ca)
+        live_ws_selected.append(ca)
+        candidate_sources[ca] = source if source in buckets else "DEX"
+
+    # V11.36 FAST DISCOVERY: keyless/public feeds are fetched in parallel.
     # This reduces discovery latency without weakening the unchanged RURU safety gates.
     def fetch_dex_candidates():
         found = []
@@ -743,7 +937,7 @@ def discovery_candidates():
         "METEORA": METEORA_TARGET,
         "DEX": DEX_TARGET,
     }
-    selected = []
+    selected = list(live_ws_selected)
     for source in ("BIRDEYE", "GECKO", "RAYDIUM", "METEORA", "DEX"):
         selected.extend(buckets[source][:limits[source]])
 
@@ -1939,7 +2133,7 @@ Yeni giris icin uygun degil."""
             now_diag = time.time()
             if now_diag - last_diag_send >= 300 and stats.get("watch", 0) == 0 and stats.get("signal", 0) == 0:
                 diag = (
-                    f"RADAR V11.34 | total={stats.get('radar',0)} "
+                    f"RADAR V11.36 | total={stats.get('radar',0)} "
                     f"new={stats.get('unique_new',0)} repeat={stats.get('repeat',0)}\n"
                     f"SOURCES: BIRDEYE={stats.get('src_birdeye',0)} stale={stats.get('src_birdeye_stale',0)} safe={stats.get('src_birdeye_safe',0)} | "
                     f"GECKO={stats.get('src_gecko',0)} stale={stats.get('src_gecko_stale',0)} safe={stats.get('src_gecko_safe',0)} | "
@@ -1995,7 +2189,8 @@ Yeni giris icin uygun degil."""
         except Exception as e:
             print("SCANNER ERROR:", repr(e), flush=True)
 
-        time.sleep(SCAN_INTERVAL)
+        ws_wake_event.wait(timeout=SCAN_INTERVAL)
+        ws_wake_event.clear()
 
 def process_message(message):
     chat = message.get("chat") or {}
@@ -2044,7 +2239,7 @@ Liquidity Drain Guard: AKTIF (hard %{LIQ_DRAIN_HARD_PCT:.0f})
 ğŸ¯ Watch Score: {WATCH_SCORE}
 ğŸ”¥ Signal Score: {SIGNAL_SCORE}
 ğŸ“ˆ Trend teyidi: {TREND_CONFIRM_SCANS} tarama / min momentum {MIN_MOMENTUM_SIGNAL}
-ğŸ“¡ Radar: {"BIRDEYE + GECKO + RAYDIUM + METEORA + DEX" if BIRDEYE_API_KEY else "GECKO + RAYDIUM + METEORA + DEX"}
+ğŸ“¡ Radar: {"SOLANA WS + BIRDEYE + GECKO + RAYDIUM + METEORA + DEX" if BIRDEYE_API_KEY else "SOLANA WS + GECKO + RAYDIUM + METEORA + DEX"}
 ğŸŸ¢ Birdeye API: {"BAÄLI" if BIRDEYE_API_KEY else "KEY YOK"}
 â± Birdeye yenileme: {BIRDEYE_POLL_INTERVAL} sn
 ğŸ’§ Min Likidite: {money(MIN_LIQUIDITY)}
@@ -2168,12 +2363,13 @@ def startup_notify():
 
 Early Hunter: ACTIVE
 Scan: {SCAN_INTERVAL} sec
-Radar: {"BIRDEYE + GECKO + RAYDIUM + METEORA + DEX" if BIRDEYE_API_KEY else "GECKO + RAYDIUM + METEORA + DEX"}
+Radar: {"SOLANA WS + BIRDEYE + GECKO + RAYDIUM + METEORA + DEX" if BIRDEYE_API_KEY else "SOLANA WS + GECKO + RAYDIUM + METEORA + DEX"}
 Birdeye: {"CONNECTED" if BIRDEYE_API_KEY else "KEY MISSING"}\nBirdeye Fresh: official 20/request + rolling unique cache / CU-safe 180 sec\nRadar Mix: FIX2 multi-source; Gecko + Raydium + Meteora primary, DEX max 20 fallback
 Watch Score: {WATCH_SCORE}
 Signal Score: {SIGNAL_SCORE}
 Min Liquidity: {money(MIN_LIQUIDITY)}
 Mode: {mode}
+Solana WS: {"CONNECTED/STARTING" if SOLANA_WS_URL else "MISSING"}
 
 Early Entry: MC $1K+, Liquidity $800+, Top10 <75%\nHard rug/honeypot and authority checks remain active.\n\nSTATE DECISION LOCK + CENTRAL OUTPUT + LIQ FALLBACK: ACTIVE.\nAutomatic signal engine is running.""")
 
@@ -2194,6 +2390,7 @@ def startup():
         f"BIRDEYE API KEY: {'READY' if BIRDEYE_API_KEY else 'MISSING'}",
         flush=True,
     )
+    print(f"SOLANA WS URL: {'READY' if SOLANA_WS_URL else 'MISSING'}", flush=True)
     try:
         telegram("deleteWebhook", {"drop_pending_updates": "false"})
     except Exception as e:
@@ -2234,6 +2431,7 @@ if __name__ == "__main__":
     load_state()
     threading.Thread(target=health_server, daemon=True).start()
     startup()
+    threading.Thread(target=solana_ws_listener, daemon=True).start()
     threading.Thread(target=auto_scanner, daemon=True).start()
     time.sleep(2)
     startup_notify()
