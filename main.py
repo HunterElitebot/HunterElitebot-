@@ -2,13 +2,14 @@ import os, json, time, threading, urllib.request, urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-VERSION='HUNTERELITE CREATOR HUNTER V2.2 LIVE-ONLY'
+VERSION='HUNTERELITE CREATOR HUNTER V2.3 STRICT-CREATE'
 TOKEN=os.getenv('TOKEN','').strip()
 SIGNAL_CHAT_ID=os.getenv('SIGNAL_CHAT_ID','').strip()
 RPC=os.getenv('SOLANA_RPC_URL','https://api.mainnet-beta.solana.com').strip()
 SCAN=max(3,int(os.getenv('CREATOR_SCAN_SECONDS','5')))
 DISCOVERY=max(20,int(os.getenv('DISCOVERY_SCAN_SECONDS','45')))
 PROMOTE_MC=float(os.getenv('CREATOR_PROMOTE_MC','250000'))
+AUTO_DISCOVERY=os.getenv('CREATOR_AUTO_DISCOVERY','0').strip().lower() in ('1','true','yes','on')
 STATE=Path(os.getenv('CREATOR_STATE_FILE','creator_hunter_state.json'))
 PUMP_PROGRAM='6EF8rrecthR5DkR3dcoHj3hT9Yp5fYpJ2d7G7F6P'  # log/account hint only; create detection also uses mint suffix/logs
 SEEDS={
@@ -80,22 +81,30 @@ def signer_keys(t):
  except: return []
 
 def pump_create_info(t, creator=None):
- if not t: return None
- logs=((t.get('meta') or {}).get('logMessages') or [])
- txt='\n'.join(logs).lower(); keys=account_keys(t)
- # Pump create txs normally expose Create/CreateV2 in logs and a mint ending in pump.
- create=('instruction: create' in txt or 'createv2' in txt or 'program log: create' in txt)
- mints=[]
- for b in ((t.get('meta') or {}).get('postTokenBalances') or []):
-  m=b.get('mint');
-  if m and m not in mints: mints.append(m)
- for k in keys:
-  if isinstance(k,str) and k.endswith('pump') and k not in mints: mints.append(k)
- if not create and not mints: return None
- mint=next((m for m in mints if m.endswith('pump')), mints[0] if mints else None)
- if not mint: return None
- signers=signer_keys(t); owner=creator if creator in signers else (signers[0] if signers else creator)
- return {'mint':mint,'creator':owner,'logs':txt}
+ if not t or not creator: return None
+ try:
+  meta=t.get('meta') or {}
+  if meta.get('err') is not None: return None
+  signers=signer_keys(t)
+  if creator not in signers: return None
+  logs=meta.get('logMessages') or []
+  low=[str(x).lower() for x in logs]
+  create_log=any(('instruction: create' in x) or ('instruction: createv2' in x) or
+                 ('program log: create' in x) or ('program log: createv2' in x) for x in low)
+  if not create_log: return None
+  keys=account_keys(t)
+  mints=[]
+  for b in (meta.get('postTokenBalances') or []):
+   m=b.get('mint')
+   if m and m not in mints: mints.append(m)
+  pump_mints=[m for m in mints if isinstance(m,str) and m.endswith('pump')]
+  if not pump_mints:
+   pump_mints=[k for k in keys if isinstance(k,str) and k.endswith('pump')]
+  if not pump_mints: return None
+  return {'mint':pump_mints[0],'creator':creator,'logs':'\\n'.join(logs).lower()}
+ except Exception as e:
+  print('CREATE PARSE',repr(e),flush=True)
+  return None
 
 def bootstrap_creator(w):
  arr=sigs(w,5)
@@ -221,5 +230,5 @@ def health():
 if __name__=='__main__':
  load(); threading.Thread(target=health,daemon=True).start()
  print(VERSION,'ONLINE',flush=True); print('TRACKED CREATORS:',len(state['creators']),'PROMOTE_MC:',PROMOTE_MC,flush=True)
- tg(f"🦅 {VERSION} ONLINE\nTracked creators: {len(state['creators'])}\nCreator launch alerts: ACTIVE\nRug/holder entry gate: OFF FOR CREATOR ALERTS\nAuto-discovery: ACTIVE\nCreator scan: {SCAN}s")
- threading.Thread(target=discovery,daemon=True).start(); watch_creators()
+ tg(f"🦅 {VERSION} ONLINE\nTracked creators: {len(state['creators'])}\nCreator launch alerts: STRICT CREATE ONLY\nPast/backfill alerts: OFF\nCA required: YES\nAuto-discovery: {'ACTIVE' if AUTO_DISCOVERY else 'OFF'}\nCreator scan: {SCAN}s")
+ ((threading.Thread(target=discovery,daemon=True).start()) if AUTO_DISCOVERY else None); watch_creators()
